@@ -87,6 +87,53 @@ router.post('/vps', async (req, res) => {
   }
 });
 
+// Update an existing VPS / POD
+router.put('/vps/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, host, port, username, auth_type, password, private_key, type, pod_version } = req.body;
+
+    if (!name || !host) {
+      return res.status(400).json({ success: false, error: 'Name and Host IP are required.' });
+    }
+
+    const serverType = (type === 'pod' || type === 'vps') ? type : 'vps';
+    const podVer = serverType === 'pod' ? (pod_version || 'v3') : '';
+
+    // Fetch existing server to preserve password/key if not explicitly changed
+    const existing = await db.get('SELECT * FROM servers WHERE id = ?', [id]);
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Server tidak ditemukan.' });
+    }
+
+    const finalPassword = (password && password !== '******') ? password : existing.password;
+    const finalPrivateKey = (private_key && private_key !== '******') ? private_key : existing.private_key;
+
+    await db.run(
+      `UPDATE servers SET
+        name = ?, host = ?, port = ?, username = ?, auth_type = ?,
+        password = ?, private_key = ?, type = ?, pod_version = ?
+       WHERE id = ?`,
+      [
+        name,
+        host,
+        port || 22,
+        username || 'root',
+        auth_type || 'password',
+        finalPassword,
+        finalPrivateKey,
+        serverType,
+        podVer,
+        id
+      ]
+    );
+
+    res.json({ success: true, message: 'Server VPS berhasil diperbarui.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Test SSH Connection
 router.post('/vps/test-connection', async (req, res) => {
   try {

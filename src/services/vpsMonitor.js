@@ -52,12 +52,25 @@ async function getLocalMetrics() {
       const graphics = await si.graphics();
       if (graphics && graphics.controllers && graphics.controllers.length > 0) {
         const gpu = graphics.controllers[0];
-        gpuName = gpu.model || gpu.vendor || 'GPU Controller';
-        gpuUsage = Math.round((gpu.utilizationGpu || 0) * 10) / 10;
-        gpuMemoryUsage = Math.round((gpu.utilizationMemory || 0) * 10) / 10;
-        gpuTemp = Math.round(gpu.temperatureGpu || 0);
+        const nameModel = (gpu.model || gpu.vendor || '').trim();
+        if (nameModel && nameModel !== 'N/A' && gpu.utilizationGpu !== null && gpu.utilizationGpu !== undefined && !isNaN(gpu.utilizationGpu)) {
+          gpuName = nameModel;
+          gpuUsage = Math.round((gpu.utilizationGpu || 0) * 10) / 10;
+          gpuMemoryUsage = Math.round((gpu.utilizationMemory || 0) * 10) / 10;
+          gpuTemp = Math.round(gpu.temperatureGpu || 0);
+        } else {
+          gpuName = 'N/A';
+          gpuUsage = 0;
+          gpuMemoryUsage = 0;
+          gpuTemp = 0;
+        }
       }
-    } catch (e) {}
+    } catch (e) {
+      gpuName = 'N/A';
+      gpuUsage = 0;
+      gpuMemoryUsage = 0;
+      gpuTemp = 0;
+    }
 
     return {
       cpuUsage: Math.round(load.currentLoad * 10) / 10,
