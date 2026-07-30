@@ -15,8 +15,8 @@ WORKDIR /app
 # Copy package management files
 COPY package*.json ./
 
-# Install project dependencies
-RUN npm install
+# Install project dependencies & rebuild native C++ modules for Docker Linux environment
+RUN npm install && npm rebuild better-sqlite3 --build-from-source
 
 # Copy application source code
 COPY . .
