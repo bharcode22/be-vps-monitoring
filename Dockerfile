@@ -1,11 +1,12 @@
 FROM node:20-slim
 
-# Install system dependencies for native build and curl for healthcheck
+# Install system build dependencies and libsqlite3-dev for native C++ compilation
 RUN apt-get update && apt-get install -y \
     python3 \
     make \
     g++ \
     sqlite3 \
+    libsqlite3-dev \
     curl \
     openssh-client \
     && rm -rf /var/lib/apt/lists/*
@@ -15,8 +16,8 @@ WORKDIR /app
 # Copy package management files
 COPY package*.json ./
 
-# Install project dependencies
-RUN npm install
+# Install project dependencies & compile sqlite3 from source against container's GLIBC version
+RUN npm install && npm rebuild sqlite3 --build-from-source
 
 # Copy application source code
 COPY . .
