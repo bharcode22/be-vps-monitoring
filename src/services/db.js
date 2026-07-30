@@ -74,12 +74,17 @@ async function initDb() {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         server_id INTEGER NOT NULL,
         cpu_usage REAL DEFAULT 0,
+        cpu_cores INTEGER DEFAULT 1,
         ram_usage REAL DEFAULT 0,
         ram_used_mb REAL DEFAULT 0,
+        ram_free_mb REAL DEFAULT 0,
         ram_total_mb REAL DEFAULT 0,
         bandwidth_rx_speed REAL DEFAULT 0,
         bandwidth_tx_speed REAL DEFAULT 0,
         disk_usage REAL DEFAULT 0,
+        disk_used_gb REAL DEFAULT 0,
+        disk_total_gb REAL DEFAULT 0,
+        disk_free_gb REAL DEFAULT 0,
         gpu_usage REAL DEFAULT 0,
         gpu_memory_usage REAL DEFAULT 0,
         gpu_name TEXT DEFAULT '',
@@ -100,6 +105,11 @@ async function initDb() {
       await dbAsync.exec("ALTER TABLE servers ADD COLUMN pod_version TEXT DEFAULT ''");
     } catch (e) { }
 
+    try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN cpu_cores INTEGER DEFAULT 1"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN ram_free_mb REAL DEFAULT 0"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN disk_used_gb REAL DEFAULT 0"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN disk_total_gb REAL DEFAULT 0"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN disk_free_gb REAL DEFAULT 0"); } catch (e) { }
     try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN gpu_usage REAL DEFAULT 0"); } catch (e) { }
     try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN gpu_memory_usage REAL DEFAULT 0"); } catch (e) { }
     try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN gpu_name TEXT DEFAULT ''"); } catch (e) { }
