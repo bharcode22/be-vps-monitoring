@@ -1,23 +1,21 @@
-FROM node:20-slim
+FROM node:20-alpine
 
-# Install system build dependencies and libsqlite3-dev for native C++ compilation
-RUN apt-get update && apt-get install -y \
+# Install build dependencies for native modules and SSH client
+RUN apk add --no-cache \
     python3 \
     make \
     g++ \
-    sqlite3 \
-    libsqlite3-dev \
+    sqlite-dev \
     curl \
-    openssh-client \
-    && rm -rf /var/lib/apt/lists/*
+    openssh-client
 
 WORKDIR /app
 
 # Copy package management files
 COPY package*.json ./
 
-# Install project dependencies & compile sqlite3 from source against container's GLIBC version
-RUN npm install && npm rebuild sqlite3 --build-from-source
+# Install project production dependencies
+RUN npm install --omit=dev
 
 # Copy application source code
 COPY . .
