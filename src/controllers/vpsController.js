@@ -73,28 +73,40 @@ const getAllServers = async (req, res) => {
  */
 const createServer = async (req, res) => {
   try {
-    const { name, host, port, username, auth_type, password, private_key, type, pod_version } = req.body;
+    const {
+      name, host, port, username, auth_type, password, private_key, type, pod_version,
+      db_name, db_user, s3_endpoint, s3_access_key, s3_secret_key, s3_region, s3_bucket
+    } = req.body;
 
-    if (!name || !host) {
-      return res.status(400).json({ success: false, error: 'Name and Host IP are required.' });
+    const serverType = ['vps', 'pod', 'postgresql', 'minio', 's3'].includes(type) ? type : 'vps';
+    const targetHost = host || s3_endpoint || (serverType === 's3' ? 's3.amazonaws.com' : '');
+
+    if (!name || !targetHost) {
+      return res.status(400).json({ success: false, error: 'Nama Layanan dan Host IP / Endpoint wajib diisi.' });
     }
 
-    const serverType = (type === 'pod' || type === 'vps') ? type : 'vps';
     const podVer = serverType === 'pod' ? (pod_version || 'v3') : '';
 
     const result = await db.run(
-      `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type, pod_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type, pod_version, db_name, db_user, s3_endpoint, s3_access_key, s3_secret_key, s3_region, s3_bucket)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name,
-        host,
-        port || 22,
-        username || 'pod',
+        targetHost,
+        port || (serverType === 'postgresql' ? 5432 : (serverType === 'minio' ? 9000 : 22)),
+        username || 'root',
         auth_type || 'password',
         password || null,
         private_key || null,
         serverType,
-        podVer
+        podVer,
+        db_name || '',
+        db_user || '',
+        s3_endpoint || '',
+        s3_access_key || '',
+        s3_secret_key || '',
+        s3_region || 'us-east-1',
+        s3_bucket || ''
       ]
     );
 
@@ -109,18 +121,23 @@ const createServer = async (req, res) => {
 };
 
 /**
- * Update an existing VPS / POD server configuration
+ * Update an existing VPS / POD / Postgres / Storage server configuration
  */
 const updateServer = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, host, port, username, auth_type, password, private_key, type, pod_version } = req.body;
+    const {
+      name, host, port, username, auth_type, password, private_key, type, pod_version,
+      db_name, db_user, s3_endpoint, s3_access_key, s3_secret_key, s3_region, s3_bucket
+    } = req.body;
 
-    if (!name || !host) {
-      return res.status(400).json({ success: false, error: 'Name and Host IP are required.' });
+    const serverType = ['vps', 'pod', 'postgresql', 'minio', 's3'].includes(type) ? type : 'vps';
+    const targetHost = host || s3_endpoint || (serverType === 's3' ? 's3.amazonaws.com' : '');
+
+    if (!name || !targetHost) {
+      return res.status(400).json({ success: false, error: 'Nama Layanan dan Host IP / Endpoint wajib diisi.' });
     }
 
-    const serverType = (type === 'pod' || type === 'vps') ? type : 'vps';
     const podVer = serverType === 'pod' ? (pod_version || 'v3') : '';
 
     // Fetch existing server to preserve password/key if not explicitly changed
@@ -135,18 +152,26 @@ const updateServer = async (req, res) => {
     await db.run(
       `UPDATE servers SET
         name = ?, host = ?, port = ?, username = ?, auth_type = ?,
-        password = ?, private_key = ?, type = ?, pod_version = ?
+        password = ?, private_key = ?, type = ?, pod_version = ?,
+        db_name = ?, db_user = ?, s3_endpoint = ?, s3_access_key = ?, s3_secret_key = ?, s3_region = ?, s3_bucket = ?
        WHERE id = ?`,
       [
         name,
-        host,
-        port || 22,
-        username || 'pod',
+        targetHost,
+        port || (serverType === 'postgresql' ? 5432 : (serverType === 'minio' ? 9000 : 22)),
+        username || 'root',
         auth_type || 'password',
         finalPassword,
         finalPrivateKey,
         serverType,
         podVer,
+        db_name || '',
+        db_user || '',
+        s3_endpoint || '',
+        s3_access_key || '',
+        s3_secret_key || '',
+        s3_region || 'us-east-1',
+        s3_bucket || '',
         id
       ]
     );
@@ -155,7 +180,7 @@ const updateServer = async (req, res) => {
     const io = req.app.get('io');
     if (io) collectAllServerMetrics(io);
 
-    res.json({ success: true, message: 'Server VPS berhasil diperbarui.' });
+    res.json({ success: true, message: 'Data konfigurasi berhasil diperbarui.' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -181,27 +206,53 @@ const deleteServer = async (req, res) => {
 };
 
 /**
- * Test SSH connection before saving
+ * Test Connection before saving
  */
 const testConnection = async (req, res) => {
   try {
-    const { host, port, username, auth_type, password, private_key } = req.body;
+    const {
+      host, port, username, auth_type, password, private_key, type,
+      db_name, db_user, s3_endpoint, s3_access_key, s3_secret_key, s3_region, s3_bucket
+    } = req.body;
+
     const dummyServer = {
       id: 99999,
       host,
-      port: port || 22,
-      username: username || 'pod',
+      port: port || (type === 'postgresql' ? 5432 : 22),
+      username: username || 'root',
       auth_type: auth_type || 'password',
       password,
-      private_key
+      private_key,
+      type,
+      db_name,
+      db_user,
+      s3_endpoint,
+      s3_access_key,
+      s3_secret_key,
+      s3_region,
+      s3_bucket
     };
 
-    const metrics = await getRemoteSSHMetrics(dummyServer);
-    if (metrics.status === 'offline') {
-      return res.json({ success: false, message: 'Gagal terhubung ke VPS via SSH. Periksa IP, Port, dan Kredensial.' });
+    const { getPostgresMetrics } = require('../services/monitor/dbCollector');
+    const { getS3Metrics } = require('../services/monitor/s3Collector');
+
+    let metrics;
+    if (type === 'postgresql') {
+      metrics = await getPostgresMetrics(dummyServer);
+    } else if (type === 'minio' || type === 's3') {
+      metrics = await getS3Metrics(dummyServer);
+    } else {
+      metrics = await getRemoteSSHMetrics(dummyServer);
     }
 
-    res.json({ success: true, message: 'Koneksi SSH berhasil!', metrics });
+    if (metrics.status === 'offline') {
+      return res.json({
+        success: false,
+        message: metrics.error || 'Gagal terhubung ke layanan infrastruktur. Periksa Host, Port, dan Kredensial.'
+      });
+    }
+
+    res.json({ success: true, message: 'Koneksi ke layanan berhasil terverifikasi!', metrics });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

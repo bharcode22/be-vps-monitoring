@@ -3,6 +3,7 @@ const router = express.Router();
 const vpsController = require('../controllers/vpsController');
 const authController = require('../controllers/authController');
 const dockerController = require('../controllers/dockerController');
+const scriptController = require('../controllers/scriptController');
 const { requireAuth, requireSuperAdmin } = require('../middleware/authMiddleware');
 
 // Health check endpoint
@@ -32,5 +33,8 @@ router.post('/settings', requireAuth, vpsController.saveSetting);
 router.get('/vps/:id/docker', requireAuth, dockerController.getContainers);
 router.post('/vps/:id/docker/restart', requireAuth, dockerController.restartContainer);
 router.get('/vps/:id/docker/:containerName/logs', requireAuth, dockerController.getContainerLogs);
+
+// Protected VPS Exec Script routes (Requires Approved Admin Login)
+router.post('/vps/:id/scripts/run', requireAuth, scriptController.executeScript);
 
 module.exports = router;

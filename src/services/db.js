@@ -124,13 +124,15 @@ async function initDb() {
     } catch (e) { }
 
     // Migration for existing tables
-    try {
-      await dbAsync.exec("ALTER TABLE servers ADD COLUMN type TEXT DEFAULT 'vps'");
-    } catch (e) { }
-
-    try {
-      await dbAsync.exec("ALTER TABLE servers ADD COLUMN pod_version TEXT DEFAULT ''");
-    } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE servers ADD COLUMN type TEXT DEFAULT 'vps'"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE servers ADD COLUMN pod_version TEXT DEFAULT ''"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE servers ADD COLUMN db_name TEXT DEFAULT ''"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE servers ADD COLUMN db_user TEXT DEFAULT ''"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE servers ADD COLUMN s3_endpoint TEXT DEFAULT ''"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE servers ADD COLUMN s3_access_key TEXT DEFAULT ''"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE servers ADD COLUMN s3_secret_key TEXT DEFAULT ''"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE servers ADD COLUMN s3_region TEXT DEFAULT 'us-east-1'"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE servers ADD COLUMN s3_bucket TEXT DEFAULT ''"); } catch (e) { }
 
     try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN cpu_cores INTEGER DEFAULT 1"); } catch (e) { }
     try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN ram_free_mb REAL DEFAULT 0"); } catch (e) { }

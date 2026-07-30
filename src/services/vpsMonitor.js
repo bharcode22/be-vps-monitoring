@@ -1,6 +1,8 @@
 const db = require('./db');
 const { getLocalMetrics } = require('./monitor/localCollector');
 const { getRemoteSSHMetrics } = require('./monitor/sshCollector');
+const { getPostgresMetrics } = require('./monitor/dbCollector');
+const { getS3Metrics } = require('./monitor/s3Collector');
 
 // In-memory cache tracking the last SQLite DB insert timestamp per server
 const lastDbSaveTimes = {};
@@ -16,7 +18,11 @@ async function collectAllServerMetrics(io) {
 
   for (const server of servers) {
     let metrics;
-    if (server.is_local === 1) {
+    if (server.type === 'postgresql') {
+      metrics = await getPostgresMetrics(server);
+    } else if (server.type === 'minio' || server.type === 's3') {
+      metrics = await getS3Metrics(server);
+    } else if (server.is_local === 1) {
       metrics = await getLocalMetrics();
     } else {
       metrics = await getRemoteSSHMetrics(server);

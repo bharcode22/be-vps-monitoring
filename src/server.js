@@ -7,6 +7,7 @@ const cors = require('cors');
 const { Server } = require('socket.io');
 const vpsRoutes = require('./routes/vpsRoutes');
 const { collectAllServerMetrics } = require('./services/vpsMonitor');
+const { registerDockerStreamHandlers } = require('./services/dockerLogStreamer');
 
 const app = express();
 const server = http.createServer(app);
@@ -33,6 +34,9 @@ io.on('connection', (socket) => {
 
   // Immediately collect and send metrics on connection
   collectAllServerMetrics(io);
+
+  // Register real-time Docker Log Streaming handlers
+  registerDockerStreamHandlers(socket, io);
 
   socket.on('disconnect', () => {
     console.log(`❌ Client disconnected: ${socket.id}`);
