@@ -94,7 +94,34 @@ async function initDb() {
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
       );
+
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT UNIQUE NOT NULL,
+        name TEXT,
+        picture TEXT,
+        role TEXT DEFAULT 'admin',
+        status TEXT DEFAULT 'pending',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
     `);
+
+    // Seed initial Super Admin
+    const superAdminEmail = process.env.SUPER_ADMIN_EMAIL || 'zaqqwer758@gmail.com';
+    try {
+      await dbAsync.run(
+        `INSERT INTO users (email, name, role, status) VALUES (?, ?, ?, ?)
+         ON CONFLICT(email) DO UPDATE SET role = 'super_admin', status = 'approved'`,
+        [superAdminEmail, 'Super Admin', 'super_admin', 'approved']
+      );
+    } catch (e) { }
 
     // Migration for existing tables
     try {
@@ -130,3 +157,5 @@ async function initDb() {
 initDb();
 
 module.exports = dbAsync;
+module.exports.dbAsync = dbAsync;
+module.exports.db = db;

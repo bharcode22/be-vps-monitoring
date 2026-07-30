@@ -1,5 +1,6 @@
 // Suppress dotenv banner logs in stdout/docker logs
-require('dotenv').config({ quiet: true });
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../.env'), quiet: true });
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
@@ -21,6 +22,7 @@ const PORT = process.env.PORT || 5002;
 // Middlewares
 app.use(cors());
 app.use(express.json());
+app.set('io', io);
 
 // Routes
 app.use('/api', vpsRoutes);
