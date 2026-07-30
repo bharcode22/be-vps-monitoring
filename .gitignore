@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Environment Variables (SENSITIVE - Do NOT commit passwords/keys)
+.env
+.env.*
+!.env.example
+
+# SQLite Database Data directory (Contains VPS credentials & performance history)
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Operating System Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo

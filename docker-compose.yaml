@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vps-monitor-backend
+    restart: always
+    ports:
+      - "5002:5002"
+    env_file:
+      - .env
+    volumes:
+      # Persistent volume for SQLite database so VPS config is saved permanently
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5002/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
