@@ -9,17 +9,16 @@ router.get('/health', (req, res) => {
 });
 
 // Get all registered VPS servers
-router.get('/vps', (req, res) => {
+router.get('/vps', async (req, res) => {
   try {
-    const servers = db.prepare('SELECT id, name, host, port, username, auth_type, is_local, created_at FROM servers').all();
+    const servers = await db.all('SELECT id, name, host, port, username, auth_type, is_local, created_at FROM servers');
     
     // Fetch latest metrics for each server
-    const result = servers.map(server => {
-      const latestMetrics = db.prepare(`
-        SELECT * FROM metrics_history 
-        WHERE server_id = ? 
-        ORDER BY timestamp DESC LIMIT 1
-      `).get(server.id);
+    const result = await Promise.all(servers.map(async (server) => {
+      const latestMetrics = await db.get(
+        'SELECT * FROM metrics_history WHERE server_id = ? ORDER BY timestamp DESC LIMIT 1',
+        [server.id]
+      );
 
       return {
         ...server,
@@ -35,7 +34,7 @@ router.get('/vps', (req, res) => {
           status: 'unknown'
         }
       };
-    });
+    }));
 
     res.json({ success: true, data: result });
   } catch (err) {
@@ -44,7 +43,7 @@ router.get('/vps', (req, res) => {
 });
 
 // Add a new VPS
-router.post('/vps', (req, res) => {
+router.post('/vps', async (req, res) => {
   try {
     const { name, host, port, username, auth_type, password, private_key } = req.body;
 
@@ -52,19 +51,18 @@ router.post('/vps', (req, res) => {
       return res.status(400).json({ success: false, error: 'Name and Host IP are required.' });
     }
 
-    const stmt = db.prepare(`
-      INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-    `);
-
-    const result = stmt.run(
-      name,
-      host,
-      port || 22,
-      username || 'root',
-      auth_type || 'password',
-      password || null,
-      private_key || null
+    const result = await db.run(
+      `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+      [
+        name,
+        host,
+        port || 22,
+        username || 'root',
+        auth_type || 'password',
+        password || null,
+        private_key || null
+      ]
     );
 
     res.json({ success: true, id: result.lastInsertRowid });
@@ -99,11 +97,11 @@ router.post('/vps/test-connection', async (req, res) => {
 });
 
 // Delete a VPS
-router.delete('/vps/:id', (req, res) => {
+router.delete('/vps/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    db.prepare('DELETE FROM servers WHERE id = ?').run(id);
-    db.prepare('DELETE FROM metrics_history WHERE server_id = ?').run(id);
+    await db.run('DELETE FROM servers WHERE id = ?', [id]);
+    await db.run('DELETE FROM metrics_history WHERE server_id = ?', [id]);
     res.json({ success: true, message: 'VPS berhasil dihapus.' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -111,16 +109,17 @@ router.delete('/vps/:id', (req, res) => {
 });
 
 // Get historical metrics for a VPS (for charts)
-router.get('/vps/:id/history', (req, res) => {
+router.get('/vps/:id/history', async (req, res) => {
   try {
     const { id } = req.params;
-    const history = db.prepare(`
-      SELECT cpu_usage, ram_usage, ram_used_mb, ram_total_mb, bandwidth_rx_speed, bandwidth_tx_speed, disk_usage, ping_ms, timestamp
-      FROM metrics_history
-      WHERE server_id = ?
-      ORDER BY timestamp DESC
-      LIMIT 60
-    `).all(id);
+    const history = await db.all(
+      `SELECT cpu_usage, ram_usage, ram_used_mb, ram_total_mb, bandwidth_rx_speed, bandwidth_tx_speed, disk_usage, ping_ms, timestamp
+       FROM metrics_history
+       WHERE server_id = ?
+       ORDER BY timestamp DESC
+       LIMIT 60`,
+      [id]
+    );
 
     res.json({ success: true, data: history.reverse() });
   } catch (err) {

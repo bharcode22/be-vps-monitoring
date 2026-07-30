@@ -250,7 +250,7 @@ function parseSSHOutput(serverId, rawOutput, pingMs) {
  * Poll all servers in database and record metrics
  */
 async function collectAllServerMetrics(io) {
-  const servers = db.prepare('SELECT * FROM servers').all();
+  const servers = await db.all('SELECT * FROM servers');
   const results = [];
 
   for (const server of servers) {
@@ -262,22 +262,23 @@ async function collectAllServerMetrics(io) {
     }
 
     // Save to database metrics_history table
-    db.prepare(`
-      INSERT INTO metrics_history (
+    await db.run(
+      `INSERT INTO metrics_history (
         server_id, cpu_usage, ram_usage, ram_used_mb, ram_total_mb,
         bandwidth_rx_speed, bandwidth_tx_speed, disk_usage, ping_ms, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      server.id,
-      metrics.cpuUsage,
-      metrics.ramUsage,
-      metrics.ramUsedMb,
-      metrics.ramTotalMb,
-      metrics.bandwidthRxSpeed,
-      metrics.bandwidthTxSpeed,
-      metrics.diskUsage,
-      metrics.pingMs,
-      metrics.status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        server.id,
+        metrics.cpuUsage,
+        metrics.ramUsage,
+        metrics.ramUsedMb,
+        metrics.ramTotalMb,
+        metrics.bandwidthRxSpeed,
+        metrics.bandwidthTxSpeed,
+        metrics.diskUsage,
+        metrics.pingMs,
+        metrics.status
+      ]
     );
 
     results.push({
@@ -290,7 +291,7 @@ async function collectAllServerMetrics(io) {
   }
 
   // Cleanup history older than 24 hours to keep DB lightweight
-  db.prepare(`DELETE FROM metrics_history WHERE timestamp < datetime('now', '-24 hours')`).run();
+  await db.run(`DELETE FROM metrics_history WHERE timestamp < datetime('now', '-24 hours')`);
 
   // Broadcast to Socket.io subscribers
   if (io) {

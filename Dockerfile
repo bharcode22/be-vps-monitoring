@@ -1,6 +1,6 @@
 FROM node:20-slim
 
-# Install system dependencies for better-sqlite3 native build and curl for healthcheck
+# Install system dependencies for native build and curl for healthcheck
 RUN apt-get update && apt-get install -y \
     python3 \
     make \
@@ -15,8 +15,8 @@ WORKDIR /app
 # Copy package management files
 COPY package*.json ./
 
-# Install project dependencies & rebuild native C++ modules for Docker Linux environment
-RUN npm install && npm rebuild better-sqlite3 --build-from-source
+# Install project dependencies
+RUN npm install
 
 # Copy application source code
 COPY . .
