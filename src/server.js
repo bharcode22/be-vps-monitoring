@@ -1,9 +1,5 @@
-const fs = require('fs');
-const path = require('path');
-const envPath = path.resolve(process.cwd(), '.env');
-if (fs.existsSync(envPath)) {
-  require('dotenv').config({ path: envPath });
-}
+// Suppress dotenv banner logs in stdout/docker logs
+require('dotenv').config({ quiet: true });
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
