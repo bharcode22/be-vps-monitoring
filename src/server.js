@@ -1,4 +1,9 @@
-require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
+const envPath = path.resolve(process.cwd(), '.env');
+if (fs.existsSync(envPath)) {
+  require('dotenv').config({ path: envPath });
+}
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
