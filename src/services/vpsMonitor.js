@@ -51,18 +51,17 @@ async function getLocalMetrics() {
     try {
       const graphics = await si.graphics();
       if (graphics && graphics.controllers && graphics.controllers.length > 0) {
-        const gpu = graphics.controllers[0];
+        const gpu = graphics.controllers.find(c => (c.model || c.vendor)) || graphics.controllers[0];
         const nameModel = (gpu.model || gpu.vendor || '').trim();
-        if (nameModel && nameModel !== 'N/A' && gpu.utilizationGpu !== null && gpu.utilizationGpu !== undefined && !isNaN(gpu.utilizationGpu)) {
+        if (nameModel && nameModel.toLowerCase() !== 'n/a') {
           gpuName = nameModel;
-          gpuUsage = Math.round((gpu.utilizationGpu || 0) * 10) / 10;
-          gpuMemoryUsage = Math.round((gpu.utilizationMemory || 0) * 10) / 10;
+          gpuUsage = (gpu.utilizationGpu !== null && gpu.utilizationGpu !== undefined && !isNaN(gpu.utilizationGpu))
+            ? Math.round((gpu.utilizationGpu || 0) * 10) / 10
+            : 0;
+          gpuMemoryUsage = (gpu.utilizationMemory !== null && gpu.utilizationMemory !== undefined && !isNaN(gpu.utilizationMemory))
+            ? Math.round((gpu.utilizationMemory || 0) * 10) / 10
+            : 0;
           gpuTemp = Math.round(gpu.temperatureGpu || 0);
-        } else {
-          gpuName = 'N/A';
-          gpuUsage = 0;
-          gpuMemoryUsage = 0;
-          gpuTemp = 0;
         }
       }
     } catch (e) {
@@ -168,7 +167,7 @@ function getRemoteSSHMetrics(server) {
 
     conn.on('ready', () => {
       const cmd = `cat /proc/meminfo; echo "---NET---"; cat /proc/net/dev; echo "---DISK---"; df -k /; echo "---CPU---"; top -bn1 | head -n 5; echo "---GPU---"; nvidia-smi --query-gpu=utilization.gpu,utilization.memory,temperature.gpu,name --format=csv,noheader,nounits 2>/dev/null || echo "N/A"; echo "---CORES---"; nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "1"`;
-      
+
       conn.exec(cmd, (err, stream) => {
         if (err) {
           clearTimeout(timeout);
@@ -298,7 +297,7 @@ function parseSSHOutput(serverId, rawOutput, pingMs) {
         const availKb = parseInt(parts[3], 10) || 0;
         const matchPct = parts[4].match(/(\d+)%/);
         if (matchPct) diskUsage = parseInt(matchPct[1], 10);
-        
+
         diskTotalGb = Math.round((totalKb / 1048576) * 10) / 10;
         diskUsedGb = Math.round((usedKb / 1048576) * 10) / 10;
         diskFreeGb = Math.round((availKb / 1048576) * 10) / 10;
@@ -339,15 +338,15 @@ function parseSSHOutput(serverId, rawOutput, pingMs) {
     let gpuTemp = 0;
     let gpuName = 'N/A';
 
-    if (gpuText && !gpuText.includes('N/A')) {
-      const gpuLines = gpuText.split('\n');
-      if (gpuLines.length > 0 && gpuLines[0].includes(',')) {
-        const parts = gpuLines[0].split(',').map(p => p.trim());
-        if (parts.length >= 4) {
+    if (gpuText) {
+      const validLine = gpuText.split('\n').map(l => l.trim()).find(l => l.includes(','));
+      if (validLine) {
+        const parts = validLine.split(',').map(p => p.trim());
+        if (parts.length >= 4 && parts[3]) {
           gpuUsage = Math.min(100, Math.max(0, parseFloat(parts[0]) || 0));
           gpuMemoryUsage = Math.min(100, Math.max(0, parseFloat(parts[1]) || 0));
           gpuTemp = Math.max(0, parseFloat(parts[2]) || 0);
-          gpuName = parts[3] || 'NVIDIA GPU';
+          gpuName = parts[3];
         }
       }
     }
