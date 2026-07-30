@@ -66,6 +66,7 @@ async function initDb() {
         private_key TEXT,
         is_local INTEGER DEFAULT 0,
         type TEXT DEFAULT 'vps', -- 'vps' | 'pod'
+        pod_version TEXT DEFAULT '', -- 'v2' | 'v3' | ''
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
@@ -93,6 +94,10 @@ async function initDb() {
     // Migration for existing tables
     try {
       await dbAsync.exec("ALTER TABLE servers ADD COLUMN type TEXT DEFAULT 'vps'");
+    } catch (e) { }
+
+    try {
+      await dbAsync.exec("ALTER TABLE servers ADD COLUMN pod_version TEXT DEFAULT ''");
     } catch (e) { }
 
     try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN gpu_usage REAL DEFAULT 0"); } catch (e) { }

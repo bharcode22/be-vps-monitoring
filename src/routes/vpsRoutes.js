@@ -11,7 +11,7 @@ router.get('/health', (req, res) => {
 // Get all registered VPS servers
 router.get('/vps', async (req, res) => {
   try {
-    const servers = await db.all('SELECT id, name, host, port, username, auth_type, is_local, type, created_at FROM servers');
+    const servers = await db.all('SELECT id, name, host, port, username, auth_type, is_local, type, pod_version, created_at FROM servers');
 
     // Fetch latest metrics for each server
     const result = await Promise.all(servers.map(async (server) => {
@@ -23,6 +23,7 @@ router.get('/vps', async (req, res) => {
       return {
         ...server,
         type: server.type || 'vps',
+        pod_version: server.pod_version || '',
         currentMetrics: latestMetrics || {
           cpu_usage: 0,
           ram_usage: 0,
@@ -50,17 +51,18 @@ router.get('/vps', async (req, res) => {
 // Add a new VPS / POD
 router.post('/vps', async (req, res) => {
   try {
-    const { name, host, port, username, auth_type, password, private_key, type } = req.body;
+    const { name, host, port, username, auth_type, password, private_key, type, pod_version } = req.body;
 
     if (!name || !host) {
       return res.status(400).json({ success: false, error: 'Name and Host IP are required.' });
     }
 
     const serverType = (type === 'pod' || type === 'vps') ? type : 'vps';
+    const podVer = serverType === 'pod' ? (pod_version || 'v3') : '';
 
     const result = await db.run(
-      `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+      `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type, pod_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       [
         name,
         host,
@@ -69,7 +71,8 @@ router.post('/vps', async (req, res) => {
         auth_type || 'password',
         password || null,
         private_key || null,
-        serverType
+        serverType,
+        podVer
       ]
     );
 
