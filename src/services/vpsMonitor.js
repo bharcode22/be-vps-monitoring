@@ -31,7 +31,7 @@ async function getLocalMetrics() {
       });
     }
 
-    const rootFs = fs.find(f => f.mount === '/') || fs[0] || { use: 0, size: 0, used: 0, available: 0 };
+    const rootFs = fs.find(f => f.mount === '/System/Volumes/Data') || fs.find(f => f.mount === '/') || fs[0] || { use: 0, size: 0, used: 0, available: 0 };
 
     const cpuCores = cpuInfo.cores || cpuInfo.physicalCores || 1;
 
@@ -209,7 +209,7 @@ function getRemoteSSHMetrics(server) {
     }
 
     conn.on('ready', () => {
-      const cmd = `cat /proc/meminfo; echo "---FREE---"; free -m 2>/dev/null || echo "N/A"; echo "---NET---"; cat /proc/net/dev; echo "---DISK---"; df -k /; echo "---CPU---"; top -bn1 | head -n 5; echo "---GPU---"; nvidia-smi --query-gpu=utilization.gpu,utilization.memory,temperature.gpu,name --format=csv,noheader,nounits 2>/dev/null || echo "N/A"; echo "---CORES---"; nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "1"`;
+      const cmd = `cat /proc/meminfo; echo "---FREE---"; free -m 2>/dev/null || echo "N/A"; echo "---NET---"; cat /proc/net/dev; echo "---DISK---"; df -k /System/Volumes/Data 2>/dev/null || df -k /; echo "---CPU---"; top -bn1 | head -n 5; echo "---GPU---"; nvidia-smi --query-gpu=utilization.gpu,utilization.memory,temperature.gpu,name --format=csv,noheader,nounits 2>/dev/null || echo "N/A"; echo "---CORES---"; nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "1"`;
 
       conn.exec(cmd, (err, stream) => {
         if (err) {
@@ -294,69 +294,45 @@ function parseSSHOutput(serverId, rawOutput, pingMs) {
     const gpuText = sections[5] ? sections[5].trim() : '';
     const coresText = sections[6] ? sections[6].trim() : '';
 
-    // 1. RAM Parsing (htop algorithm: free -m & /proc/meminfo)
-    let ramTotalMb = 0;
-    let ramUsedMb = 0;
-    let ramFreeMb = 0;
-    let ramUsage = 0;
+    // 1. RAM Parsing (1:1 htop exact formula: MemTotal - MemAvailable)
+    let memTotalKb = 0;
+    let memFreeKb = 0;
+    let buffersKb = 0;
+    let cachedKb = 0;
+    let sreclaimableKb = 0;
+    let memAvailKb = 0;
 
-    let parsedFreeCmd = false;
+    const memTotalMatch = memText.match(/MemTotal:\s+(\d+)/);
+    const memFreeMatch = memText.match(/MemFree:\s+(\d+)/);
+    const buffersMatch = memText.match(/Buffers:\s+(\d+)/);
+    const cachedMatch = memText.match(/Cached:\s+(\d+)/);
+    const sreclaimableMatch = memText.match(/SReclaimable:\s+(\d+)/);
+    const memAvailMatch = memText.match(/MemAvailable:\s+(\d+)/);
 
-    // First try free -m for 1:1 htop exact match
-    if (freeText && !freeText.includes('N/A')) {
-      const memLine = freeText.split('\n').find(l => l.trim().startsWith('Mem:'));
-      if (memLine) {
-        const parts = memLine.trim().split(/\s+/);
-        if (parts.length >= 4) {
-          const tot = parseInt(parts[1], 10) || 0;
-          const usd = parseInt(parts[2], 10) || 0;
-          const avail = parts[6] ? (parseInt(parts[6], 10) || 0) : (parseInt(parts[3], 10) || 0);
-          if (tot > 0) {
-            ramTotalMb = tot;
-            ramUsedMb = usd;
-            ramFreeMb = avail;
-            ramUsage = Math.round((ramUsedMb / ramTotalMb) * 1000) / 10;
-            parsedFreeCmd = true;
-          }
-        }
-      }
+    if (memTotalMatch) memTotalKb = parseInt(memTotalMatch[1], 10);
+    if (memFreeMatch) memFreeKb = parseInt(memFreeMatch[1], 10);
+    if (buffersMatch) buffersKb = parseInt(buffersMatch[1], 10);
+    if (cachedMatch) cachedKb = parseInt(cachedMatch[1], 10);
+    if (sreclaimableMatch) sreclaimableKb = parseInt(sreclaimableMatch[1], 10);
+    if (memAvailMatch) memAvailKb = parseInt(memAvailMatch[1], 10);
+
+    let usedKb = 0;
+    let availKb = 0;
+
+    if (memAvailKb > 0) {
+      // Modern Linux & htop exact formula (MemTotal - MemAvailable)
+      usedKb = Math.max(0, memTotalKb - memAvailKb);
+      availKb = memAvailKb;
+    } else {
+      // Legacy fallback if MemAvailable is missing
+      availKb = memFreeKb + buffersKb + cachedKb + sreclaimableKb;
+      usedKb = Math.max(0, memTotalKb - availKb);
     }
 
-    // Fallback to /proc/meminfo if free -m wasn't available
-    if (!parsedFreeCmd) {
-      let memTotalKb = 0;
-      let memFreeKb = 0;
-      let buffersKb = 0;
-      let cachedKb = 0;
-      let sreclaimableKb = 0;
-      let shmemKb = 0;
-      let memAvailKb = 0;
-
-      const memTotalMatch = memText.match(/MemTotal:\s+(\d+)/);
-      const memFreeMatch = memText.match(/MemFree:\s+(\d+)/);
-      const buffersMatch = memText.match(/Buffers:\s+(\d+)/);
-      const cachedMatch = memText.match(/Cached:\s+(\d+)/);
-      const sreclaimableMatch = memText.match(/SReclaimable:\s+(\d+)/);
-      const shmemMatch = memText.match(/Shmem:\s+(\d+)/);
-      const memAvailMatch = memText.match(/MemAvailable:\s+(\d+)/);
-
-      if (memTotalMatch) memTotalKb = parseInt(memTotalMatch[1], 10);
-      if (memFreeMatch) memFreeKb = parseInt(memFreeMatch[1], 10);
-      if (buffersMatch) buffersKb = parseInt(buffersMatch[1], 10);
-      if (cachedMatch) cachedKb = parseInt(cachedMatch[1], 10);
-      if (sreclaimableMatch) sreclaimableKb = parseInt(sreclaimableMatch[1], 10);
-      if (shmemMatch) shmemKb = parseInt(shmemMatch[1], 10);
-      if (memAvailMatch) memAvailKb = parseInt(memAvailMatch[1], 10);
-
-      // Exact htop used memory formula: MemTotal - MemFree - Buffers - Cached - SReclaimable + Shmem
-      const calculatedUsedKb = Math.max(0, memTotalKb - memFreeKb - buffersKb - cachedKb - sreclaimableKb + shmemKb);
-      const effectiveAvailKb = memAvailKb > 0 ? memAvailKb : (memFreeKb + buffersKb + cachedKb + sreclaimableKb);
-
-      ramTotalMb = Math.round(memTotalKb / 1024);
-      ramUsedMb = Math.round(calculatedUsedKb / 1024);
-      ramFreeMb = Math.round(effectiveAvailKb / 1024);
-      ramUsage = ramTotalMb > 0 ? Math.round((ramUsedMb / ramTotalMb) * 1000) / 10 : 0;
-    }
+    const ramTotalMb = Math.round(memTotalKb / 1024);
+    const ramUsedMb = Math.round(usedKb / 1024);
+    const ramFreeMb = Math.round(availKb / 1024);
+    const ramUsage = ramTotalMb > 0 ? Math.round((ramUsedMb / ramTotalMb) * 1000) / 10 : 0;
 
     // 2. CPU Usage & Cores Parsing
     let cpuUsage = 0;
