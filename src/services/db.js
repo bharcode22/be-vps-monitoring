@@ -79,6 +79,10 @@ async function initDb() {
         bandwidth_rx_speed REAL DEFAULT 0,
         bandwidth_tx_speed REAL DEFAULT 0,
         disk_usage REAL DEFAULT 0,
+        gpu_usage REAL DEFAULT 0,
+        gpu_memory_usage REAL DEFAULT 0,
+        gpu_name TEXT DEFAULT '',
+        gpu_temp REAL DEFAULT 0,
         ping_ms REAL DEFAULT 0,
         status TEXT DEFAULT 'online',
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -89,9 +93,12 @@ async function initDb() {
     // Migration for existing tables
     try {
       await dbAsync.exec("ALTER TABLE servers ADD COLUMN type TEXT DEFAULT 'vps'");
-    } catch (e) {
-      // Column already exists
-    }
+    } catch (e) { }
+
+    try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN gpu_usage REAL DEFAULT 0"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN gpu_memory_usage REAL DEFAULT 0"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN gpu_name TEXT DEFAULT ''"); } catch (e) { }
+    try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN gpu_temp REAL DEFAULT 0"); } catch (e) { }
 
     const serverCount = await dbAsync.get('SELECT COUNT(*) as count FROM servers');
     if (serverCount && serverCount.count === 0) {

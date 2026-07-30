@@ -12,7 +12,7 @@ router.get('/health', (req, res) => {
 router.get('/vps', async (req, res) => {
   try {
     const servers = await db.all('SELECT id, name, host, port, username, auth_type, is_local, type, created_at FROM servers');
-    
+
     // Fetch latest metrics for each server
     const result = await Promise.all(servers.map(async (server) => {
       const latestMetrics = await db.get(
@@ -31,6 +31,10 @@ router.get('/vps', async (req, res) => {
           bandwidth_rx_speed: 0,
           bandwidth_tx_speed: 0,
           disk_usage: 0,
+          gpu_usage: 0,
+          gpu_memory_usage: 0,
+          gpu_name: 'N/A',
+          gpu_temp: 0,
           ping_ms: 0,
           status: 'unknown'
         }
@@ -117,7 +121,7 @@ router.get('/vps/:id/history', async (req, res) => {
   try {
     const { id } = req.params;
     const history = await db.all(
-      `SELECT cpu_usage, ram_usage, ram_used_mb, ram_total_mb, bandwidth_rx_speed, bandwidth_tx_speed, disk_usage, ping_ms, timestamp
+      `SELECT cpu_usage, ram_usage, ram_used_mb, ram_total_mb, bandwidth_rx_speed, bandwidth_tx_speed, disk_usage, gpu_usage, gpu_memory_usage, gpu_temp, ping_ms, timestamp
        FROM metrics_history
        WHERE server_id = ?
        ORDER BY timestamp DESC

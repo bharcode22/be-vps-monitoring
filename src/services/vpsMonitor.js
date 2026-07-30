@@ -32,6 +32,23 @@ async function getLocalMetrics() {
 
     const rootFs = fs.find(f => f.mount === '/') || fs[0] || { use: 0 };
 
+    // Fetch GPU Info if available locally
+    let gpuUsage = 0;
+    let gpuMemoryUsage = 0;
+    let gpuName = 'N/A';
+    let gpuTemp = 0;
+
+    try {
+      const graphics = await si.graphics();
+      if (graphics && graphics.controllers && graphics.controllers.length > 0) {
+        const gpu = graphics.controllers[0];
+        gpuName = gpu.model || gpu.vendor || 'GPU Controller';
+        gpuUsage = Math.round((gpu.utilizationGpu || 0) * 10) / 10;
+        gpuMemoryUsage = Math.round((gpu.utilizationMemory || 0) * 10) / 10;
+        gpuTemp = Math.round(gpu.temperatureGpu || 0);
+      }
+    } catch (e) {}
+
     return {
       cpuUsage: Math.round(load.currentLoad * 10) / 10,
       ramUsage: Math.round((mem.active / mem.total) * 1000) / 10,
@@ -40,6 +57,10 @@ async function getLocalMetrics() {
       bandwidthRxSpeed: Math.round(rxSpeed * 10) / 10,
       bandwidthTxSpeed: Math.round(txSpeed * 10) / 10,
       diskUsage: Math.round((rootFs.use || 0) * 10) / 10,
+      gpuUsage,
+      gpuMemoryUsage,
+      gpuName,
+      gpuTemp,
       pingMs: ping,
       status: 'online'
     };
@@ -53,6 +74,10 @@ async function getLocalMetrics() {
       bandwidthRxSpeed: 0,
       bandwidthTxSpeed: 0,
       diskUsage: 0,
+      gpuUsage: 0,
+      gpuMemoryUsage: 0,
+      gpuName: 'N/A',
+      gpuTemp: 0,
       pingMs: 0,
       status: 'error'
     };
@@ -80,6 +105,10 @@ function getRemoteSSHMetrics(server) {
           bandwidthRxSpeed: 0,
           bandwidthTxSpeed: 0,
           diskUsage: 0,
+          gpuUsage: 0,
+          gpuMemoryUsage: 0,
+          gpuName: 'N/A',
+          gpuTemp: 0,
           pingMs: 0,
           status: 'offline'
         });
@@ -100,13 +129,27 @@ function getRemoteSSHMetrics(server) {
     }
 
     conn.on('ready', () => {
-      const cmd = `cat /proc/meminfo; echo "---NET---"; cat /proc/net/dev; echo "---DISK---"; df -k /; echo "---CPU---"; top -bn1 | head -n 5`;
+      const cmd = `cat /proc/meminfo; echo "---NET---"; cat /proc/net/dev; echo "---DISK---"; df -k /; echo "---CPU---"; top -bn1 | head -n 5; echo "---GPU---"; nvidia-smi --query-gpu=utilization.gpu,utilization.memory,temperature.gpu,name --format=csv,noheader,nounits 2>/dev/null || echo "N/A"`;
       
       conn.exec(cmd, (err, stream) => {
         if (err) {
           clearTimeout(timeout);
           conn.end();
-          return resolve({ status: 'error', cpuUsage: 0, ramUsage: 0, ramUsedMb: 0, ramTotalMb: 0, bandwidthRxSpeed: 0, bandwidthTxSpeed: 0, diskUsage: 0, pingMs: Date.now() - startTime });
+          return resolve({
+            status: 'error',
+            cpuUsage: 0,
+            ramUsage: 0,
+            ramUsedMb: 0,
+            ramTotalMb: 0,
+            bandwidthRxSpeed: 0,
+            bandwidthTxSpeed: 0,
+            diskUsage: 0,
+            gpuUsage: 0,
+            gpuMemoryUsage: 0,
+            gpuName: 'N/A',
+            gpuTemp: 0,
+            pingMs: Date.now() - startTime
+          });
         }
 
         let output = '';
@@ -135,6 +178,10 @@ function getRemoteSSHMetrics(server) {
           bandwidthRxSpeed: 0,
           bandwidthTxSpeed: 0,
           diskUsage: 0,
+          gpuUsage: 0,
+          gpuMemoryUsage: 0,
+          gpuName: 'N/A',
+          gpuTemp: 0,
           pingMs: 0,
           status: 'offline'
         });
@@ -153,6 +200,7 @@ function parseSSHOutput(serverId, rawOutput, pingMs) {
     const netText = sections[1] || '';
     const diskText = sections[2] || '';
     const cpuText = sections[3] || '';
+    const gpuText = sections[4] ? sections[4].trim() : '';
 
     // 1. RAM Parsing (/proc/meminfo)
     let totalMemKb = 0;
@@ -219,6 +267,25 @@ function parseSSHOutput(serverId, rawOutput, pingMs) {
 
     prevNetStats[serverId] = { rxBytes, txBytes, timestamp: now };
 
+    // 5. GPU Parsing (nvidia-smi csv output)
+    let gpuUsage = 0;
+    let gpuMemoryUsage = 0;
+    let gpuTemp = 0;
+    let gpuName = 'N/A';
+
+    if (gpuText && !gpuText.includes('N/A')) {
+      const gpuLines = gpuText.split('\n');
+      if (gpuLines.length > 0 && gpuLines[0].includes(',')) {
+        const parts = gpuLines[0].split(',').map(p => p.trim());
+        if (parts.length >= 4) {
+          gpuUsage = Math.min(100, Math.max(0, parseFloat(parts[0]) || 0));
+          gpuMemoryUsage = Math.min(100, Math.max(0, parseFloat(parts[1]) || 0));
+          gpuTemp = Math.max(0, parseFloat(parts[2]) || 0);
+          gpuName = parts[3] || 'NVIDIA GPU';
+        }
+      }
+    }
+
     return {
       cpuUsage: Math.min(100, Math.max(0, cpuUsage)),
       ramUsage: Math.min(100, Math.max(0, ramUsage)),
@@ -227,6 +294,10 @@ function parseSSHOutput(serverId, rawOutput, pingMs) {
       bandwidthRxSpeed: Math.round(rxSpeed * 10) / 10,
       bandwidthTxSpeed: Math.round(txSpeed * 10) / 10,
       diskUsage: Math.min(100, Math.max(0, diskUsage)),
+      gpuUsage,
+      gpuMemoryUsage,
+      gpuName,
+      gpuTemp,
       pingMs,
       status: 'online'
     };
@@ -240,6 +311,10 @@ function parseSSHOutput(serverId, rawOutput, pingMs) {
       bandwidthRxSpeed: 0,
       bandwidthTxSpeed: 0,
       diskUsage: 0,
+      gpuUsage: 0,
+      gpuMemoryUsage: 0,
+      gpuName: 'N/A',
+      gpuTemp: 0,
       pingMs,
       status: 'online'
     };
@@ -265,8 +340,9 @@ async function collectAllServerMetrics(io) {
     await db.run(
       `INSERT INTO metrics_history (
         server_id, cpu_usage, ram_usage, ram_used_mb, ram_total_mb,
-        bandwidth_rx_speed, bandwidth_tx_speed, disk_usage, ping_ms, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        bandwidth_rx_speed, bandwidth_tx_speed, disk_usage,
+        gpu_usage, gpu_memory_usage, gpu_name, gpu_temp, ping_ms, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         server.id,
         metrics.cpuUsage,
@@ -276,6 +352,10 @@ async function collectAllServerMetrics(io) {
         metrics.bandwidthRxSpeed,
         metrics.bandwidthTxSpeed,
         metrics.diskUsage,
+        metrics.gpuUsage,
+        metrics.gpuMemoryUsage,
+        metrics.gpuName,
+        metrics.gpuTemp,
         metrics.pingMs,
         metrics.status
       ]
