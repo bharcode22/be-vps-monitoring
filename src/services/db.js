@@ -65,6 +65,7 @@ async function initDb() {
         password TEXT,
         private_key TEXT,
         is_local INTEGER DEFAULT 0,
+        type TEXT DEFAULT 'vps', -- 'vps' | 'pod'
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
@@ -85,11 +86,18 @@ async function initDb() {
       );
     `);
 
+    // Migration for existing tables
+    try {
+      await dbAsync.exec("ALTER TABLE servers ADD COLUMN type TEXT DEFAULT 'vps'");
+    } catch (e) {
+      // Column already exists
+    }
+
     const serverCount = await dbAsync.get('SELECT COUNT(*) as count FROM servers');
     if (serverCount && serverCount.count === 0) {
       await dbAsync.run(
-        `INSERT INTO servers (name, host, port, username, auth_type, is_local) VALUES (?, ?, ?, ?, ?, ?)`,
-        ['Host Server (Lokal)', '127.0.0.1', 22, 'local', 'local', 1]
+        `INSERT INTO servers (name, host, port, username, auth_type, is_local, type) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ['Host Server (Lokal)', '127.0.0.1', 22, 'local', 'local', 1, 'vps']
       );
     }
   } catch (err) {
