@@ -22,7 +22,11 @@ router.get('/auth/me', requireAuth, authController.getMe);
 router.get('/auth/users', requireAuth, requireSuperAdmin, authController.getAllUsers);
 router.put('/auth/users/:id/status', requireAuth, requireSuperAdmin, authController.updateUserStatus);
 
-// Protected VPS / POD Server CRUD routes (Requires Approved Admin Login)
+// Protected VPS / POD / Database / Storage Server CRUD routes (Requires Approved Admin Login)
+router.post('/vps/vps', requireAuth, vpsController.createVps);
+router.post('/vps/pod', requireAuth, vpsController.createPod);
+router.post('/vps/database', requireAuth, vpsController.createDatabase);
+router.post('/vps/storage', requireAuth, vpsController.createStorage);
 router.post('/vps', requireAuth, vpsController.createServer);
 router.put('/vps/:id', requireAuth, vpsController.updateServer);
 router.delete('/vps/:id', requireAuth, vpsController.deleteServer);

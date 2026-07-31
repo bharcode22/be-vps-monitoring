@@ -69,55 +69,123 @@ const getAllServers = async (req, res) => {
 };
 
 /**
- * Add a new VPS / POD server
+ * Add Standar VPS Server
  */
-const createServer = async (req, res) => {
+const createVps = async (req, res) => {
   try {
-    const {
-      name, host, port, username, auth_type, password, private_key, type, pod_version,
-      db_name, db_user, s3_endpoint, s3_access_key, s3_secret_key, s3_region, s3_bucket
-    } = req.body;
-
-    const serverType = ['vps', 'pod', 'postgresql', 'minio', 's3'].includes(type) ? type : 'vps';
-    const targetHost = host || s3_endpoint || (serverType === 's3' ? 's3.amazonaws.com' : '');
-
-    if (!name || !targetHost) {
-      return res.status(400).json({ success: false, error: 'Nama Layanan dan Host IP / Endpoint wajib diisi.' });
+    const { name, host, port, username, auth_type, password, private_key } = req.body;
+    if (!name || !host) {
+      return res.status(400).json({ success: false, error: 'Nama Server dan Host IP wajib diisi.' });
     }
-
-    const podVer = serverType === 'pod' ? (pod_version || 'v3') : '';
-
     const result = await db.run(
       `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type, pod_version, db_name, db_user, s3_endpoint, s3_access_key, s3_secret_key, s3_region, s3_bucket)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        name,
-        targetHost,
-        port || (serverType === 'postgresql' ? 5432 : (serverType === 'minio' ? 9000 : 22)),
-        username || 'root',
-        auth_type || 'password',
-        password || null,
-        private_key || null,
-        serverType,
-        podVer,
-        db_name || '',
-        db_user || '',
-        s3_endpoint || '',
-        s3_access_key || '',
-        s3_secret_key || '',
-        s3_region || 'us-east-1',
-        s3_bucket || ''
-      ]
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'vps', '', '', '', '', '', '', '', '')`,
+      [name, host, port || 22, username || 'root', auth_type || 'password', password || null, private_key || null]
     );
-
-    // Trigger instant WebSocket broadcast to all connected dashboards
     const io = req.app.get('io');
     if (io) collectAllServerMetrics(io);
-
     res.json({ success: true, id: result.lastInsertRowid });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
+};
+
+/**
+ * Add POD Container Server
+ */
+const createPod = async (req, res) => {
+  try {
+    const { name, host, port, username, auth_type, password, private_key, pod_version } = req.body;
+    if (!name || !host) {
+      return res.status(400).json({ success: false, error: 'Nama POD dan Host IP wajib diisi.' });
+    }
+    const result = await db.run(
+      `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type, pod_version, db_name, db_user, s3_endpoint, s3_access_key, s3_secret_key, s3_region, s3_bucket)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'pod', ?, '', '', '', '', '', '', '')`,
+      [name, host, port || 22, username || 'pod', auth_type || 'password', password || null, private_key || null, pod_version || 'v3']
+    );
+    const io = req.app.get('io');
+    if (io) collectAllServerMetrics(io);
+    res.json({ success: true, id: result.lastInsertRowid });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * Add PostgreSQL Database
+ */
+const createDatabase = async (req, res) => {
+  try {
+    const { name, host, port, db_name, db_user, password } = req.body;
+    if (!name || !host) {
+      return res.status(400).json({ success: false, error: 'Nama Database dan Host IP wajib diisi.' });
+    }
+    const finalDbUser = db_user || 'postgres';
+    const result = await db.run(
+      `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type, pod_version, db_name, db_user, s3_endpoint, s3_access_key, s3_secret_key, s3_region, s3_bucket)
+       VALUES (?, ?, ?, ?, 'password', ?, NULL, 0, 'postgresql', '', ?, ?, '', '', '', '', '')`,
+      [name, host, port || 5432, finalDbUser, password || '', db_name || 'postgres', finalDbUser]
+    );
+    const io = req.app.get('io');
+    if (io) collectAllServerMetrics(io);
+    res.json({ success: true, id: result.lastInsertRowid });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * Add Object Storage (MinIO or AWS S3)
+ */
+const createStorage = async (req, res) => {
+  try {
+    const { name, type, host, port, s3_endpoint, s3_access_key, s3_secret_key, s3_region, s3_bucket } = req.body;
+    const storageType = (type === 's3') ? 's3' : 'minio';
+    const targetEndpoint = s3_endpoint || host || (storageType === 's3' ? 's3.amazonaws.com' : '');
+
+    if (!name || !targetEndpoint) {
+      return res.status(400).json({ success: false, error: 'Nama Storage dan Endpoint URL wajib diisi.' });
+    }
+
+    const accessKey = s3_access_key || '';
+    const secretKey = s3_secret_key || '';
+
+    const result = await db.run(
+      `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type, pod_version, db_name, db_user, s3_endpoint, s3_access_key, s3_secret_key, s3_region, s3_bucket)
+       VALUES (?, ?, ?, ?, 'key', ?, NULL, 0, ?, '', '', '', ?, ?, ?, ?, ?)`,
+      [
+        name,
+        targetEndpoint,
+        port || (storageType === 'minio' ? 9000 : 443),
+        accessKey, // username set to accessKey (NOT postgres!)
+        secretKey,
+        storageType,
+        targetEndpoint,
+        accessKey,
+        secretKey,
+        s3_region || 'us-east-1',
+        s3_bucket || ''
+      ]
+    );
+    const io = req.app.get('io');
+    if (io) collectAllServerMetrics(io);
+    res.json({ success: true, id: result.lastInsertRowid });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * General createServer Dispatcher
+ */
+const createServer = async (req, res) => {
+  const { type } = req.body;
+  if (type === 'vps') return createVps(req, res);
+  if (type === 'pod') return createPod(req, res);
+  if (type === 'postgresql') return createDatabase(req, res);
+  if (type === 'minio' || type === 's3') return createStorage(req, res);
+  return createVps(req, res);
 };
 
 /**
@@ -319,6 +387,10 @@ module.exports = {
   getHealth,
   getAllServers,
   createServer,
+  createVps,
+  createPod,
+  createDatabase,
+  createStorage,
   updateServer,
   deleteServer,
   testConnection,
