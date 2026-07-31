@@ -17,7 +17,7 @@ async function runVpsScript(server, scriptName) {
 
   return new Promise((resolve, reject) => {
     if (server.is_local === 1) {
-      exec(command, { timeout: 30000 }, (error, stdout, stderr) => {
+      exec(command, { timeout: 120000 }, (error, stdout, stderr) => {
         if (error && !stdout && !stderr) {
           return reject(new Error(`Gagal mengeksekusi skrip lokal: ${error.message}`));
         }
@@ -38,9 +38,9 @@ async function runVpsScript(server, scriptName) {
         if (!isHandled) {
           isHandled = true;
           conn.end();
-          reject(new Error('Koneksi SSH waktu habis saat mengeksekusi skrip (timeout 30 detik).'));
+          reject(new Error('Koneksi SSH waktu habis saat mengeksekusi skrip (timeout 120 detik).'));
         }
-      }, 30000);
+      }, 120000);
 
       const sshConfig = {
         host: server.host,
