@@ -12,7 +12,11 @@ const DB_SAVE_INTERVAL_MS = 15000; // Save history snapshot every 15 seconds (re
  * Poll all servers in database, record metrics into SQLite, and broadcast via Socket.io
  */
 async function collectAllServerMetrics(io) {
-  const servers = await db.all('SELECT * FROM servers');
+  const sshServers = await db.all('SELECT * FROM servers');
+  const dbServers = (await db.all('SELECT * FROM databases_postgres')).map(r => ({ ...r, type: 'postgresql', username: r.db_user }));
+  const storageServers = (await db.all('SELECT * FROM object_storages')).map(r => ({ ...r, host: r.s3_endpoint || 's3.amazonaws.com', username: r.s3_access_key }));
+
+  const servers = [...sshServers, ...dbServers, ...storageServers];
   const results = [];
   const now = Date.now();
 

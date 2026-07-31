@@ -111,6 +111,30 @@ async function initDb() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
+
+      CREATE TABLE IF NOT EXISTS databases_postgres (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        host TEXT NOT NULL,
+        port INTEGER DEFAULT 5432,
+        db_name TEXT DEFAULT 'postgres',
+        db_user TEXT DEFAULT 'postgres',
+        password TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS object_storages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL, -- 'minio' | 's3'
+        s3_endpoint TEXT,
+        s3_access_key TEXT,
+        s3_secret_key TEXT,
+        s3_region TEXT DEFAULT 'us-east-1',
+        s3_bucket TEXT,
+        port INTEGER DEFAULT 9000,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
     `);
 
     // Seed initial Super Admin
@@ -143,6 +167,32 @@ async function initDb() {
     try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN gpu_memory_usage REAL DEFAULT 0"); } catch (e) { }
     try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN gpu_name TEXT DEFAULT ''"); } catch (e) { }
     try { await dbAsync.exec("ALTER TABLE metrics_history ADD COLUMN gpu_temp REAL DEFAULT 0"); } catch (e) { }
+
+    // Auto-migrate legacy PostgreSQL records from servers table to databases_postgres
+    try {
+      const legacyDbs = await dbAsync.all("SELECT * FROM servers WHERE type = 'postgresql'");
+      for (const leg of legacyDbs) {
+        await dbAsync.run(
+          `INSERT INTO databases_postgres (name, host, port, db_name, db_user, password, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [leg.name, leg.host, leg.port || 5432, leg.db_name || 'postgres', leg.db_user || leg.username || 'postgres', leg.password, leg.created_at || new Date().toISOString()]
+        );
+        await dbAsync.run("DELETE FROM servers WHERE id = ?", [leg.id]);
+      }
+    } catch (e) {}
+
+    // Auto-migrate legacy Storage records from servers table to object_storages
+    try {
+      const legacyStorages = await dbAsync.all("SELECT * FROM servers WHERE type = 'minio' OR type = 's3'");
+      for (const leg of legacyStorages) {
+        await dbAsync.run(
+          `INSERT INTO object_storages (name, type, s3_endpoint, s3_access_key, s3_secret_key, s3_region, s3_bucket, port, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [leg.name, leg.type, leg.s3_endpoint || leg.host, leg.s3_access_key || leg.username, leg.s3_secret_key || leg.password, leg.s3_region || 'us-east-1', leg.s3_bucket || '', leg.port || 9000, leg.created_at || new Date().toISOString()]
+        );
+        await dbAsync.run("DELETE FROM servers WHERE id = ?", [leg.id]);
+      }
+    } catch (e) {}
 
     const serverCount = await dbAsync.get('SELECT COUNT(*) as count FROM servers');
     if (serverCount && serverCount.count === 0) {
