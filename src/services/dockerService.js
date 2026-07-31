@@ -125,6 +125,23 @@ async function restartDockerContainer(server, containerName) {
 }
 
 /**
+ * Stop a Docker container by name or ID
+ */
+async function stopDockerContainer(server, containerName) {
+  // Sanitize containerName to prevent command injection
+  const safeName = String(containerName).replace(/[^a-zA-Z0-9_\-\.]/g, '');
+  if (!safeName) throw new Error('Nama container tidak valid.');
+
+  const cmd = `docker stop ${safeName}`;
+  try {
+    const stdout = await executeCommand(server, cmd);
+    return { success: true, container: safeName, output: stdout.trim() };
+  } catch (err) {
+    throw new Error(`Gagal menghentikan (stop) container ${safeName}: ${err.message}`);
+  }
+}
+
+/**
  * Fetch last 100 lines of Docker container logs
  */
 async function getDockerContainerLogs(server, containerName) {
@@ -143,5 +160,6 @@ async function getDockerContainerLogs(server, containerName) {
 module.exports = {
   listDockerContainers,
   restartDockerContainer,
+  stopDockerContainer,
   getDockerContainerLogs
 };
