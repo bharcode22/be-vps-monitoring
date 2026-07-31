@@ -1,5 +1,6 @@
 const { exec } = require('child_process');
 const { Client } = require('ssh2');
+const path = require('path');
 
 /**
  * Execute command on local host or remote SSH server
@@ -7,7 +8,7 @@ const { Client } = require('ssh2');
 function executeCommand(server, command) {
   return new Promise((resolve, reject) => {
     if (server.is_local === 1) {
-      exec(command, { timeout: 30000 }, (error, stdout, stderr) => {
+      exec(command, { timeout: 35000 }, (error, stdout, stderr) => {
         if (error && !stdout) {
           return reject(new Error(stderr.trim() || error.message));
         }
@@ -21,9 +22,9 @@ function executeCommand(server, command) {
         if (!isHandled) {
           isHandled = true;
           conn.end();
-          reject(new Error('Koneksi SSH ke server waktu habis saat memproses data sounds (timeout 30 detik)'));
+          reject(new Error('Koneksi SSH ke server waktu habis saat memproses data sounds (timeout 35 detik)'));
         }
-      }, 30000);
+      }, 35000);
 
       const sshConfig = {
         host: server.host,
@@ -78,17 +79,16 @@ function executeCommand(server, command) {
 }
 
 /**
- * Fetch and validate sounds & video metadata against physical server files
+ * Fetch and validate sounds & video metadata against physical server files dynamically for POD V2 & V3
  */
 async function validateSoundsMetadata(server) {
   const readJsonCmd = `(cat /home/pod/sounds/metadata.json 2>/dev/null || cat /home/pod/sounds/Metadata.json 2>/dev/null || echo "[]")`;
-  const listSoundsCmd = `ls -1 /home/pod/sounds/ 2>/dev/null || echo ""`;
-  const listVideosCmd = `ls -1 /home/pod/videos/ 2>/dev/null || echo ""`;
+  // Recursive find command supporting both flat structure (POD V3) and subfolders (POD V2)
+  const findFilesCmd = `(find /home/pod/sounds /home/pod/videos -type f -not -name "metadata.json*" -not -name "*.bak" 2>/dev/null || ls -1 /home/pod/sounds /home/pod/videos 2>/dev/null)`;
 
-  const [rawJson, rawSoundsList, rawVideosList] = await Promise.all([
+  const [rawJson, rawFilesList] = await Promise.all([
     executeCommand(server, readJsonCmd),
-    executeCommand(server, listSoundsCmd),
-    executeCommand(server, listVideosCmd)
+    executeCommand(server, findFilesCmd)
   ]);
 
   let metadata = [];
@@ -102,23 +102,30 @@ async function validateSoundsMetadata(server) {
     throw new Error(`Format file metadata.json di server tidak valid: ${e.message}`);
   }
 
-  // Parse physical files in folders into Sets for O(1) fast lookup
-  const physicalSounds = new Set(
-    rawSoundsList
-      .split('\n')
-      .map(s => s.trim())
-      .filter(s => s && s !== 'metadata.json' && s !== 'Metadata.json')
-  );
+  // Maps & Sets for fast O(1) lookup
+  const physicalFilesMap = new Map(); // key: basename, value: relativePath
+  const fullPathSet = new Set();      // full path or relative path
+  const physicalSounds = [];
+  const physicalVideos = [];
 
-  const physicalVideos = new Set(
-    rawVideosList
-      .split('\n')
-      .map(s => s.trim())
-      .filter(s => s)
-  );
+  const rawLines = rawFilesList.split('\n').map(s => s.trim()).filter(Boolean);
 
-  const referencedSounds = new Set();
-  const referencedVideos = new Set();
+  for (const line of rawLines) {
+    // Normalize path by stripping /home/pod/
+    let cleanPath = line.replace(/^\/home\/pod\//, '');
+    const baseName = path.basename(cleanPath);
+
+    physicalFilesMap.set(baseName.toLowerCase(), cleanPath);
+    fullPathSet.add(cleanPath.toLowerCase());
+
+    if (cleanPath.startsWith('videos/')) {
+      physicalVideos.push(cleanPath);
+    } else {
+      physicalSounds.push(cleanPath);
+    }
+  }
+
+  const referencedFileSet = new Set();
   const missingFiles = [];
   const processedItems = [];
 
@@ -133,40 +140,46 @@ async function validateSoundsMetadata(server) {
     // Helper to check a file field
     const checkFile = (filename, fieldName, category) => {
       if (!filename || typeof filename !== 'string' || !filename.trim()) return;
-      const cleanName = filename.trim();
+      const originalName = filename.trim();
+      const baseName = path.basename(originalName).toLowerCase();
       totalExpectedFiles++;
 
       let exists = false;
-      let folderPath = '/home/pod/sounds';
+      let foundPath = '';
+      let defaultTargetFolder = category === 'video' ? 'videos/' : 'sounds/';
 
-      if (category === 'video') {
-        folderPath = '/home/pod/videos';
-        referencedVideos.add(cleanName);
-        exists = physicalVideos.has(cleanName);
-      } else {
-        referencedSounds.add(cleanName);
-        exists = physicalSounds.has(cleanName);
+      // 1. Direct match by exact path or relative path
+      if (fullPathSet.has(originalName.toLowerCase())) {
+        exists = true;
+        foundPath = originalName;
+      }
+      // 2. Match by basename across all subfolders (POD V2 dynamic subfolder lookup)
+      else if (physicalFilesMap.has(baseName)) {
+        exists = true;
+        foundPath = physicalFilesMap.get(baseName);
       }
 
       if (exists) {
         totalValidFiles++;
+        referencedFileSet.add(foundPath.toLowerCase());
       } else {
         totalMissingFiles++;
         missingFiles.push({
-          filename: cleanName,
+          filename: originalName,
           fieldName,
           category,
-          targetFolder: folderPath,
+          targetFolder: defaultTargetFolder,
           itemId: item.id || index + 1,
           itemTitle
         });
       }
 
       filesInItem.push({
-        filename: cleanName,
+        filename: originalName,
         fieldName,
         category,
-        targetFolder: folderPath,
+        targetFolder: defaultTargetFolder,
+        foundPath: foundPath || defaultTargetFolder + originalName,
         exists
       });
     };
@@ -183,9 +196,9 @@ async function validateSoundsMetadata(server) {
     });
   });
 
-  // Calculate unreferenced extra files in folders
-  const unreferencedSounds = Array.from(physicalSounds).filter(f => !referencedSounds.has(f));
-  const unreferencedVideos = Array.from(physicalVideos).filter(f => !referencedVideos.has(f));
+  // Calculate unreferenced extra physical files
+  const unreferencedSounds = physicalSounds.filter(f => !referencedFileSet.has(f.toLowerCase()));
+  const unreferencedVideos = physicalVideos.filter(f => !referencedFileSet.has(f.toLowerCase()));
 
   return {
     summary: {
@@ -195,8 +208,8 @@ async function validateSoundsMetadata(server) {
       totalValidFiles,
       totalUnreferencedSounds: unreferencedSounds.length,
       totalUnreferencedVideos: unreferencedVideos.length,
-      physicalSoundsCount: physicalSounds.size,
-      physicalVideosCount: physicalVideos.size
+      physicalSoundsCount: physicalSounds.length,
+      physicalVideosCount: physicalVideos.length
     },
     items: processedItems,
     missingFiles,
