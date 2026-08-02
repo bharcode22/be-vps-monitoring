@@ -2,6 +2,18 @@ const db = require('../services/db');
 const { getRemoteSSHMetrics } = require('../services/monitor/sshCollector');
 const { collectAllServerMetrics } = require('../services/vpsMonitor');
 
+/**
+ * Helper to emit instant server_list_updated event to all WebSocket clients
+ * and trigger immediate background metric collection.
+ */
+const notifyServerListChange = (req) => {
+  const io = req.app.get('io');
+  if (io) {
+    io.emit('server_list_updated');
+    collectAllServerMetrics(io);
+  }
+};
+
 // Default fallback metrics structure for clean UI rendering when offline or initializing
 const DEFAULT_FALLBACK_METRICS = {
   cpu_usage: 0,
@@ -235,8 +247,7 @@ const createVps = async (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'vps', '')`,
       [name, host, port || 22, username || 'root', auth_type || 'password', password || null, private_key || null]
     );
-    const io = req.app.get('io');
-    if (io) collectAllServerMetrics(io);
+    notifyServerListChange(req);
     res.json({ success: true, id: result.lastInsertRowid });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -260,8 +271,7 @@ const updateVps = async (req, res) => {
       `UPDATE servers SET name = ?, host = ?, port = ?, username = ?, auth_type = ?, password = ?, private_key = ? WHERE id = ?`,
       [name, host, port || 22, username || 'root', auth_type || 'password', finalPassword, finalPrivateKey, id]
     );
-    const io = req.app.get('io');
-    if (io) collectAllServerMetrics(io);
+    notifyServerListChange(req);
     res.json({ success: true, message: 'Server VPS berhasil diperbarui.' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -276,8 +286,7 @@ const deleteVps = async (req, res) => {
     const { id } = req.params;
     await db.run('DELETE FROM servers WHERE id = ?', [id]);
     await db.run('DELETE FROM metrics_history WHERE server_id = ?', [id]);
-    const io = req.app.get('io');
-    if (io) collectAllServerMetrics(io);
+    notifyServerListChange(req);
     res.json({ success: true, message: 'Server VPS berhasil dihapus.' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -298,8 +307,7 @@ const createPod = async (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'pod', ?)`,
       [name, host, port || 22, username || 'pod', auth_type || 'password', password || null, private_key || null, pod_version || 'v3']
     );
-    const io = req.app.get('io');
-    if (io) collectAllServerMetrics(io);
+    notifyServerListChange(req);
     res.json({ success: true, id: result.lastInsertRowid });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -323,8 +331,7 @@ const updatePod = async (req, res) => {
       `UPDATE servers SET name = ?, host = ?, port = ?, username = ?, auth_type = ?, password = ?, private_key = ?, pod_version = ? WHERE id = ?`,
       [name, host, port || 22, username || 'pod', auth_type || 'password', finalPassword, finalPrivateKey, pod_version || 'v3', id]
     );
-    const io = req.app.get('io');
-    if (io) collectAllServerMetrics(io);
+    notifyServerListChange(req);
     res.json({ success: true, message: 'POD Container berhasil diperbarui.' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -339,8 +346,7 @@ const deletePod = async (req, res) => {
     const { id } = req.params;
     await db.run('DELETE FROM servers WHERE id = ?', [id]);
     await db.run('DELETE FROM metrics_history WHERE server_id = ?', [id]);
-    const io = req.app.get('io');
-    if (io) collectAllServerMetrics(io);
+    notifyServerListChange(req);
     res.json({ success: true, message: 'POD Container berhasil dihapus.' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -362,8 +368,7 @@ const createDatabase = async (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?)`,
       [name, host, port || 5432, db_name || 'postgres', finalDbUser, password || '']
     );
-    const io = req.app.get('io');
-    if (io) collectAllServerMetrics(io);
+    notifyServerListChange(req);
     res.json({ success: true, id: result.lastInsertRowid });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -384,8 +389,7 @@ const updateDatabase = async (req, res) => {
         `UPDATE databases_postgres SET name = ?, host = ?, port = ?, db_name = ?, db_user = ?, password = ? WHERE id = ?`,
         [name, host, port || 5432, db_name || 'postgres', db_user || 'postgres', finalPassword, id]
       );
-      const io = req.app.get('io');
-      if (io) collectAllServerMetrics(io);
+      notifyServerListChange(req);
       return res.json({ success: true, message: 'Database PostgreSQL berhasil diperbarui.' });
     }
 
@@ -397,8 +401,7 @@ const updateDatabase = async (req, res) => {
         `UPDATE servers SET name = ?, host = ?, port = ?, db_name = ?, db_user = ?, password = ? WHERE id = ?`,
         [name, host, port || 5432, db_name || 'postgres', db_user || 'postgres', finalPassword, id]
       );
-      const io = req.app.get('io');
-      if (io) collectAllServerMetrics(io);
+      notifyServerListChange(req);
       return res.json({ success: true, message: 'Database PostgreSQL berhasil diperbarui.' });
     }
 
@@ -417,8 +420,7 @@ const deleteDatabase = async (req, res) => {
     await db.run('DELETE FROM databases_postgres WHERE id = ?', [id]);
     await db.run('DELETE FROM servers WHERE id = ? AND type = "postgresql"', [id]);
     await db.run('DELETE FROM metrics_history WHERE server_id = ?', [id]);
-    const io = req.app.get('io');
-    if (io) collectAllServerMetrics(io);
+    notifyServerListChange(req);
     res.json({ success: true, message: 'Database PostgreSQL berhasil dihapus.' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -455,8 +457,7 @@ const createStorage = async (req, res) => {
         port || (storageType === 'minio' ? 9000 : 443)
       ]
     );
-    const io = req.app.get('io');
-    if (io) collectAllServerMetrics(io);
+    notifyServerListChange(req);
     res.json({ success: true, id: result.lastInsertRowid });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -479,8 +480,7 @@ const updateStorage = async (req, res) => {
         `UPDATE object_storages SET name = ?, type = ?, s3_endpoint = ?, s3_access_key = ?, s3_secret_key = ?, s3_region = ?, s3_bucket = ?, port = ? WHERE id = ?`,
         [name, storageType, s3_endpoint || host, s3_access_key, finalSecretKey, s3_region || 'us-east-1', s3_bucket || '', port || (storageType === 'minio' ? 9000 : 443), id]
       );
-      const io = req.app.get('io');
-      if (io) collectAllServerMetrics(io);
+      notifyServerListChange(req);
       return res.json({ success: true, message: 'Object Storage berhasil diperbarui.' });
     }
 
@@ -492,8 +492,7 @@ const updateStorage = async (req, res) => {
         `UPDATE servers SET name = ?, type = ?, s3_endpoint = ?, s3_access_key = ?, s3_secret_key = ?, s3_region = ?, s3_bucket = ?, port = ? WHERE id = ?`,
         [name, storageType, s3_endpoint || host, s3_access_key, finalSecretKey, s3_region || 'us-east-1', s3_bucket || '', port || (storageType === 'minio' ? 9000 : 443), id]
       );
-      const io = req.app.get('io');
-      if (io) collectAllServerMetrics(io);
+      notifyServerListChange(req);
       return res.json({ success: true, message: 'Object Storage berhasil diperbarui.' });
     }
 
@@ -511,8 +510,7 @@ const deleteStorage = async (req, res) => {
     const { id } = req.params;
     await db.run('DELETE FROM object_storages WHERE id = ?', [id]);
     await db.run('DELETE FROM metrics_history WHERE server_id = ?', [id]);
-    const io = req.app.get('io');
-    if (io) collectAllServerMetrics(io);
+    notifyServerListChange(req);
     res.json({ success: true, message: 'Object Storage berhasil dihapus.' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -559,8 +557,7 @@ const deleteServer = async (req, res) => {
     await db.run('DELETE FROM object_storages WHERE id = ?', [id]);
     await db.run('DELETE FROM metrics_history WHERE server_id = ?', [id]);
 
-    const io = req.app.get('io');
-    if (io) collectAllServerMetrics(io);
+    notifyServerListChange(req);
 
     res.json({ success: true, message: 'Layanan berhasil dihapus.' });
   } catch (err) {
