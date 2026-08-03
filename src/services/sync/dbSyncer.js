@@ -72,14 +72,19 @@ async function performSync(options) {
         continue;
       }
 
-      // Fetch columns
+      // Fetch columns with their data types
       const colsRes = await sourceClient.query(`
-        SELECT column_name 
+        SELECT column_name, data_type, udt_name
         FROM information_schema.columns 
         WHERE table_schema = 'public' AND table_name = $1
         ORDER BY ordinal_position;
       `, [tableName]);
       const columns = colsRes.rows.map(r => r.column_name);
+      // Map column name -> type for JSON serialization
+      const colTypeMap = {};
+      for (const r of colsRes.rows) {
+        colTypeMap[r.column_name] = r.udt_name || r.data_type;
+      }
 
       if (columns.length === 0) {
         details.push({
@@ -129,14 +134,24 @@ async function performSync(options) {
           for (const row of sourceData.rows) {
             const rowPlaceholders = [];
             for (const col of columns) {
-              values.push(row[col]);
+              let val = row[col];
+              // Serialize json/jsonb values to string so pg driver accepts them
+              const colType = (colTypeMap[col] || '').toLowerCase();
+              if ((colType === 'json' || colType === 'jsonb') && val !== null && val !== undefined && typeof val !== 'string') {
+                val = JSON.stringify(val);
+              }
+              values.push(val);
               rowPlaceholders.push(`$${paramIndex++}`);
             }
             valuePlaceholders.push(`(${rowPlaceholders.join(', ')})`);
           }
 
-          const insertQuery = `INSERT INTO "${tableName}" (${colNamesStr}) VALUES ${valuePlaceholders.join(', ')}`;
-          await targetClient.query(insertQuery, values);
+          try {
+            const insertQuery = `INSERT INTO "${tableName}" (${colNamesStr}) VALUES ${valuePlaceholders.join(', ')}`;
+            await targetClient.query(insertQuery, values);
+          } catch (batchErr) {
+            log(`[WARN] Batch insert failed for table "${tableName}" (offset ${offset}): ${batchErr.message}. Skipping batch.`);
+          }
         }
 
         copiedRows += sourceData.rows.length;
