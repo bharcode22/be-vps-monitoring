@@ -5,12 +5,16 @@ const { Client } = require('pg');
  */
 async function getPostgresMetrics(server) {
   const startTime = Date.now();
+  const host = server.host || '';
+  const isCloudOrRds = host.includes('rds.amazonaws.com') || host.includes('neon.tech') || host.includes('supabase') || host.includes('render.com') || server.ssl;
+
   const pgClient = new Client({
     host: server.host,
     port: server.port || 5432,
     database: server.db_name || 'postgres',
     user: server.db_user || server.username || 'postgres',
     password: server.password || '',
+    ssl: isCloudOrRds ? { rejectUnauthorized: false } : false,
     connectionTimeoutMillis: 5000
   });
 

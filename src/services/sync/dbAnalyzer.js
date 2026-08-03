@@ -16,12 +16,24 @@ function parseUrlInfo(url) {
   }
 }
 
+function getSslOption(connectionString) {
+  if (!connectionString) return false;
+  const lower = String(connectionString).toLowerCase();
+  if (lower.includes('rds.amazonaws.com') || lower.includes('sslmode=require') || lower.includes('neon.tech') || lower.includes('supabase') || lower.includes('render.com')) {
+    return { rejectUnauthorized: false };
+  }
+  return false;
+}
+
 /**
  * Test database connection
  */
 async function testConnection(connectionString) {
   const startTime = Date.now();
-  const client = new Client({ connectionString });
+  const client = new Client({
+    connectionString,
+    ssl: getSslOption(connectionString)
+  });
   try {
     await client.connect();
     const res = await client.query('SELECT current_database(), current_user, version()');
@@ -108,8 +120,8 @@ async function getSchemaInfo(pool) {
  * Compare schema between Source and Target DBs
  */
 async function compareSchemas(sourceUrl, targetUrl) {
-  const sourcePool = new Pool({ connectionString: sourceUrl });
-  const targetPool = new Pool({ connectionString: targetUrl });
+  const sourcePool = new Pool({ connectionString: sourceUrl, ssl: getSslOption(sourceUrl) });
+  const targetPool = new Pool({ connectionString: targetUrl, ssl: getSslOption(targetUrl) });
 
   try {
     const sourceSchema = await getSchemaInfo(sourcePool);

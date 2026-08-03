@@ -2,6 +2,15 @@ const { Pool } = require('pg');
 
 const DEFAULT_BATCH_SIZE = 500;
 
+function getSslOption(connectionString) {
+  if (!connectionString) return false;
+  const lower = String(connectionString).toLowerCase();
+  if (lower.includes('rds.amazonaws.com') || lower.includes('sslmode=require') || lower.includes('neon.tech') || lower.includes('supabase') || lower.includes('render.com')) {
+    return { rejectUnauthorized: false };
+  }
+  return false;
+}
+
 /**
  * Execute synchronization between source and target database connections
  */
@@ -15,8 +24,8 @@ async function performSync(options) {
   } = options;
 
   const startTime = Date.now();
-  const sourcePool = new Pool({ connectionString: sourceUrl });
-  const targetPool = new Pool({ connectionString: targetUrl });
+  const sourcePool = new Pool({ connectionString: sourceUrl, ssl: getSslOption(sourceUrl) });
+  const targetPool = new Pool({ connectionString: targetUrl, ssl: getSslOption(targetUrl) });
 
   const logs = [];
   const log = (msg) => logs.push(`[${new Date().toISOString()}] ${msg}`);
