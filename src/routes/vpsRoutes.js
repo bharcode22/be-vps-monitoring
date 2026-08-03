@@ -6,18 +6,18 @@ const dockerController = require('../controllers/dockerController');
 const scriptController = require('../controllers/scriptController');
 const soundController = require('../controllers/soundController');
 const syncController = require('../controllers/syncController');
-const { requireAuth, requireSuperAdmin } = require('../middleware/authMiddleware');
+const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // Health check endpoint
 router.get('/health', vpsController.getHealth);
 
-// Public Read-only routes (Guests can view metrics & history)
-router.get('/vps/vps', vpsController.getVpsServers);
-router.get('/vps/pod', vpsController.getPodServers);
-router.get('/vps/database', vpsController.getDatabaseServers);
-router.get('/vps/storage', vpsController.getStorageServers);
-router.get('/vps', vpsController.getAllServers);
-router.get('/vps/:id/history', vpsController.getServerHistory);
+// Public Read-only routes (Guests can view metrics & history, host details masked when not logged in)
+router.get('/vps/vps', optionalAuth, vpsController.getVpsServers);
+router.get('/vps/pod', optionalAuth, vpsController.getPodServers);
+router.get('/vps/database', optionalAuth, vpsController.getDatabaseServers);
+router.get('/vps/storage', optionalAuth, vpsController.getStorageServers);
+router.get('/vps', optionalAuth, vpsController.getAllServers);
+router.get('/vps/:id/history', optionalAuth, vpsController.getServerHistory);
 router.get('/settings', vpsController.getSettings);
 
 // Public Auth routes

@@ -44,6 +44,36 @@ const getHealth = (req, res) => {
 };
 
 /**
+ * Helper to mask sensitive connection details (host IP, usernames, connection strings)
+ * for unauthenticated guest requests.
+ */
+const sanitizeServerForGuest = (server, req) => {
+  if (req.user) return server; // Return full info for logged-in approved users
+
+  const sanitized = { ...server };
+  if (sanitized.host) {
+    sanitized.host = '***.***.***.***';
+  }
+  if (sanitized.username) {
+    sanitized.username = '***';
+  }
+  if (sanitized.db_user) {
+    sanitized.db_user = '***';
+  }
+  if (sanitized.s3_access_key) {
+    sanitized.s3_access_key = '***';
+  }
+  if (sanitized.s3_endpoint) {
+    sanitized.s3_endpoint = '***';
+  }
+  delete sanitized.connString;
+  delete sanitized.password;
+  delete sanitized.s3_secret_key;
+
+  return sanitized;
+};
+
+/**
  * Get all registered VPS, POD, PostgreSQL, and Storage services across their dedicated tables
  */
 const getAllServers = async (req, res) => {
@@ -100,7 +130,7 @@ const getAllServers = async (req, res) => {
     const allItems = [...sshServers, ...dbServers, ...storageServers];
 
     // Fetch latest metrics for each server item
-    const result = await Promise.all(allItems.map(async (server) => {
+    const rawResult = await Promise.all(allItems.map(async (server) => {
       const latestMetrics = await db.get(
         'SELECT * FROM metrics_history WHERE server_id = ? ORDER BY timestamp DESC LIMIT 1',
         [server.id]
@@ -113,6 +143,8 @@ const getAllServers = async (req, res) => {
         currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS
       };
     }));
+
+    const result = rawResult.map(s => sanitizeServerForGuest(s, req));
 
     res.json({ success: true, data: result });
   } catch (err) {
@@ -136,10 +168,12 @@ const getVpsServers = async (req, res) => {
     }
 
     const sshServers = await db.all(query, params);
-    const result = await Promise.all(sshServers.map(async (server) => {
+    const rawResult = await Promise.all(sshServers.map(async (server) => {
       const latestMetrics = await db.get('SELECT * FROM metrics_history WHERE server_id = ? ORDER BY timestamp DESC LIMIT 1', [server.id]);
       return { ...server, type: 'vps', currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS };
     }));
+
+    const result = rawResult.map(s => sanitizeServerForGuest(s, req));
 
     res.json({ success: true, data: result });
   } catch (err) {
@@ -163,10 +197,12 @@ const getPodServers = async (req, res) => {
     }
 
     const podServers = await db.all(query, params);
-    const result = await Promise.all(podServers.map(async (server) => {
+    const rawResult = await Promise.all(podServers.map(async (server) => {
       const latestMetrics = await db.get('SELECT * FROM metrics_history WHERE server_id = ? ORDER BY timestamp DESC LIMIT 1', [server.id]);
       return { ...server, type: 'pod', currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS };
     }));
+
+    const result = rawResult.map(s => sanitizeServerForGuest(s, req));
 
     res.json({ success: true, data: result });
   } catch (err) {
@@ -190,7 +226,7 @@ const getDatabaseServers = async (req, res) => {
     }
 
     const dbRows = await db.all(query, params);
-    const result = await Promise.all(dbRows.map(async (server) => {
+    const rawResult = await Promise.all(dbRows.map(async (server) => {
       const latestMetrics = await db.get('SELECT * FROM metrics_history WHERE server_id = ? ORDER BY timestamp DESC LIMIT 1', [server.id]);
       const user = encodeURIComponent(server.db_user || 'postgres');
       const pass = server.password ? encodeURIComponent(server.password) : '';
@@ -205,6 +241,8 @@ const getDatabaseServers = async (req, res) => {
         currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS
       };
     }));
+
+    const result = rawResult.map(s => sanitizeServerForGuest(s, req));
 
     res.json({ success: true, data: result });
   } catch (err) {
@@ -228,7 +266,7 @@ const getStorageServers = async (req, res) => {
     }
 
     const storageRows = await db.all(query, params);
-    const result = await Promise.all(storageRows.map(async (server) => {
+    const rawResult = await Promise.all(storageRows.map(async (server) => {
       const latestMetrics = await db.get('SELECT * FROM metrics_history WHERE server_id = ? ORDER BY timestamp DESC LIMIT 1', [server.id]);
       return {
         ...server,
@@ -238,6 +276,8 @@ const getStorageServers = async (req, res) => {
         currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS
       };
     }));
+
+    const result = rawResult.map(s => sanitizeServerForGuest(s, req));
 
     res.json({ success: true, data: result });
   } catch (err) {
