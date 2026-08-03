@@ -68,12 +68,19 @@ const getAllServers = async (req, res) => {
       dbParams = [term, term, term, term];
     }
     const dbRows = await db.all(dbQuery, dbParams);
-    const dbServers = dbRows.map(r => ({
-      ...r,
-      type: 'postgresql',
-      username: r.db_user,
-      password: r.password ? '******' : ''
-    }));
+    const dbServers = dbRows.map(r => {
+      const user = encodeURIComponent(r.db_user || 'postgres');
+      const pass = r.password ? encodeURIComponent(r.password) : '';
+      const auth = pass ? `${user}:${pass}` : user;
+      const connString = `postgresql://${auth}@${r.host}:${r.port || 5432}/${r.db_name || 'postgres'}`;
+      return {
+        ...r,
+        type: 'postgresql',
+        username: r.db_user,
+        password: r.password ? '******' : '',
+        connString
+      };
+    });
 
     // 3. Fetch Object Storage Services (object_storages table)
     let storageQuery = 'SELECT id, name, type, s3_endpoint, s3_access_key, s3_secret_key, s3_region, s3_bucket, port, created_at FROM object_storages';
@@ -185,11 +192,16 @@ const getDatabaseServers = async (req, res) => {
     const dbRows = await db.all(query, params);
     const result = await Promise.all(dbRows.map(async (server) => {
       const latestMetrics = await db.get('SELECT * FROM metrics_history WHERE server_id = ? ORDER BY timestamp DESC LIMIT 1', [server.id]);
+      const user = encodeURIComponent(server.db_user || 'postgres');
+      const pass = server.password ? encodeURIComponent(server.password) : '';
+      const auth = pass ? `${user}:${pass}` : user;
+      const connString = `postgresql://${auth}@${server.host}:${server.port || 5432}/${server.db_name || 'postgres'}`;
       return {
         ...server,
         type: 'postgresql',
         username: server.db_user,
         password: server.password ? '******' : '',
+        connString,
         currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS
       };
     }));

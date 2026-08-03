@@ -5,6 +5,7 @@ const authController = require('../controllers/authController');
 const dockerController = require('../controllers/dockerController');
 const scriptController = require('../controllers/scriptController');
 const soundController = require('../controllers/soundController');
+const syncController = require('../controllers/syncController');
 const { requireAuth, requireSuperAdmin } = require('../middleware/authMiddleware');
 
 // Health check endpoint
@@ -62,5 +63,12 @@ router.post('/vps/:id/scripts/run', requireAuth, scriptController.executeScript)
 
 // Protected Sound & Video Metadata Validation route
 router.get('/vps/:id/sounds/validate', requireAuth, soundController.validateSounds);
+
+// Protected Database Synchronization routes (Requires Approved Admin Login)
+router.get('/sync/info', requireAuth, syncController.getSyncInfo);
+router.post('/sync/test-connection', requireAuth, syncController.testSyncConnections);
+router.post('/sync/test-single', requireAuth, syncController.testSingleConnection);
+router.post('/sync/compare-schema', requireAuth, syncController.compareSyncSchema);
+router.post('/sync/perform', requireAuth, syncController.executeSync);
 
 module.exports = router;
