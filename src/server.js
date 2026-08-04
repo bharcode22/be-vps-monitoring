@@ -8,6 +8,7 @@ const { Server } = require('socket.io');
 const vpsRoutes = require('./routes/vpsRoutes');
 const { collectAllServerMetrics } = require('./services/vpsMonitor');
 const { registerDockerStreamHandlers } = require('./services/dockerLogStreamer');
+const { registerPm2StreamHandlers } = require('./services/pm2LogStreamer');
 
 const app = express();
 const server = http.createServer(app);
@@ -37,6 +38,9 @@ io.on('connection', (socket) => {
 
   // Register real-time Docker Log Streaming handlers
   registerDockerStreamHandlers(socket, io);
+
+  // Register real-time PM2 Log Streaming handlers
+  registerPm2StreamHandlers(socket, io);
 
   socket.on('disconnect', () => {
     console.log(`❌ Client disconnected: ${socket.id}`);
