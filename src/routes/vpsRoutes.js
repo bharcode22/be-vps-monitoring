@@ -7,6 +7,7 @@ const pm2Controller = require('../controllers/pm2Controller');
 const scriptController = require('../controllers/scriptController');
 const soundController = require('../controllers/soundController');
 const syncController = require('../controllers/syncController');
+const rabbitmqController = require('../controllers/rabbitmqController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // Health check endpoint
@@ -81,5 +82,12 @@ router.post('/sync/test-connection', requireAuth, syncController.testSyncConnect
 router.post('/sync/test-single', requireAuth, syncController.testSingleConnection);
 router.post('/sync/compare-schema', requireAuth, syncController.compareSyncSchema);
 router.post('/sync/perform', requireAuth, syncController.executeSync);
+
+// Protected RabbitMQ Monitoring & Management routes
+router.get('/rabbitmq', requireAuth, rabbitmqController.getRabbitMqs);
+router.post('/rabbitmq', requireAuth, rabbitmqController.createRabbitMq);
+router.put('/rabbitmq/:id', requireAuth, rabbitmqController.updateRabbitMq);
+router.delete('/rabbitmq/:id', requireAuth, rabbitmqController.deleteRabbitMq);
+router.get('/rabbitmq/:id/status', requireAuth, rabbitmqController.getRabbitMqStatus);
 
 module.exports = router;

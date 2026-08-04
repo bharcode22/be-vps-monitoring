@@ -9,6 +9,7 @@ const vpsRoutes = require('./routes/vpsRoutes');
 const { collectAllServerMetrics } = require('./services/vpsMonitor');
 const { registerDockerStreamHandlers } = require('./services/dockerLogStreamer');
 const { registerPm2StreamHandlers } = require('./services/pm2LogStreamer');
+const { registerRabbitMqTracerHandlers } = require('./services/rabbitmqTracer');
 
 const app = express();
 const server = http.createServer(app);
@@ -41,6 +42,9 @@ io.on('connection', (socket) => {
 
   // Register real-time PM2 Log Streaming handlers
   registerPm2StreamHandlers(socket, io);
+
+  // Register real-time RabbitMQ Firehose Tracer handlers
+  registerRabbitMqTracerHandlers(socket, io);
 
   socket.on('disconnect', () => {
     console.log(`❌ Client disconnected: ${socket.id}`);

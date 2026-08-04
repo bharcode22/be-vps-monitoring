@@ -135,6 +135,16 @@ async function initDb() {
         port INTEGER DEFAULT 9000,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
+
+      CREATE TABLE IF NOT EXISTS rabbitmq_servers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        host TEXT NOT NULL,
+        port INTEGER DEFAULT 15672,
+        username TEXT DEFAULT 'guest',
+        password TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
     `);
 
     // Seed initial Super Admin
