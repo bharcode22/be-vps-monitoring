@@ -326,7 +326,115 @@ async function compareSoundsForPods(pods) {
   };
 }
 
+/**
+ * Fetch and compare metadata.json across multiple PODs
+ * @param {Array} pods - Array of pod servers
+ */
+async function compareMetadataForPods(pods) {
+  if (!pods || pods.length === 0) {
+    return { pods: [], metadataMatrix: {} };
+  }
+
+  const catMetadataCmd = `cat /home/pod/sounds/metadata.json 2>/dev/null`;
+
+  const promises = pods.map(async (server) => {
+    try {
+      const rawJson = await executeCommand(server, catMetadataCmd);
+      if (!rawJson.trim()) {
+        throw new Error("metadata.json empty or not found");
+      }
+      const parsed = JSON.parse(rawJson);
+      
+      return {
+        serverId: server.id,
+        success: true,
+        data: parsed
+      };
+    } catch (err) {
+      console.error(`Failed to fetch/parse metadata from pod ${server.name} (${server.host}): ${err.message}`);
+      return {
+        serverId: server.id,
+        success: false,
+        error: err.message,
+        data: []
+      };
+    }
+  });
+
+  const results = await Promise.all(promises);
+
+  const allMetadataKeys = new Map(); // key: "SessionName|ID", value: { session, id }
+  
+  results.forEach(res => {
+    if (res.success && Array.isArray(res.data)) {
+      res.data.forEach(item => {
+        // Both session and id must exist to compare. If session is missing, we use 'Unknown Session'.
+        const session = item.session || 'Unknown Session';
+        const id = item.id;
+        if (id !== undefined) {
+          const key = `${session}|${id}`;
+          if (!allMetadataKeys.has(key)) {
+            allMetadataKeys.set(key, { session, id });
+          }
+        }
+      });
+    }
+  });
+
+  const metadataMatrix = {};
+  const sortedKeys = Array.from(allMetadataKeys.keys()).sort();
+
+  sortedKeys.forEach(key => {
+    const { session, id } = allMetadataKeys.get(key);
+    
+    const podsPresence = {}; // { serverId: true/false }
+    const podsFilepaths = {}; // { serverId: "filepath..." }
+    let uniqueFilepaths = new Set();
+    let presentCount = 0;
+    
+    results.forEach(res => {
+      if (res.success && Array.isArray(res.data)) {
+        const found = res.data.find(x => (x.session || 'Unknown Session') === session && String(x.id) === String(id));
+        podsPresence[res.serverId] = !!found;
+        if (found) {
+          const fp = found.filepath || "";
+          podsFilepaths[res.serverId] = fp;
+          uniqueFilepaths.add(fp);
+          presentCount++;
+        }
+      } else {
+        podsPresence[res.serverId] = false;
+      }
+    });
+
+    metadataMatrix[key] = {
+      session,
+      id,
+      isMismatch: uniqueFilepaths.size > 1, // filepaths are different across pods that have it
+      isMissingInSome: presentCount > 0 && presentCount < results.filter(r => r.success).length, // some successful pods don't have this item at all
+      podsPresence,
+      podsFilepaths
+    };
+  });
+
+  const podsInfo = pods.map(p => ({
+    id: p.id,
+    name: p.name,
+    host: p.host,
+    pod_version: p.pod_version,
+    fetchSuccess: results.find(r => r.serverId === p.id)?.success || false,
+    error: results.find(r => r.serverId === p.id)?.error
+  }));
+
+  return {
+    pods: podsInfo,
+    metadataMatrix,
+    totalItems: sortedKeys.length
+  };
+}
+
 module.exports = {
   validateSoundsMetadata,
-  compareSoundsForPods
+  compareSoundsForPods,
+  compareMetadataForPods
 }

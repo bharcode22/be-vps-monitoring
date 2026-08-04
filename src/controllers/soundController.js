@@ -1,5 +1,5 @@
 const dbAsync = require('../services/db');
-const { validateSoundsMetadata, compareSoundsForPods } = require('../services/soundService');
+const { validateSoundsMetadata, compareSoundsForPods, compareMetadataForPods } = require('../services/soundService');
 
 /**
  * Validate sound & video metadata.json against physical server files
@@ -49,7 +49,37 @@ const compareAllPodSounds = async (req, res) => {
   }
 };
 
+/**
+ * Compare all metadata across pod servers
+ */
+const compareAllPodMetadata = async (req, res) => {
+  try {
+    const { version } = req.query; // 'v2', 'v3', or 'all'
+
+    let query = "SELECT * FROM servers WHERE type = 'pod'";
+    let params = [];
+
+    if (version && version !== 'all') {
+      query += " AND pod_version = ?";
+      params.push(version);
+    }
+
+    const pods = await dbAsync.all(query, params);
+
+    if (!pods || pods.length === 0) {
+      return res.json({ success: true, data: { pods: [], metadataMatrix: {}, totalItems: 0 } });
+    }
+
+    const data = await compareMetadataForPods(pods);
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('Compare Metadata Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 module.exports = {
   validateSounds,
-  compareAllPodSounds
+  compareAllPodSounds,
+  compareAllPodMetadata
 };

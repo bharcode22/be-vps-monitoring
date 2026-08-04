@@ -73,6 +73,7 @@ router.post('/vps/:id/scripts/run', requireAuth, scriptController.executeScript)
 // Protected Sound & Video Metadata Validation route
 router.get('/vps/:id/sounds/validate', requireAuth, soundController.validateSounds);
 router.get('/vps/sounds/compare', requireAuth, soundController.compareAllPodSounds);
+router.get('/vps/metadata/compare', requireAuth, soundController.compareAllPodMetadata);
 
 // Protected Database Synchronization routes (Requires Approved Admin Login)
 router.get('/sync/info', requireAuth, syncController.getSyncInfo);
