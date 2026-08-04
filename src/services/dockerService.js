@@ -157,9 +157,26 @@ async function getDockerContainerLogs(server, containerName) {
   }
 }
 
+/**
+ * Remove a Docker container (docker rm -f)
+ */
+async function removeDockerContainer(server, containerName) {
+  const safeName = String(containerName).replace(/[^a-zA-Z0-9_\-\.]/g, '');
+  if (!safeName) throw new Error('Nama container tidak valid.');
+
+  const cmd = `docker rm -f ${safeName}`;
+  try {
+    const stdout = await executeCommand(server, cmd);
+    return { success: true, container: safeName, output: stdout.trim() };
+  } catch (err) {
+    throw new Error(`Gagal menghapus (docker rm) container ${safeName}: ${err.message}`);
+  }
+}
+
 module.exports = {
   listDockerContainers,
   restartDockerContainer,
   stopDockerContainer,
+  removeDockerContainer,
   getDockerContainerLogs
 };
