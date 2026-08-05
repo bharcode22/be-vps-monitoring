@@ -106,10 +106,43 @@ const getRabbitMqStatus = async (req, res) => {
   }
 };
 
+/**
+ * Handle trace event webhook from publisher/subscriber client applications
+ */
+const receiveTraceEvent = async (req, res) => {
+  try {
+    const { traceId, action, serverName, payload } = req.body;
+    if (!traceId || !action || !serverName) {
+      return res.status(400).json({ success: false, error: 'traceId, action, and serverName are required' });
+    }
+
+    const io = req.app.get('io');
+
+    // Tambahkan log ini untuk debug di backend monitoring terminal
+    console.log(`[DEBUG-WEBHOOK] Action: ${action.toUpperCase()} | Server: ${serverName} | TraceID: ${traceId}`);
+
+    if (io) {
+      io.emit('rabbitmq:webhook-trace', {
+        timestamp: new Date().toLocaleTimeString(),
+        traceId,
+        action, // 'publish' | 'subscribe'
+        serverName, // e.g. 'VPS-Admin (admin-backend)' or 'Pod-Ibiza (mobile-synch)'
+        payload: payload || null
+      });
+    }
+
+    res.json({ success: true, message: 'Event broadcasted successfully' });
+  } catch (err) {
+    console.error('Failed to process trace webhook event:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 module.exports = {
   getRabbitMqs,
   createRabbitMq,
   updateRabbitMq,
   deleteRabbitMq,
-  getRabbitMqStatus
+  getRabbitMqStatus,
+  receiveTraceEvent
 };

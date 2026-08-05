@@ -89,5 +89,6 @@ router.post('/rabbitmq', requireAuth, rabbitmqController.createRabbitMq);
 router.put('/rabbitmq/:id', requireAuth, rabbitmqController.updateRabbitMq);
 router.delete('/rabbitmq/:id', requireAuth, rabbitmqController.deleteRabbitMq);
 router.get('/rabbitmq/:id/status', requireAuth, rabbitmqController.getRabbitMqStatus);
+router.post('/rabbitmq/trace-event', rabbitmqController.receiveTraceEvent);
 
 module.exports = router;
