@@ -85,11 +85,17 @@ function registerRabbitMqTracerHandlers(socket, io) {
       // Start consuming trace messages
       await ch.consume(queue, (msg) => {
         if (msg) {
-          const routingKey = msg.fields.routingKey || ''; // e.g. publish.vhost.exchange.queue
-          const parts = routingKey.split('.');
-          const action = parts[0]; // 'publish' or 'deliver'
-          const exchangeName = parts[2] || '(direct)';
-          const queueName = parts[3] || '';
+          const routingKey = msg.fields.routingKey || ''; // e.g. publish.exchangename or deliver.queuename
+          const action = routingKey.startsWith('publish') ? 'publish' : (routingKey.startsWith('deliver') ? 'deliver' : 'unknown');
+          
+          let exchangeName = '';
+          let queueName = '';
+
+          if (action === 'publish') {
+            exchangeName = routingKey.substring('publish.'.length) || '(default)';
+          } else if (action === 'deliver') {
+            queueName = routingKey.substring('deliver.'.length) || '';
+          }
 
           const payload = msg.content.toString();
           

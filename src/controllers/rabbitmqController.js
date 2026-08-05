@@ -1,5 +1,6 @@
 const dbAsync = require('../services/db');
 const { fetchRabbitMqStatus } = require('../services/rabbitmqService');
+const { exec } = require('child_process');
 
 /**
  * Get all RabbitMQ servers
@@ -138,11 +139,44 @@ const receiveTraceEvent = async (req, res) => {
   }
 };
 
+/**
+ * Execute command locally (as requested for RabbitMQ/Pod restart)
+ * NOTE: In a real multi-server environment, this should SSH into the specific node.
+ */
+const executeCommand = async (req, res) => {
+  try {
+    const { command } = req.body;
+    if (!command) {
+      return res.status(400).json({ success: false, error: 'Command is required' });
+    }
+
+    // Security check: Only allow specific commands
+    const allowedPrefixes = ['pm2 restart', 'docker restart'];
+    const isAllowed = allowedPrefixes.some(prefix => command.startsWith(prefix));
+    
+    if (!isAllowed) {
+      return res.status(403).json({ success: false, error: 'Command not allowed for security reasons' });
+    }
+
+    exec(command, (error, stdout, stderr) => {
+      if (error) {
+        console.error(`Execution error: ${error.message}`);
+        return res.status(500).json({ success: false, error: error.message, details: stderr });
+      }
+      res.json({ success: true, message: stdout.trim() || 'Executed successfully' });
+    });
+  } catch (err) {
+    console.error('Failed to execute command:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 module.exports = {
   getRabbitMqs,
   createRabbitMq,
   updateRabbitMq,
   deleteRabbitMq,
   getRabbitMqStatus,
-  receiveTraceEvent
+  receiveTraceEvent,
+  executeCommand
 };
