@@ -742,6 +742,7 @@ const redeployBackend = async (req, res) => {
     const useSSH = hasSSHInfo || server.is_local !== 1;
 
     const deployCommand = `
+      git config --global --add safe.directory "*" 2>/dev/null || true
       if [ -f "/home/pod/dev/scripts/deploy.sh" ]; then
         bash /home/pod/dev/scripts/deploy.sh
       elif [ -f "/home/pod/dev/be-vps-monitoring/scripts/deploy.sh" ]; then
