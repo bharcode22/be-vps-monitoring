@@ -44,10 +44,19 @@ function registerDockerStreamHandlers(socket, io) {
         return socket.emit('docker:stream-error', { error: 'Nama container tidak valid.' });
       }
 
-      const command = `docker logs -f --tail 100 ${safeContainer} 2>&1`;
+      const isSystemApp = safeContainer === 'big-screen' || safeContainer === 'small-screen';
+
+      const command = isSystemApp
+        ? `journalctl -u ${safeContainer} -f -n 100 2>/dev/null || journalctl --user -u ${safeContainer} -f -n 100 2>/dev/null || tail -f /home/pod/.config/${safeContainer}/*.log 2>/dev/null || tail -f /home/pod/.config/${safeContainer}/logs/*.log 2>/dev/null || tail -f /tmp/${safeContainer}.log 2>/dev/null`
+        : `docker logs -f --tail 100 ${safeContainer} 2>&1`;
 
       if (server.is_local === 1) {
-        const child = spawn('docker', ['logs', '-f', '--tail', '100', safeContainer]);
+        let child;
+        if (isSystemApp) {
+          child = spawn('sh', ['-c', command]);
+        } else {
+          child = spawn('docker', ['logs', '-f', '--tail', '100', safeContainer]);
+        }
 
         child.stdout.on('data', (chunk) => {
           socket.emit('docker:stream-data', { containerName: safeContainer, chunk: chunk.toString() });
