@@ -7,7 +7,11 @@ RUN apk add --no-cache \
     g++ \
     sqlite-dev \
     curl \
-    openssh-client
+    openssh-client \
+    git \
+    bash \
+    docker-cli \
+    docker-cli-compose
 
 WORKDIR /app
 

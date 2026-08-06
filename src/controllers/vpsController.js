@@ -754,8 +754,11 @@ const redeployBackend = async (req, res) => {
       fi
     `;
 
+    const hasSSHInfo = Boolean(server.host && server.username && (server.password || server.private_key));
+    const useLocalExec = server.is_local === 1 && !hasSSHInfo;
+
     const output = await new Promise((resolve) => {
-      if (server.is_local === 1) {
+      if (useLocalExec) {
         require('child_process').exec(deployCommand, { timeout: 120000 }, (error, stdout, stderr) => {
           resolve((stdout || '') + (stderr || ''));
         });
