@@ -434,7 +434,8 @@ async function compareMetadataForPods(pods) {
 }
 
 module.exports = {
+  executeCommand,
   validateSoundsMetadata,
   compareSoundsForPods,
   compareMetadataForPods
-}
+};

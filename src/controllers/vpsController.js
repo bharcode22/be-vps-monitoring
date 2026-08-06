@@ -727,6 +727,107 @@ const saveSetting = async (req, res) => {
   }
 };
 
+/**
+ * Controller to trigger git pull & docker compose rebuild for backend app on target server
+ */
+const redeployBackend = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
+    if (!server) {
+      return res.status(404).json({ message: 'Server tidak ditemukan.' });
+    }
+
+    const deployCommand = `
+      if [ -f "/home/pod/dev/scripts/deploy.sh" ]; then
+        bash /home/pod/dev/scripts/deploy.sh
+      elif [ -f "/home/pod/dev/be-vps-monitoring/scripts/deploy.sh" ]; then
+        bash /home/pod/dev/be-vps-monitoring/scripts/deploy.sh
+      elif [ -f "./scripts/deploy.sh" ]; then
+        bash ./scripts/deploy.sh
+      elif [ -d "/home/pod/dev/be-vps-monitoring" ]; then
+        cd /home/pod/dev/be-vps-monitoring && git pull origin main && docker compose down && docker compose up -d --build
+      elif [ -d "/home/pod/be-vps-monitoring" ]; then
+        cd /home/pod/be-vps-monitoring && git pull origin main && docker compose down && docker compose up -d --build
+      else
+        git pull origin main && docker compose down && docker compose up -d --build
+      fi
+    `;
+
+    const output = await new Promise((resolve) => {
+      if (server.is_local === 1) {
+        require('child_process').exec(deployCommand, { timeout: 120000 }, (error, stdout, stderr) => {
+          resolve((stdout || '') + (stderr || ''));
+        });
+      } else {
+        const { Client } = require('ssh2');
+        const conn = new Client();
+        let isHandled = false;
+        let logs = '';
+
+        const timeout = setTimeout(() => {
+          if (!isHandled) {
+            isHandled = true;
+            conn.end();
+            resolve(logs + '\n[!] Command execution timeout (120s). Docker build may still be finishing in background.');
+          }
+        }, 120000);
+
+        const sshConfig = {
+          host: server.host,
+          port: server.port || 22,
+          username: server.username || 'root',
+          readyTimeout: 15000
+        };
+
+        if (server.auth_type === 'key' && server.private_key) {
+          sshConfig.privateKey = server.private_key;
+        } else {
+          sshConfig.password = server.password;
+        }
+
+        conn.on('ready', () => {
+          conn.exec(deployCommand, (err, stream) => {
+            if (err) {
+              clearTimeout(timeout);
+              conn.end();
+              return resolve(`SSH Error: ${err.message}`);
+            }
+            stream.on('close', () => {
+              clearTimeout(timeout);
+              if (!isHandled) {
+                isHandled = true;
+                conn.end();
+                resolve(logs);
+              }
+            }).on('data', (data) => {
+              logs += data.toString();
+            }).stderr.on('data', (data) => {
+              logs += data.toString();
+            });
+          });
+        }).on('error', (err) => {
+          clearTimeout(timeout);
+          if (!isHandled) {
+            isHandled = true;
+            resolve(`Koneksi SSH Gagal: ${err.message}`);
+          }
+        }).connect(sshConfig);
+      }
+    });
+
+    return res.json({
+      success: true,
+      message: 'Proses deploy ulang backend berhasil dijalankan!',
+      output: output || 'Proses selesai tanpa log output.'
+    });
+  } catch (err) {
+    return res.status(500).json({
+      message: err.message || 'Gagal meredeploy backend'
+    });
+  }
+};
+
 module.exports = {
   getHealth,
   getAllServers,
@@ -752,5 +853,6 @@ module.exports = {
   testConnection,
   getServerHistory,
   getSettings,
-  saveSetting
+  saveSetting,
+  redeployBackend
 };

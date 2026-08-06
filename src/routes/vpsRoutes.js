@@ -6,6 +6,7 @@ const dockerController = require('../controllers/dockerController');
 const pm2Controller = require('../controllers/pm2Controller');
 const scriptController = require('../controllers/scriptController');
 const soundController = require('../controllers/soundController');
+const podConfigController = require('../controllers/podConfigController');
 const syncController = require('../controllers/syncController');
 const rabbitmqController = require('../controllers/rabbitmqController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
@@ -52,6 +53,7 @@ router.post('/vps', requireAuth, vpsController.createServer);
 router.put('/vps/:id', requireAuth, vpsController.updateServer);
 router.delete('/vps/:id', requireAuth, vpsController.deleteServer);
 router.post('/vps/test-connection', requireAuth, vpsController.testConnection);
+router.post('/vps/:id/deploy-backend', requireAuth, vpsController.redeployBackend);
 router.post('/settings', requireAuth, vpsController.saveSetting);
 
 // Protected Docker Apps Management routes (Requires Approved Admin Login)
@@ -75,6 +77,10 @@ router.post('/vps/:id/scripts/run', requireAuth, scriptController.executeScript)
 router.get('/vps/:id/sounds/validate', requireAuth, soundController.validateSounds);
 router.get('/vps/sounds/compare', requireAuth, soundController.compareAllPodSounds);
 router.get('/vps/metadata/compare', requireAuth, soundController.compareAllPodMetadata);
+
+// Protected Pod Configuration routes (Requires Approved Admin Login)
+router.get('/vps/:id/pod-config', requireAuth, podConfigController.getPodConfig);
+router.put('/vps/:id/pod-config', requireAuth, podConfigController.updatePodConfig);
 
 // Protected Database Synchronization routes (Requires Approved Admin Login)
 router.get('/sync/info', requireAuth, syncController.getSyncInfo);
