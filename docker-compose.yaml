@@ -14,6 +14,8 @@ services:
     volumes:
       # Persistent volume for SQLite database so VPS config is saved permanently
       - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/pod/dev:/home/pod/dev
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:5002/api/health || exit 1"]
       interval: 30s

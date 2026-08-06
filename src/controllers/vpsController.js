@@ -738,27 +738,31 @@ const redeployBackend = async (req, res) => {
       return res.status(404).json({ message: 'Server tidak ditemukan.' });
     }
 
+    const hasSSHInfo = Boolean(server.host && server.username && (server.password || server.private_key));
+    const useSSH = hasSSHInfo || server.is_local !== 1;
+
     const deployCommand = `
       if [ -f "/home/pod/dev/scripts/deploy.sh" ]; then
         bash /home/pod/dev/scripts/deploy.sh
       elif [ -f "/home/pod/dev/be-vps-monitoring/scripts/deploy.sh" ]; then
         bash /home/pod/dev/be-vps-monitoring/scripts/deploy.sh
-      elif [ -f "./scripts/deploy.sh" ]; then
-        bash ./scripts/deploy.sh
       elif [ -d "/home/pod/dev/be-vps-monitoring" ]; then
         cd /home/pod/dev/be-vps-monitoring && git pull origin main && docker compose down && docker compose up -d --build
       elif [ -d "/home/pod/be-vps-monitoring" ]; then
         cd /home/pod/be-vps-monitoring && git pull origin main && docker compose down && docker compose up -d --build
-      else
+      elif [ -d "./.git" ]; then
         git pull origin main && docker compose down && docker compose up -d --build
+      else
+        echo "[!] ERROR: Folder .git tidak ditemukan di dalam filesystem container (/app)."
+        echo "[!] CARA MENGATASI:"
+        echo "    1. Masukkan Host IP, Username, dan Password/Key SSH pada menu Edit Server di Web App agar tombol ini mengeksekusi langsung di Host OS server luar container."
+        echo "    2. ATAU jalankan perintah 'cd ~/dev && bash scripts/deploy.sh' langsung di terminal SSH Host Server Anda."
+        exit 1
       fi
     `;
 
-    const hasSSHInfo = Boolean(server.host && server.username && (server.password || server.private_key));
-    const useLocalExec = server.is_local === 1 && !hasSSHInfo;
-
     const output = await new Promise((resolve) => {
-      if (useLocalExec) {
+      if (!useSSH) {
         require('child_process').exec(deployCommand, { timeout: 120000 }, (error, stdout, stderr) => {
           resolve((stdout || '') + (stderr || ''));
         });
