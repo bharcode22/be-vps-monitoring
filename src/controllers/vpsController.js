@@ -733,7 +733,7 @@ const saveSetting = async (req, res) => {
 const redeployBackend = async (req, res) => {
   const { id } = req.params;
   try {
-    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
+    const server = await db.get('SELECT * FROM servers WHERE id = ?', [id]);
     if (!server) {
       return res.status(404).json({ message: 'Server tidak ditemukan.' });
     }
