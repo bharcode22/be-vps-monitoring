@@ -559,39 +559,41 @@ async function deployBatchPodAppServerStream({ server_ids, env, app_configs, onL
   let totalSuccess = 0;
   let totalFail = 0;
 
-  for (const server of serverList) {
-    onLog(`\n======================================================================`);
-    onLog(`>>> PROSES DEPLOYMENT UNTUK SERVER: ${server.name} (${server.host}:${server.port || 22})`);
-    onLog(`======================================================================\n`);
+  // Execute deployment across ALL target POD servers simultaneously in parallel using Promise.all
+  await Promise.all(
+    serverList.map(async (server) => {
+      onLog(`\n======================================================================`);
+      onLog(`>>> [PARALLEL NODE START] PROSES DEPLOYMENT UNTUK SERVER: ${server.name} (${server.host}:${server.port || 22})`);
+      onLog(`======================================================================\n`);
 
-    // Phase 1: Clean old files & Parallel downloads of all app artifacts from MinIO
-    let downloadScript = `mkdir -p ~/${environment}\ncd ~/${environment}\necho "[JENKINS_STAGE:1:START:${server.name}]"\necho "=== [STAGE 1/5] Clean & MinIO Parallel Download ==="\nrm -rf ./* 2>/dev/null || true\n`;
+      // Phase 1: Clean old files & Parallel downloads of all app artifacts from MinIO
+      let downloadScript = `mkdir -p ~/${environment}\ncd ~/${environment}\necho "[JENKINS_STAGE:1:START:${server.name}]"\necho "=== [STAGE 1/5] Clean & MinIO Parallel Download ==="\nrm -rf ./* 2>/dev/null || true\n`;
 
-    app_configs.forEach(cfg => {
-      const minioAppPath = cfg.app_name === 'mobile-consume' ? 'mobile-consumer' : cfg.app_name;
-      downloadScript += `echo "  [mc cp] Downloading ${cfg.app_name} (${cfg.version}) in background..."\n`;
-      downloadScript += `mc cp --recursive minio-deploy/deploybox/${minioAppPath}/${environment}/${cfg.version} ./ &\n`;
-    });
-    downloadScript += `echo "  [mc cp] Menunggu seluruh download paralel selesai..."\nwait\necho "✔ [STAGE 1/5 SELESAI] All MinIO artifacts downloaded successfully!"\necho "[JENKINS_STAGE:1:END:${server.name}]"\n\n`;
+      app_configs.forEach(cfg => {
+        const minioAppPath = cfg.app_name === 'mobile-consume' ? 'mobile-consumer' : cfg.app_name;
+        downloadScript += `echo "  [mc cp] Downloading ${cfg.app_name} (${cfg.version}) in background..."\n`;
+        downloadScript += `mc cp --recursive minio-deploy/deploybox/${minioAppPath}/${environment}/${cfg.version} ./ &\n`;
+      });
+      downloadScript += `echo "  [mc cp] Menunggu seluruh download paralel selesai..."\nwait\necho "✔ [STAGE 1/5 SELESAI] All MinIO artifacts downloaded successfully!"\necho "[JENKINS_STAGE:1:END:${server.name}]"\n\n`;
 
-    // Phase 2: Sequential container deployment per app
-    let deployScriptPerApp = `echo "=== PHASE 2: Unzipping, Loading Image & Docker Compose Up ==="\n`;
-    app_configs.forEach(cfg => {
-      let envFileSnippet = '';
-      if (cfg.env_filename) {
-        const envPath = path.join(__dirname, '../../envoirment', cfg.env_filename);
-        if (fs.existsSync(envPath)) {
-          const content = fs.readFileSync(envPath, 'utf8');
-          envFileSnippet = `cat << 'EOF_ENV_${cfg.app_name}' > .env\n${content}\nEOF_ENV_${cfg.app_name}\necho "File .env (${cfg.env_filename}) berhasil ditulis."\n`;
+      // Phase 2: Sequential container deployment per app
+      let deployScriptPerApp = `echo "=== PHASE 2: Unzipping, Loading Image & Docker Compose Up ==="\n`;
+      app_configs.forEach(cfg => {
+        let envFileSnippet = '';
+        if (cfg.env_filename) {
+          const envPath = path.join(__dirname, '../../envoirment', cfg.env_filename);
+          if (fs.existsSync(envPath)) {
+            const content = fs.readFileSync(envPath, 'utf8');
+            envFileSnippet = `cat << 'EOF_ENV_${cfg.app_name}' > .env\n${content}\nEOF_ENV_${cfg.app_name}\necho "File .env (${cfg.env_filename}) berhasil ditulis."\n`;
+          }
         }
-      }
 
-      let prismaSnippet = '';
-      if (cfg.run_prisma_migrate) {
-        prismaSnippet = `echo "=== Running npx prisma migrate dev ==="\nif [ -d "prisma" ] || [ -f "schema.prisma" ]; then\n  npx prisma migrate dev --name "deploy" || npx prisma migrate deploy || echo "Peringatan: prisma migrate dev gagal"\nelif docker ps --format '{{.Names}}' | grep -q "${cfg.app_name}"; then\n  docker exec ${cfg.app_name} npx prisma migrate deploy 2>/dev/null || true\nfi\n`;
-      }
+        let prismaSnippet = '';
+        if (cfg.run_prisma_migrate) {
+          prismaSnippet = `echo "=== Running npx prisma migrate dev ==="\nif [ -d "prisma" ] || [ -f "schema.prisma" ]; then\n  npx prisma migrate dev --name "deploy" || npx prisma migrate deploy || echo "Peringatan: prisma migrate dev gagal"\nelif docker ps --format '{{.Names}}' | grep -q "${cfg.app_name}"; then\n  docker exec ${cfg.app_name} npx prisma migrate deploy 2>/dev/null || true\nfi\n`;
+        }
 
-      deployScriptPerApp += `
+        deployScriptPerApp += `
 echo ""
 echo "----------------------------------------------------------------------"
 echo ">>> [APLIKASI] DEPLOYING ${cfg.app_name} (${cfg.version}) on ${server.name}..."
@@ -658,34 +660,35 @@ echo "✔ [SUCCESS] ${cfg.app_name} berhasil di-deploy di server ${server.name}!
 echo "STATUS_APP_SUCCESS:${cfg.app_name}:${server.name}"
 echo "[JENKINS_STAGE:5:END:${server.name}:${cfg.app_name}]"
 `;
-    });
+      });
 
-    const fullBatchScript = (downloadScript + deployScriptPerApp + `\necho "=== BATCH DEPLOYMENT SELESAI UNTUK SERVER ${server.name} ===\n"`).trim();
+      const fullBatchScript = (downloadScript + deployScriptPerApp + `\necho "=== BATCH DEPLOYMENT SELESAI UNTUK SERVER ${server.name} ===\n"`).trim();
 
-    let serverSuccessCount = 0;
-    let serverFailCount = 0;
+      let serverSuccessCount = 0;
+      let serverFailCount = 0;
 
-    const res = await executeSSHCommandStream(server, fullBatchScript, (chunk) => {
-      onLog(chunk);
-      if (chunk.includes('STATUS_APP_SUCCESS:')) {
-        serverSuccessCount++;
-      }
-      if (chunk.includes('STATUS_APP_FAIL:')) {
-        serverFailCount++;
-      }
-    });
+      const res = await executeSSHCommandStream(server, fullBatchScript, (chunk) => {
+        onLog(chunk);
+        if (chunk.includes('STATUS_APP_SUCCESS:')) {
+          serverSuccessCount++;
+        }
+        if (chunk.includes('STATUS_APP_FAIL:')) {
+          serverFailCount++;
+        }
+      });
 
-    if (serverSuccessCount === 0 && serverFailCount === 0) {
-      if (res.success) {
-        totalSuccess += app_configs.length;
+      if (serverSuccessCount === 0 && serverFailCount === 0) {
+        if (res.success) {
+          totalSuccess += app_configs.length;
+        } else {
+          totalFail += app_configs.length;
+        }
       } else {
-        totalFail += app_configs.length;
+        totalSuccess += serverSuccessCount;
+        totalFail += serverFailCount;
       }
-    } else {
-      totalSuccess += serverSuccessCount;
-      totalFail += serverFailCount;
-    }
-  }
+    })
+  );
 
   onLog(`\n======================================================================`);
   onLog(`=== SELURUH BATCH DEPLOYMENT SELESAI ===`);
