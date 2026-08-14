@@ -622,7 +622,12 @@ ${prismaSnippet}
 echo "[JENKINS_STAGE:3:END:${server.name}:${cfg.app_name}]"
 
 echo "[JENKINS_STAGE:4:START:${server.name}:${cfg.app_name}]"
-echo "[STAGE 4/5] Memuat Docker Image tarball & Pruning Network sisa (${cfg.app_name})..."
+echo "[STAGE 4/5] Memuat Docker Image tarball & Pre-creating Host Volume Directories (${cfg.app_name})..."
+
+# Pre-create required host volume mount paths for applications like mobile-synch
+mkdir -p /home/pod/Documents/tokens /home/pod/videos /home/pod/images /home/pod/sounds /home/pod/logs /home/pod/flow-editor 2>/dev/null || true
+chmod -R 777 /home/pod/Documents/tokens /home/pod/videos /home/pod/images /home/pod/sounds /home/pod/logs /home/pod/flow-editor 2>/dev/null || true
+
 if [ -f "docker-compose.yaml" ]; then
   docker compose -f docker-compose.yaml down 2>/dev/null || docker-compose -f docker-compose.yaml down 2>/dev/null || true
 elif [ -f "docker-compose.yml" ]; then
@@ -653,11 +658,19 @@ else
   echo "Peringatan: File docker-compose.yaml tidak ditemukan"
 fi
 
-echo "Menunggu inisialisasi kontainer 3 detik..."
-sleep 3
+echo "Menunggu inisialisasi kontainer 4 detik..."
+sleep 4
 
-echo "✔ [SUCCESS] ${cfg.app_name} berhasil di-deploy di server ${server.name}!"
-echo "STATUS_APP_SUCCESS:${cfg.app_name}:${server.name}"
+if docker ps --format '{{.Names}}' | grep -i -q "${cfg.app_name}"; then
+  echo "✔ [SUCCESS] Kontainer ${cfg.app_name} berhasil berjalan di server ${server.name}!"
+  echo "STATUS_APP_SUCCESS:${cfg.app_name}:${server.name}"
+else
+  echo "❌ [ERROR] Kontainer ${cfg.app_name} tidak ditemukan berjalan di docker ps!"
+  echo "--- DIAGNOSTIK DOCKER LOGS (${cfg.app_name}) ---"
+  docker logs ${cfg.app_name} --tail 25 2>&1 || true
+  echo "--------------------------------------------------"
+  echo "STATUS_APP_FAIL:${cfg.app_name}:${server.name}"
+fi
 echo "[JENKINS_STAGE:5:END:${server.name}:${cfg.app_name}]"
 `;
       });
