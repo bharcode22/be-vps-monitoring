@@ -564,15 +564,15 @@ async function deployBatchPodAppServerStream({ server_ids, env, app_configs, onL
     onLog(`>>> PROSES DEPLOYMENT UNTUK SERVER: ${server.name} (${server.host}:${server.port || 22})`);
     onLog(`======================================================================\n`);
 
-    // Phase 1: Parallel downloads of all app artifacts from MinIO
-    let downloadScript = `mkdir -p ~/${environment}\ncd ~/${environment}\necho "=== [STEP 1/5] Mendownload Artefak MinIO (mc cp) secara Paralel ==="\n`;
+    // Phase 1: Clean old files & Parallel downloads of all app artifacts from MinIO
+    let downloadScript = `mkdir -p ~/${environment}\ncd ~/${environment}\necho "[JENKINS_STAGE:1:START:${server.name}]"\necho "=== [STAGE 1/5] Clean & MinIO Parallel Download ==="\nrm -rf ./* 2>/dev/null || true\n`;
 
     app_configs.forEach(cfg => {
       const minioAppPath = cfg.app_name === 'mobile-consume' ? 'mobile-consumer' : cfg.app_name;
       downloadScript += `echo "  [mc cp] Downloading ${cfg.app_name} (${cfg.version}) in background..."\n`;
       downloadScript += `mc cp --recursive minio-deploy/deploybox/${minioAppPath}/${environment}/${cfg.version} ./ &\n`;
     });
-    downloadScript += `echo "  [mc cp] Menunggu seluruh download paralel selesai..."\nwait\necho "✔ [STEP 1/5 SELESAI] All MinIO artifacts downloaded successfully!"\n\n`;
+    downloadScript += `echo "  [mc cp] Menunggu seluruh download paralel selesai..."\nwait\necho "✔ [STAGE 1/5 SELESAI] All MinIO artifacts downloaded successfully!"\necho "[JENKINS_STAGE:1:END:${server.name}]"\n\n`;
 
     // Phase 2: Sequential container deployment per app
     let deployScriptPerApp = `echo "=== PHASE 2: Unzipping, Loading Image & Docker Compose Up ==="\n`;
@@ -602,7 +602,8 @@ else
   cd ~/${environment}
 fi
 
-echo "[STEP 2/5] Meng-unzip arsip artefak (${cfg.app_name})..."
+echo "[JENKINS_STAGE:2:START:${server.name}:${cfg.app_name}]"
+echo "[STAGE 2/5] Meng-unzip arsip artefak (${cfg.app_name})..."
 if [ -f "artifact-bundle-${cfg.version}.zip" ]; then
   unzip -o "artifact-bundle-${cfg.version}.zip"
 elif ls artifact-bundle-*.zip 1>/dev/null 2>&1; then
@@ -610,11 +611,16 @@ elif ls artifact-bundle-*.zip 1>/dev/null 2>&1; then
 elif ls *.zip 1>/dev/null 2>&1; then
   unzip -o *.zip
 fi
+echo "[JENKINS_STAGE:2:END:${server.name}:${cfg.app_name}]"
 
-echo "[STEP 3/5] Meng-inject file .env & Prisma Migration (${cfg.app_name})..."
+echo "[JENKINS_STAGE:3:START:${server.name}:${cfg.app_name}]"
+echo "[STAGE 3/5] Meng-inject file .env & Prisma Migration (${cfg.app_name})..."
 ${envFileSnippet}
+${prismaSnippet}
+echo "[JENKINS_STAGE:3:END:${server.name}:${cfg.app_name}]"
 
-echo "[STEP 4/5] Memuat Docker Image tarball & Pruning Network sisa (${cfg.app_name})..."
+echo "[JENKINS_STAGE:4:START:${server.name}:${cfg.app_name}]"
+echo "[STAGE 4/5] Memuat Docker Image tarball & Pruning Network sisa (${cfg.app_name})..."
 if [ -f "docker-compose.yaml" ]; then
   docker compose -f docker-compose.yaml down 2>/dev/null || docker-compose -f docker-compose.yaml down 2>/dev/null || true
 elif [ -f "docker-compose.yml" ]; then
@@ -633,10 +639,10 @@ elif [ -f "image-${cfg.version}.tar.gz" ]; then
   echo "  [docker load] Loading Docker Image from image-${cfg.version}.tar.gz..."
   docker load < "image-${cfg.version}.tar.gz"
 fi
+echo "[JENKINS_STAGE:4:END:${server.name}:${cfg.app_name}]"
 
-${prismaSnippet}
-
-echo "[STEP 5/5] Menjalankan Docker Compose Up (${cfg.app_name})..."
+echo "[JENKINS_STAGE:5:START:${server.name}:${cfg.app_name}]"
+echo "[STAGE 5/5] Menjalankan Docker Compose Up (${cfg.app_name})..."
 if [ -f "docker-compose.yaml" ]; then
   docker compose -f docker-compose.yaml up -d || docker-compose -f docker-compose.yaml up -d
 elif [ -f "docker-compose.yml" ]; then
@@ -650,6 +656,7 @@ sleep 3
 
 echo "✔ [SUCCESS] ${cfg.app_name} berhasil di-deploy di server ${server.name}!"
 echo "STATUS_APP_SUCCESS:${cfg.app_name}:${server.name}"
+echo "[JENKINS_STAGE:5:END:${server.name}:${cfg.app_name}]"
 `;
     });
 
