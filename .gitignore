@@ -5,6 +5,8 @@ node_modules/
 .env
 .env.*
 !.env.example
+envoirment/
+*.env
 
 # SQLite Database Data directory (Contains VPS credentials & performance history)
 data/

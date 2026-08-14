@@ -9,6 +9,7 @@ const soundController = require('../controllers/soundController');
 const podConfigController = require('../controllers/podConfigController');
 const syncController = require('../controllers/syncController');
 const rabbitmqController = require('../controllers/rabbitmqController');
+const installationController = require('../controllers/installationController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // Health check endpoint
@@ -97,5 +98,10 @@ router.delete('/rabbitmq/:id', requireAuth, rabbitmqController.deleteRabbitMq);
 router.get('/rabbitmq/:id/status', requireAuth, rabbitmqController.getRabbitMqStatus);
 router.post('/rabbitmq/:id/commands/execute', requireAuth, rabbitmqController.executeCommand);
 router.post('/rabbitmq/trace-event', rabbitmqController.receiveTraceEvent);
+
+// Protected POD v3 Installation routes
+router.get('/vps/installation/env-files', requireAuth, installationController.getEnvFiles);
+router.get('/vps/installation/versions', requireAuth, installationController.getVersions);
+router.post('/vps/installation/deploy', requireAuth, installationController.deployApp);
 
 module.exports = router;
