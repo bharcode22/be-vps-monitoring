@@ -61,6 +61,10 @@ setInterval(async () => {
   }
 }, MONITOR_INTERVAL);
 
+// Set HTTP server timeout for long-running SSH deployment tasks (5 minutes)
+server.timeout = 300000;
+server.keepAliveTimeout = 300000;
+
 server.listen(PORT, () => {
   console.log(`🚀 Server Backend VPS Monitoring berjalan di http://localhost:${PORT}`);
 });

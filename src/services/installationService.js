@@ -51,7 +51,7 @@ async function getEnvFiles() {
 function executeSSHCommand(server, command) {
   return new Promise((resolve, reject) => {
     if (server.is_local === 1) {
-      exec(command, { timeout: 90000 }, (error, stdout, stderr) => {
+      exec(command, { timeout: 300000 }, (error, stdout, stderr) => {
         if (error) {
           return resolve({ success: false, stdout, stderr: stderr.trim() || error.message });
         }
@@ -65,9 +65,9 @@ function executeSSHCommand(server, command) {
         if (!isHandled) {
           isHandled = true;
           conn.end();
-          resolve({ success: false, stdout: '', stderr: 'Koneksi SSH ke server waktu habis (timeout 90 detik)' });
+          resolve({ success: false, stdout: '', stderr: 'Koneksi SSH ke server waktu habis (timeout 5 menit)' });
         }
-      }, 90000);
+      }, 300000);
 
       const sshConfig = {
         host: server.host,
