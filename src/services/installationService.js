@@ -598,10 +598,11 @@ echo ""
 echo "----------------------------------------------------------------------"
 echo ">>> [APLIKASI] DEPLOYING ${cfg.app_name} (${cfg.version}) on ${server.name}..."
 echo "----------------------------------------------------------------------"
+
+# Always reset working directory to parent ~/${environment} before navigating to cfg.version
+cd ~/${environment}
 if [ -d "${cfg.version}" ]; then
   cd ~/${environment}/${cfg.version}
-else
-  cd ~/${environment}
 fi
 
 INSTALL_LOG="~/${environment}/${cfg.app_name}-deploy.log"
