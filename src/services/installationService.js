@@ -604,14 +604,17 @@ else
   cd ~/${environment}
 fi
 
+INSTALL_LOG="~/${environment}/${cfg.app_name}-deploy.log"
+echo "=== LOG INSTALASI ${cfg.app_name} (${cfg.version}) - $(date) ===" > "$INSTALL_LOG"
+
 echo "[JENKINS_STAGE:2:START:${server.name}:${cfg.app_name}]"
 echo "[STAGE 2/5] Meng-unzip arsip artefak (${cfg.app_name})..."
 if [ -f "artifact-bundle-${cfg.version}.zip" ]; then
-  unzip -o "artifact-bundle-${cfg.version}.zip"
+  unzip -o "artifact-bundle-${cfg.version}.zip" 2>&1 | tee -a "$INSTALL_LOG"
 elif ls artifact-bundle-*.zip 1>/dev/null 2>&1; then
-  unzip -o artifact-bundle-*.zip
+  unzip -o artifact-bundle-*.zip 2>&1 | tee -a "$INSTALL_LOG"
 elif ls *.zip 1>/dev/null 2>&1; then
-  unzip -o *.zip
+  unzip -o *.zip 2>&1 | tee -a "$INSTALL_LOG"
 fi
 echo "[JENKINS_STAGE:2:END:${server.name}:${cfg.app_name}]"
 
@@ -629,9 +632,9 @@ mkdir -p /home/pod/Documents/tokens /home/pod/videos /home/pod/images /home/pod/
 chmod -R 777 /home/pod/Documents/tokens /home/pod/videos /home/pod/images /home/pod/sounds /home/pod/logs /home/pod/flow-editor 2>/dev/null || true
 
 if [ -f "docker-compose.yaml" ]; then
-  docker compose -f docker-compose.yaml down 2>/dev/null || docker-compose -f docker-compose.yaml down 2>/dev/null || true
+  docker compose -f docker-compose.yaml down 2>&1 | tee -a "$INSTALL_LOG" || docker-compose -f docker-compose.yaml down 2>&1 | tee -a "$INSTALL_LOG" || true
 elif [ -f "docker-compose.yml" ]; then
-  docker compose -f docker-compose.yml down 2>/dev/null || docker-compose -f docker-compose.yml down 2>/dev/null || true
+  docker compose -f docker-compose.yml down 2>&1 | tee -a "$INSTALL_LOG" || docker-compose -f docker-compose.yml down 2>&1 | tee -a "$INSTALL_LOG" || true
 fi
 docker stop ${cfg.app_name} 2>/dev/null || true
 docker rm ${cfg.app_name} 2>/dev/null || true
@@ -641,36 +644,39 @@ docker image prune -f 2>/dev/null || true
 IMAGE_FILE=$(ls image-*.tar.gz 2>/dev/null | head -n 1)
 if [ -n "$IMAGE_FILE" ]; then
   echo "  [docker load] Loading Docker Image from $IMAGE_FILE..."
-  docker load < "$IMAGE_FILE"
+  docker load < "$IMAGE_FILE" 2>&1 | tee -a "$INSTALL_LOG"
 elif [ -f "image-${cfg.version}.tar.gz" ]; then
   echo "  [docker load] Loading Docker Image from image-${cfg.version}.tar.gz..."
-  docker load < "image-${cfg.version}.tar.gz"
+  docker load < "image-${cfg.version}.tar.gz" 2>&1 | tee -a "$INSTALL_LOG"
 fi
 echo "[JENKINS_STAGE:4:END:${server.name}:${cfg.app_name}]"
 
 echo "[JENKINS_STAGE:5:START:${server.name}:${cfg.app_name}]"
 echo "[STAGE 5/5] Menjalankan Docker Compose Up (${cfg.app_name})..."
 if [ -f "docker-compose.yaml" ]; then
-  docker compose -f docker-compose.yaml up -d || docker-compose -f docker-compose.yaml up -d
+  docker compose -f docker-compose.yaml up -d 2>&1 | tee -a "$INSTALL_LOG" || docker-compose -f docker-compose.yaml up -d 2>&1 | tee -a "$INSTALL_LOG"
 elif [ -f "docker-compose.yml" ]; then
-  docker compose -f docker-compose.yml up -d || docker-compose -f docker-compose.yml up -d
+  docker compose -f docker-compose.yml up -d 2>&1 | tee -a "$INSTALL_LOG" || docker-compose -f docker-compose.yml up -d 2>&1 | tee -a "$INSTALL_LOG"
 else
-  echo "Peringatan: File docker-compose.yaml tidak ditemukan"
+  echo "Peringatan: File docker-compose.yaml tidak ditemukan" | tee -a "$INSTALL_LOG"
 fi
 
 echo "Menunggu inisialisasi kontainer 4 detik..."
 sleep 4
 
-if docker ps --format '{{.Names}}' | grep -i -q "${cfg.app_name}"; then
-  echo "✔ [SUCCESS] Kontainer ${cfg.app_name} berhasil berjalan di server ${server.name}!"
+if docker ps --format '{{.Names}}' | grep -i -q "${cfg.app_name}" || docker compose ps 2>/dev/null | grep -i -q "Up"; then
+  echo "✔ [SUCCESS] Kontainer ${cfg.app_name} berhasil berjalan di server ${server.name}!" | tee -a "$INSTALL_LOG"
   echo "STATUS_APP_SUCCESS:${cfg.app_name}:${server.name}"
 else
-  echo "❌ [ERROR] Kontainer ${cfg.app_name} tidak ditemukan berjalan di docker ps!"
-  echo "--- DIAGNOSTIK DOCKER LOGS (${cfg.app_name}) ---"
-  docker logs ${cfg.app_name} --tail 25 2>&1 || true
-  echo "--------------------------------------------------"
+  echo "❌ [ERROR] Kontainer ${cfg.app_name} tidak terdeteksi di docker ps!" | tee -a "$INSTALL_LOG"
+  echo "--- DIAGNOSTIK DOCKER COMPOSE PS (${cfg.app_name}) ---" | tee -a "$INSTALL_LOG"
+  docker compose ps 2>&1 | tee -a "$INSTALL_LOG" || true
+  echo "--- DIAGNOSTIK DOCKER COMPOSE LOGS (${cfg.app_name}) ---" | tee -a "$INSTALL_LOG"
+  docker compose logs --tail 30 2>&1 | tee -a "$INSTALL_LOG" || true
+  echo "--------------------------------------------------" | tee -a "$INSTALL_LOG"
   echo "STATUS_APP_FAIL:${cfg.app_name}:${server.name}"
 fi
+echo "Log lengkap tersimpan di server: $INSTALL_LOG"
 echo "[JENKINS_STAGE:5:END:${server.name}:${cfg.app_name}]"
 `;
       });
