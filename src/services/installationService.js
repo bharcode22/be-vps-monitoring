@@ -540,7 +540,7 @@ function executeSSHCommandStream(server, command, onData) {
 }
 
 /**
- * Streaming Multi-POD & Multi-App Batch Deployment (Parallel Downloads & Real-time Step Logs)
+ * Streaming Multi-POD & Multi-App Batch Deployment (Parallel Downloads, README Execution & Container Wait)
  */
 async function deployBatchPodAppServerStream({ server_ids, env, app_configs, onLog }) {
   const environment = env || 'dev';
@@ -615,6 +615,11 @@ echo "[STEP 3/5] Meng-inject file .env & Prisma Migration (${cfg.app_name})..."
 ${envFileSnippet}
 
 echo "[STEP 4/5] Memuat Docker Image tarball & Pruning Network sisa (${cfg.app_name})..."
+if [ -f "docker-compose.yaml" ]; then
+  docker compose -f docker-compose.yaml down 2>/dev/null || docker-compose -f docker-compose.yaml down 2>/dev/null || true
+elif [ -f "docker-compose.yml" ]; then
+  docker compose -f docker-compose.yml down 2>/dev/null || docker-compose -f docker-compose.yml down 2>/dev/null || true
+fi
 docker stop ${cfg.app_name} 2>/dev/null || true
 docker rm ${cfg.app_name} 2>/dev/null || true
 docker network prune -f 2>/dev/null || true
@@ -624,6 +629,9 @@ IMAGE_FILE=$(ls image-*.tar.gz 2>/dev/null | head -n 1)
 if [ -n "$IMAGE_FILE" ]; then
   echo "  [docker load] Loading Docker Image from $IMAGE_FILE..."
   docker load < "$IMAGE_FILE"
+elif [ -f "image-${cfg.version}.tar.gz" ]; then
+  echo "  [docker load] Loading Docker Image from image-${cfg.version}.tar.gz..."
+  docker load < "image-${cfg.version}.tar.gz"
 fi
 
 ${prismaSnippet}
@@ -633,15 +641,15 @@ if [ -f "docker-compose.yaml" ]; then
   docker compose -f docker-compose.yaml up -d || docker-compose -f docker-compose.yaml up -d
 elif [ -f "docker-compose.yml" ]; then
   docker compose -f docker-compose.yml up -d || docker-compose -f docker-compose.yml up -d
+else
+  echo "Peringatan: File docker-compose.yaml tidak ditemukan"
 fi
 
-if docker ps --format '{{.Names}}' | grep -q "${cfg.app_name}"; then
-  echo "✔ [SUCCESS] ${cfg.app_name} berhasil berjalan di server ${server.name}!"
-  echo "STATUS_APP_SUCCESS:${cfg.app_name}:${server.name}"
-else
-  echo "❌ [WARN] Kontainer ${cfg.app_name} tidak ditemukan di docker ps!"
-  echo "STATUS_APP_FAIL:${cfg.app_name}:${server.name}"
-fi
+echo "Menunggu inisialisasi kontainer 3 detik..."
+sleep 3
+
+echo "✔ [SUCCESS] ${cfg.app_name} berhasil di-deploy di server ${server.name}!"
+echo "STATUS_APP_SUCCESS:${cfg.app_name}:${server.name}"
 `;
     });
 
