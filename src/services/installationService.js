@@ -540,7 +540,7 @@ function executeSSHCommandStream(server, command, onData) {
 }
 
 /**
- * Streaming Multi-POD & Multi-App Batch Deployment (Parallel Downloads & Real-time Logs)
+ * Streaming Multi-POD & Multi-App Batch Deployment (Parallel Downloads & Real-time Step Logs)
  */
 async function deployBatchPodAppServerStream({ server_ids, env, app_configs, onLog }) {
   const environment = env || 'dev';
@@ -565,17 +565,17 @@ async function deployBatchPodAppServerStream({ server_ids, env, app_configs, onL
     onLog(`======================================================================\n`);
 
     // Phase 1: Parallel downloads of all app artifacts from MinIO
-    let downloadScript = `set -e\nmkdir -p ~/${environment}\ncd ~/${environment}\necho "=== PHASE 1: Mendownload Artefak MinIO Secara Paralel (Simultaneous) ==="\n`;
+    let downloadScript = `mkdir -p ~/${environment}\ncd ~/${environment}\necho "=== [STEP 1/5] Mendownload Artefak MinIO (mc cp) secara Paralel ==="\n`;
 
     app_configs.forEach(cfg => {
       const minioAppPath = cfg.app_name === 'mobile-consume' ? 'mobile-consumer' : cfg.app_name;
-      downloadScript += `echo "  -> Downloading ${cfg.app_name} (${cfg.version}) in background..."\n`;
+      downloadScript += `echo "  [mc cp] Downloading ${cfg.app_name} (${cfg.version}) in background..."\n`;
       downloadScript += `mc cp --recursive minio-deploy/deploybox/${minioAppPath}/${environment}/${cfg.version} ./ &\n`;
     });
-    downloadScript += `echo "  -> Menunggu seluruh download selesai..."\nwait\necho "✔ PHASE 1 SELESAI: All artifacts downloaded successfully!"\n\n`;
+    downloadScript += `echo "  [mc cp] Menunggu seluruh download paralel selesai..."\nwait\necho "✔ [STEP 1/5 SELESAI] All MinIO artifacts downloaded successfully!"\n\n`;
 
     // Phase 2: Sequential container deployment per app
-    let deployScriptPerApp = `echo "=== PHASE 2: Deploying Applications ==="\n`;
+    let deployScriptPerApp = `echo "=== PHASE 2: Unzipping, Loading Image & Docker Compose Up ==="\n`;
     app_configs.forEach(cfg => {
       let envFileSnippet = '';
       if (cfg.env_filename) {
@@ -594,7 +594,7 @@ async function deployBatchPodAppServerStream({ server_ids, env, app_configs, onL
       deployScriptPerApp += `
 echo ""
 echo "----------------------------------------------------------------------"
-echo ">>> DEPLOYING ${cfg.app_name} (${cfg.version}) on ${server.name}..."
+echo ">>> [APLIKASI] DEPLOYING ${cfg.app_name} (${cfg.version}) on ${server.name}..."
 echo "----------------------------------------------------------------------"
 if [ -d "${cfg.version}" ]; then
   cd ~/${environment}/${cfg.version}
@@ -602,7 +602,7 @@ else
   cd ~/${environment}
 fi
 
-echo "Extracting artifact bundle zip..."
+echo "[STEP 2/5] Meng-unzip arsip artefak (${cfg.app_name})..."
 if [ -f "artifact-bundle-${cfg.version}.zip" ]; then
   unzip -o "artifact-bundle-${cfg.version}.zip"
 elif ls artifact-bundle-*.zip 1>/dev/null 2>&1; then
@@ -611,45 +611,64 @@ elif ls *.zip 1>/dev/null 2>&1; then
   unzip -o *.zip
 fi
 
+echo "[STEP 3/5] Meng-inject file .env & Prisma Migration (${cfg.app_name})..."
 ${envFileSnippet}
 
-echo "Stopping & removing old container (${cfg.app_name})..."
+echo "[STEP 4/5] Memuat Docker Image tarball & Pruning Network sisa (${cfg.app_name})..."
 docker stop ${cfg.app_name} 2>/dev/null || true
 docker rm ${cfg.app_name} 2>/dev/null || true
-
 docker network prune -f 2>/dev/null || true
 docker image prune -f 2>/dev/null || true
 
 IMAGE_FILE=$(ls image-*.tar.gz 2>/dev/null | head -n 1)
 if [ -n "$IMAGE_FILE" ]; then
-  echo "Loading Docker Image from $IMAGE_FILE..."
+  echo "  [docker load] Loading Docker Image from $IMAGE_FILE..."
   docker load < "$IMAGE_FILE"
 fi
 
 ${prismaSnippet}
 
-echo "Starting new container with Docker Compose..."
+echo "[STEP 5/5] Menjalankan Docker Compose Up (${cfg.app_name})..."
 if [ -f "docker-compose.yaml" ]; then
   docker compose -f docker-compose.yaml up -d || docker-compose -f docker-compose.yaml up -d
 elif [ -f "docker-compose.yml" ]; then
   docker compose -f docker-compose.yml up -d || docker-compose -f docker-compose.yml up -d
 fi
 
-echo "✔ ${cfg.app_name} deployment completed on ${server.name}!"
+if docker ps --format '{{.Names}}' | grep -q "${cfg.app_name}"; then
+  echo "✔ [SUCCESS] ${cfg.app_name} berhasil berjalan di server ${server.name}!"
+  echo "STATUS_APP_SUCCESS:${cfg.app_name}:${server.name}"
+else
+  echo "❌ [WARN] Kontainer ${cfg.app_name} tidak ditemukan di docker ps!"
+  echo "STATUS_APP_FAIL:${cfg.app_name}:${server.name}"
+fi
 `;
     });
 
     const fullBatchScript = (downloadScript + deployScriptPerApp + `\necho "=== BATCH DEPLOYMENT SELESAI UNTUK SERVER ${server.name} ===\n"`).trim();
 
+    let serverSuccessCount = 0;
+    let serverFailCount = 0;
+
     const res = await executeSSHCommandStream(server, fullBatchScript, (chunk) => {
       onLog(chunk);
+      if (chunk.includes('STATUS_APP_SUCCESS:')) {
+        serverSuccessCount++;
+      }
+      if (chunk.includes('STATUS_APP_FAIL:')) {
+        serverFailCount++;
+      }
     });
 
-    if (res.success) {
-      totalSuccess += app_configs.length;
+    if (serverSuccessCount === 0 && serverFailCount === 0) {
+      if (res.success) {
+        totalSuccess += app_configs.length;
+      } else {
+        totalFail += app_configs.length;
+      }
     } else {
-      totalFail += app_configs.length;
-      onLog(`❌ ERROR pada server ${server.name}: ${res.stderr || 'Deployment gagal'}\n`);
+      totalSuccess += serverSuccessCount;
+      totalFail += serverFailCount;
     }
   }
 
