@@ -10,6 +10,7 @@ const { collectAllServerMetrics } = require('./services/vpsMonitor');
 const { registerDockerStreamHandlers } = require('./services/dockerLogStreamer');
 const { registerPm2StreamHandlers } = require('./services/pm2LogStreamer');
 const { registerRabbitMqTracerHandlers } = require('./services/rabbitmqTracer');
+const { registerInstallationStreamHandlers } = require('./services/installationStreamer');
 
 const app = express();
 const server = http.createServer(app);
@@ -45,6 +46,9 @@ io.on('connection', (socket) => {
 
   // Register real-time RabbitMQ Firehose Tracer handlers
   registerRabbitMqTracerHandlers(socket, io);
+
+  // Register real-time Batch Installation Stream handlers
+  registerInstallationStreamHandlers(socket, io);
 
   socket.on('disconnect', () => {
     console.log(`❌ Client disconnected: ${socket.id}`);

@@ -431,8 +431,239 @@ echo "=== DEPLOYMENT COMPLETED SUCCESSFULLY ==="
   };
 }
 
+/**
+ * Execute SSH command and stream stdout/stderr chunks in real-time
+ */
+function executeSSHCommandStream(server, command, onData) {
+  return new Promise((resolve) => {
+    if (server.is_local === 1) {
+      const child = exec(command, { timeout: 600000 });
+      let stdout = '';
+      let stderr = '';
+      if (child.stdout) {
+        child.stdout.on('data', data => {
+          const str = data.toString();
+          stdout += str;
+          if (onData) onData(str);
+        });
+      }
+      if (child.stderr) {
+        child.stderr.on('data', data => {
+          const str = data.toString();
+          stderr += str;
+          if (onData) onData(str);
+        });
+      }
+      child.on('close', code => {
+        resolve({ success: code === 0, code, stdout, stderr });
+      });
+      child.on('error', err => {
+        resolve({ success: false, stdout, stderr: err.message });
+      });
+    } else {
+      const conn = new Client();
+      let isHandled = false;
+
+      const timeout = setTimeout(() => {
+        if (!isHandled) {
+          isHandled = true;
+          conn.end();
+          if (onData) onData('\n❌ Koneksi SSH waktu habis (timeout 10 menit)\n');
+          resolve({ success: false, stdout: '', stderr: 'Timeout 10 menit' });
+        }
+      }, 600000);
+
+      const sshConfig = {
+        host: server.host,
+        port: server.port || 22,
+        username: server.username || 'pod',
+        readyTimeout: 30000
+      };
+
+      if (server.auth_type === 'key' && server.private_key) {
+        sshConfig.privateKey = server.private_key;
+      } else {
+        sshConfig.password = server.password;
+      }
+
+      conn.on('ready', () => {
+        conn.exec(command, (err, stream) => {
+          if (err) {
+            clearTimeout(timeout);
+            conn.end();
+            if (onData) onData(`\n❌ Error exec SSH: ${err.message}\n`);
+            return resolve({ success: false, stdout: '', stderr: err.message });
+          }
+
+          let stdout = '';
+          let stderr = '';
+
+          stream.on('data', (data) => {
+            const str = data.toString();
+            stdout += str;
+            if (onData) onData(str);
+          });
+          stream.stderr.on('data', (data) => {
+            const str = data.toString();
+            stderr += str;
+            if (onData) onData(str);
+          });
+
+          stream.on('close', (code) => {
+            clearTimeout(timeout);
+            conn.end();
+            if (!isHandled) {
+              isHandled = true;
+              resolve({
+                success: code === 0,
+                code,
+                stdout,
+                stderr
+              });
+            }
+          });
+        });
+      });
+
+      conn.on('error', (err) => {
+        clearTimeout(timeout);
+        if (!isHandled) {
+          isHandled = true;
+          if (onData) onData(`\n❌ SSH Connection Error: ${err.message}\n`);
+          resolve({ success: false, stdout: '', stderr: `Error koneksi SSH: ${err.message}` });
+        }
+      });
+
+      conn.connect(sshConfig);
+    }
+  });
+}
+
+/**
+ * Streaming Multi-POD & Multi-App Batch Deployment (Parallel Downloads & Real-time Logs)
+ */
+async function deployBatchPodAppServerStream({ server_ids, env, app_configs, onLog }) {
+  const environment = env || 'dev';
+  const serverList = [];
+  for (const sId of server_ids) {
+    const s = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [sId]);
+    if (s) serverList.push(s);
+  }
+
+  if (serverList.length === 0) {
+    throw new Error('Tidak ada server target POD v3 ditemukan');
+  }
+
+  onLog(`\n=== MEMULAI REAL-TIME BATCH DEPLOYMENT POD V3 (${serverList.length} SERVER, ${app_configs.length} APPS) ===\n`);
+
+  let totalSuccess = 0;
+  let totalFail = 0;
+
+  for (const server of serverList) {
+    onLog(`\n======================================================================`);
+    onLog(`>>> PROSES DEPLOYMENT UNTUK SERVER: ${server.name} (${server.host}:${server.port || 22})`);
+    onLog(`======================================================================\n`);
+
+    // Phase 1: Parallel downloads of all app artifacts from MinIO
+    let downloadScript = `set -e\nmkdir -p ~/${environment}\ncd ~/${environment}\necho "=== PHASE 1: Mendownload Artefak MinIO Secara Paralel (Simultaneous) ==="\n`;
+
+    app_configs.forEach(cfg => {
+      const minioAppPath = cfg.app_name === 'mobile-consume' ? 'mobile-consumer' : cfg.app_name;
+      downloadScript += `echo "  -> Downloading ${cfg.app_name} (${cfg.version}) in background..."\n`;
+      downloadScript += `mc cp --recursive minio-deploy/deploybox/${minioAppPath}/${environment}/${cfg.version} ./ &\n`;
+    });
+    downloadScript += `echo "  -> Menunggu seluruh download selesai..."\nwait\necho "✔ PHASE 1 SELESAI: All artifacts downloaded successfully!"\n\n`;
+
+    // Phase 2: Sequential container deployment per app
+    let deployScriptPerApp = `echo "=== PHASE 2: Deploying Applications ==="\n`;
+    app_configs.forEach(cfg => {
+      let envFileSnippet = '';
+      if (cfg.env_filename) {
+        const envPath = path.join(__dirname, '../../envoirment', cfg.env_filename);
+        if (fs.existsSync(envPath)) {
+          const content = fs.readFileSync(envPath, 'utf8');
+          envFileSnippet = `cat << 'EOF_ENV_${cfg.app_name}' > .env\n${content}\nEOF_ENV_${cfg.app_name}\necho "File .env (${cfg.env_filename}) berhasil ditulis."\n`;
+        }
+      }
+
+      let prismaSnippet = '';
+      if (cfg.run_prisma_migrate) {
+        prismaSnippet = `echo "=== Running npx prisma migrate dev ==="\nif [ -d "prisma" ] || [ -f "schema.prisma" ]; then\n  npx prisma migrate dev --name "deploy" || npx prisma migrate deploy || echo "Peringatan: prisma migrate dev gagal"\nelif docker ps --format '{{.Names}}' | grep -q "${cfg.app_name}"; then\n  docker exec ${cfg.app_name} npx prisma migrate deploy 2>/dev/null || true\nfi\n`;
+      }
+
+      deployScriptPerApp += `
+echo ""
+echo "----------------------------------------------------------------------"
+echo ">>> DEPLOYING ${cfg.app_name} (${cfg.version}) on ${server.name}..."
+echo "----------------------------------------------------------------------"
+if [ -d "${cfg.version}" ]; then
+  cd ~/${environment}/${cfg.version}
+else
+  cd ~/${environment}
+fi
+
+echo "Extracting artifact bundle zip..."
+if [ -f "artifact-bundle-${cfg.version}.zip" ]; then
+  unzip -o "artifact-bundle-${cfg.version}.zip"
+elif ls artifact-bundle-*.zip 1>/dev/null 2>&1; then
+  unzip -o artifact-bundle-*.zip
+elif ls *.zip 1>/dev/null 2>&1; then
+  unzip -o *.zip
+fi
+
+${envFileSnippet}
+
+echo "Stopping & removing old container (${cfg.app_name})..."
+docker stop ${cfg.app_name} 2>/dev/null || true
+docker rm ${cfg.app_name} 2>/dev/null || true
+
+docker network prune -f 2>/dev/null || true
+docker image prune -f 2>/dev/null || true
+
+IMAGE_FILE=$(ls image-*.tar.gz 2>/dev/null | head -n 1)
+if [ -n "$IMAGE_FILE" ]; then
+  echo "Loading Docker Image from $IMAGE_FILE..."
+  docker load < "$IMAGE_FILE"
+fi
+
+${prismaSnippet}
+
+echo "Starting new container with Docker Compose..."
+if [ -f "docker-compose.yaml" ]; then
+  docker compose -f docker-compose.yaml up -d || docker-compose -f docker-compose.yaml up -d
+elif [ -f "docker-compose.yml" ]; then
+  docker compose -f docker-compose.yml up -d || docker-compose -f docker-compose.yml up -d
+fi
+
+echo "✔ ${cfg.app_name} deployment completed on ${server.name}!"
+`;
+    });
+
+    const fullBatchScript = (downloadScript + deployScriptPerApp + `\necho "=== BATCH DEPLOYMENT SELESAI UNTUK SERVER ${server.name} ===\n"`).trim();
+
+    const res = await executeSSHCommandStream(server, fullBatchScript, (chunk) => {
+      onLog(chunk);
+    });
+
+    if (res.success) {
+      totalSuccess += app_configs.length;
+    } else {
+      totalFail += app_configs.length;
+      onLog(`❌ ERROR pada server ${server.name}: ${res.stderr || 'Deployment gagal'}\n`);
+    }
+  }
+
+  onLog(`\n======================================================================`);
+  onLog(`=== SELURUH BATCH DEPLOYMENT SELESAI ===`);
+  onLog(`Total Tugas Sukses: ${totalSuccess} | Total Tugas Gagal: ${totalFail}`);
+  onLog(`======================================================================\n`);
+
+  return { success: true, totalSuccess, totalFail };
+}
+
 module.exports = {
   getEnvFiles,
   getInstallationVersions,
-  deployPodApp
+  deployPodApp,
+  deployBatchPodAppServerStream
 };
