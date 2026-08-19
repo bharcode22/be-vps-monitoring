@@ -41,8 +41,9 @@ async function collectAllServerMetrics(io) {
         };
       }
 
-      // Save to database metrics_history table with throttling (every 15s) to save Disk I/O
-      const shouldSaveToDb = !lastDbSaveTimes[server.id] || (now - lastDbSaveTimes[server.id] >= DB_SAVE_INTERVAL_MS);
+      // Save to database metrics_history table with throttling (every 15s) for SSH/POD servers
+      const isSshServer = server.type === 'vps' || server.type === 'pod' || server.is_local === 1 || !server.type;
+      const shouldSaveToDb = isSshServer && (!lastDbSaveTimes[server.id] || (now - lastDbSaveTimes[server.id] >= DB_SAVE_INTERVAL_MS));
       if (shouldSaveToDb) {
         lastDbSaveTimes[server.id] = now;
         db.run(
@@ -83,7 +84,7 @@ async function collectAllServerMetrics(io) {
     }));
 
     // Cleanup history older than 24 hours to keep DB lightweight
-    await db.run(`DELETE FROM metrics_history WHERE timestamp < datetime('now', '-24 hours')`).catch(() => {});
+    await db.run(`DELETE FROM metrics_history WHERE timestamp < NOW() - INTERVAL '24 hours'`).catch(() => {});
 
     // Broadcast lightweight payload to Socket.io subscribers
     if (io) {

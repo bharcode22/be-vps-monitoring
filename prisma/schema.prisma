@@ -1,0 +1,124 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Server {
+  id             Int              @id @default(autoincrement())
+  name           String
+  host           String
+  port           Int              @default(22)
+  username       String           @default("root")
+  auth_type      String           @default("password")
+  password       String?
+  private_key    String?
+  is_local       Int              @default(0)
+  type           String           @default("vps") // 'vps' | 'pod'
+  pod_version    String           @default("")   // 'v2' | 'v3' | ''
+  db_name        String           @default("")
+  db_user        String           @default("")
+  s3_endpoint    String           @default("")
+  s3_access_key  String           @default("")
+  s3_secret_key  String           @default("")
+  s3_region      String           @default("us-east-1")
+  s3_bucket      String           @default("")
+  created_at     DateTime         @default(now())
+
+  metrics        MetricsHistory[]
+
+  @@map("servers")
+}
+
+model MetricsHistory {
+  id                   Int      @id @default(autoincrement())
+  server_id            Int
+  cpu_usage            Float    @default(0)
+  cpu_cores            Int      @default(1)
+  ram_usage            Float    @default(0)
+  ram_used_mb          Float    @default(0)
+  ram_free_mb          Float    @default(0)
+  ram_total_mb         Float    @default(0)
+  bandwidth_rx_speed   Float    @default(0)
+  bandwidth_tx_speed   Float    @default(0)
+  disk_usage           Float    @default(0)
+  disk_used_gb         Float    @default(0)
+  disk_total_gb        Float    @default(0)
+  disk_free_gb         Float    @default(0)
+  gpu_usage            Float    @default(0)
+  gpu_memory_usage     Float    @default(0)
+  gpu_name             String   @default("")
+  gpu_temp             Float    @default(0)
+  ping_ms              Float    @default(0)
+  status               String   @default("online")
+  timestamp            DateTime @default(now())
+
+  server               Server   @relation(fields: [server_id], references: [id], onDelete: Cascade)
+
+  @@index([server_id, timestamp])
+  @@map("metrics_history")
+}
+
+model Setting {
+  key        String   @id
+  value      String
+  updated_at DateTime @default(now())
+
+  @@map("settings")
+}
+
+model User {
+  id         Int      @id @default(autoincrement())
+  email      String   @unique
+  name       String?
+  picture    String?
+  role       String   @default("admin")
+  status     String   @default("pending")
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now())
+
+  @@map("users")
+}
+
+model DatabasePostgres {
+  id         Int      @id @default(autoincrement())
+  name       String
+  host       String
+  port       Int      @default(5432)
+  db_name    String   @default("postgres")
+  db_user    String   @default("postgres")
+  password   String?
+  created_at DateTime @default(now())
+
+  @@map("databases_postgres")
+}
+
+model ObjectStorage {
+  id            Int      @id @default(autoincrement())
+  name          String
+  type          String   // 'minio' | 's3'
+  s3_endpoint   String?
+  s3_access_key String?
+  s3_secret_key String?
+  s3_region     String?  @default("us-east-1")
+  s3_bucket     String?
+  port          Int      @default(9000)
+  created_at    DateTime @default(now())
+
+  @@map("object_storages")
+}
+
+model RabbitMqServer {
+  id         Int      @id @default(autoincrement())
+  name       String
+  host       String
+  port       Int      @default(15672)
+  username   String   @default("guest")
+  password   String?
+  created_at DateTime @default(now())
+
+  @@map("rabbitmq_servers")
+}

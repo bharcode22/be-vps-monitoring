@@ -12,8 +12,6 @@ services:
     env_file:
       - .env
     volumes:
-      # Persistent volume for SQLite database so VPS config is saved permanently
-      - ./data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
       - /home/pod/dev:/home/pod/dev
     healthcheck:

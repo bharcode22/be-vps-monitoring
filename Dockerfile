@@ -1,31 +1,31 @@
 FROM node:20-alpine
 
-# Install build dependencies for native modules and SSH client
+# Install build dependencies, OpenSSL (required by Prisma), and system tools
 RUN apk add --no-cache \
-    python3 \
-    make \
-    g++ \
-    sqlite-dev \
+    openssl \
     curl \
     openssh-client \
     git \
     bash \
     docker-cli \
-    docker-cli-compose
+    docker-cli-compose \
+    python3 \
+    make \
+    g++
 
 WORKDIR /app
 
-# Copy package management files
+# Copy package management files and Prisma schema
 COPY package*.json ./
+COPY prisma ./prisma/
 
-# Install project production dependencies
-RUN npm install --omit=dev
+# Install dependencies and generate Prisma Client engine
+RUN npm install
+RUN npx prisma generate
+RUN npm prune --production
 
 # Copy application source code
 COPY . .
-
-# Create directory for persistent SQLite database
-RUN mkdir -p /app/data
 
 # Expose server port
 EXPOSE 5002
