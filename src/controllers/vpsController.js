@@ -1,6 +1,6 @@
 const db = require('../services/db');
 const { getRemoteSSHMetrics } = require('../services/monitor/sshCollector');
-const { collectAllServerMetrics } = require('../services/vpsMonitor');
+const { collectAllServerMetrics, getLatestCachedMetrics, getMetricsHistory } = require('../services/vpsMonitor');
 
 /**
  * Helper to emit instant server_list_updated event to all WebSocket clients
@@ -129,12 +129,9 @@ const getAllServers = async (req, res) => {
 
     const allItems = [...sshServers, ...dbServers, ...storageServers];
 
-    // Fetch latest metrics for each server item
-    const rawResult = await Promise.all(allItems.map(async (server) => {
-      const latestMetrics = await db.get(
-        'SELECT * FROM metrics_history WHERE server_id = ? ORDER BY timestamp DESC LIMIT 1',
-        [server.id]
-      );
+    // Read latest real-time metrics for each server item from in-memory cache
+    const rawResult = allItems.map((server) => {
+      const latestMetrics = getLatestCachedMetrics(server.id);
 
       return {
         ...server,
@@ -142,7 +139,7 @@ const getAllServers = async (req, res) => {
         pod_version: server.pod_version || '',
         currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS
       };
-    }));
+    });
 
     const result = rawResult.map(s => sanitizeServerForGuest(s, req));
 
@@ -168,10 +165,10 @@ const getVpsServers = async (req, res) => {
     }
 
     const sshServers = await db.all(query, params);
-    const rawResult = await Promise.all(sshServers.map(async (server) => {
-      const latestMetrics = await db.get('SELECT * FROM metrics_history WHERE server_id = ? ORDER BY timestamp DESC LIMIT 1', [server.id]);
+    const rawResult = sshServers.map((server) => {
+      const latestMetrics = getLatestCachedMetrics(server.id);
       return { ...server, type: 'vps', currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS };
-    }));
+    });
 
     const result = rawResult.map(s => sanitizeServerForGuest(s, req));
 
@@ -197,10 +194,10 @@ const getPodServers = async (req, res) => {
     }
 
     const podServers = await db.all(query, params);
-    const rawResult = await Promise.all(podServers.map(async (server) => {
-      const latestMetrics = await db.get('SELECT * FROM metrics_history WHERE server_id = ? ORDER BY timestamp DESC LIMIT 1', [server.id]);
+    const rawResult = podServers.map((server) => {
+      const latestMetrics = getLatestCachedMetrics(server.id);
       return { ...server, type: 'pod', currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS };
-    }));
+    });
 
     const result = rawResult.map(s => sanitizeServerForGuest(s, req));
 
@@ -226,8 +223,8 @@ const getDatabaseServers = async (req, res) => {
     }
 
     const dbRows = await db.all(query, params);
-    const rawResult = await Promise.all(dbRows.map(async (server) => {
-      const latestMetrics = await db.get('SELECT * FROM metrics_history WHERE server_id = ? ORDER BY timestamp DESC LIMIT 1', [server.id]);
+    const rawResult = dbRows.map((server) => {
+      const latestMetrics = getLatestCachedMetrics(server.id);
       const user = encodeURIComponent(server.db_user || 'postgres');
       const pass = server.password ? encodeURIComponent(server.password) : '';
       const auth = pass ? `${user}:${pass}` : user;
@@ -240,7 +237,7 @@ const getDatabaseServers = async (req, res) => {
         connString,
         currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS
       };
-    }));
+    });
 
     const result = rawResult.map(s => sanitizeServerForGuest(s, req));
 
@@ -266,8 +263,8 @@ const getStorageServers = async (req, res) => {
     }
 
     const storageRows = await db.all(query, params);
-    const rawResult = await Promise.all(storageRows.map(async (server) => {
-      const latestMetrics = await db.get('SELECT * FROM metrics_history WHERE server_id = ? ORDER BY timestamp DESC LIMIT 1', [server.id]);
+    const rawResult = storageRows.map((server) => {
+      const latestMetrics = getLatestCachedMetrics(server.id);
       return {
         ...server,
         host: server.s3_endpoint || 's3.amazonaws.com',
@@ -275,7 +272,7 @@ const getStorageServers = async (req, res) => {
         password: server.s3_secret_key ? '******' : '',
         currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS
       };
-    }));
+    });
 
     const result = rawResult.map(s => sanitizeServerForGuest(s, req));
 
@@ -337,7 +334,6 @@ const deleteVps = async (req, res) => {
   try {
     const { id } = req.params;
     await db.run('DELETE FROM servers WHERE id = ?', [id]);
-    await db.run('DELETE FROM metrics_history WHERE server_id = ?', [id]);
     notifyServerListChange(req);
     res.json({ success: true, message: 'Server VPS berhasil dihapus.' });
   } catch (err) {
@@ -397,7 +393,6 @@ const deletePod = async (req, res) => {
   try {
     const { id } = req.params;
     await db.run('DELETE FROM servers WHERE id = ?', [id]);
-    await db.run('DELETE FROM metrics_history WHERE server_id = ?', [id]);
     notifyServerListChange(req);
     res.json({ success: true, message: 'POD Container berhasil dihapus.' });
   } catch (err) {
@@ -471,7 +466,6 @@ const deleteDatabase = async (req, res) => {
     const { id } = req.params;
     await db.run('DELETE FROM databases_postgres WHERE id = ?', [id]);
     await db.run('DELETE FROM servers WHERE id = ? AND type = "postgresql"', [id]);
-    await db.run('DELETE FROM metrics_history WHERE server_id = ?', [id]);
     notifyServerListChange(req);
     res.json({ success: true, message: 'Database PostgreSQL berhasil dihapus.' });
   } catch (err) {
@@ -561,7 +555,6 @@ const deleteStorage = async (req, res) => {
   try {
     const { id } = req.params;
     await db.run('DELETE FROM object_storages WHERE id = ?', [id]);
-    await db.run('DELETE FROM metrics_history WHERE server_id = ?', [id]);
     notifyServerListChange(req);
     res.json({ success: true, message: 'Object Storage berhasil dihapus.' });
   } catch (err) {
@@ -599,7 +592,7 @@ const updateServer = async (req, res) => {
 };
 
 /**
- * Delete a server or service across dedicated tables and remove its metrics history
+ * Delete a server or service across dedicated tables
  */
 const deleteServer = async (req, res) => {
   try {
@@ -607,7 +600,6 @@ const deleteServer = async (req, res) => {
     await db.run('DELETE FROM servers WHERE id = ?', [id]);
     await db.run('DELETE FROM databases_postgres WHERE id = ?', [id]);
     await db.run('DELETE FROM object_storages WHERE id = ?', [id]);
-    await db.run('DELETE FROM metrics_history WHERE server_id = ?', [id]);
 
     notifyServerListChange(req);
 
@@ -671,21 +663,13 @@ const testConnection = async (req, res) => {
 };
 
 /**
- * Get historical metrics for chart plotting
+ * Get historical metrics for chart plotting (served from in-memory cache)
  */
 const getServerHistory = async (req, res) => {
   try {
     const { id } = req.params;
-    const history = await db.all(
-      `SELECT cpu_usage, ram_usage, ram_used_mb, ram_total_mb, bandwidth_rx_speed, bandwidth_tx_speed, disk_usage, gpu_usage, gpu_memory_usage, gpu_temp, ping_ms, timestamp
-       FROM metrics_history
-       WHERE server_id = ?
-       ORDER BY timestamp DESC
-       LIMIT 60`,
-      [id]
-    );
-
-    res.json({ success: true, data: history.reverse() });
+    const history = getMetricsHistory(Number(id) || id);
+    res.json({ success: true, data: history });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

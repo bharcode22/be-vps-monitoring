@@ -27,33 +27,6 @@ CREATE TABLE "servers" (
 );
 
 -- CreateTable
-CREATE TABLE "metrics_history" (
-    "id" SERIAL NOT NULL,
-    "server_id" INTEGER NOT NULL,
-    "cpu_usage" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "cpu_cores" INTEGER NOT NULL DEFAULT 1,
-    "ram_usage" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "ram_used_mb" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "ram_free_mb" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "ram_total_mb" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "bandwidth_rx_speed" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "bandwidth_tx_speed" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "disk_usage" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "disk_used_gb" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "disk_total_gb" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "disk_free_gb" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "gpu_usage" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "gpu_memory_usage" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "gpu_name" TEXT NOT NULL DEFAULT '',
-    "gpu_temp" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "ping_ms" DOUBLE PRECISION NOT NULL DEFAULT 0,
-    "status" TEXT NOT NULL DEFAULT 'online',
-    "timestamp" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "metrics_history_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
 CREATE TABLE "settings" (
     "key" TEXT NOT NULL,
     "value" TEXT NOT NULL,
@@ -120,11 +93,5 @@ CREATE TABLE "rabbitmq_servers" (
 );
 
 -- CreateIndex
-CREATE INDEX "metrics_history_server_id_timestamp_idx" ON "metrics_history"("server_id", "timestamp");
-
--- CreateIndex
 CREATE UNIQUE INDEX "users_email_key" ON "users"("email");
-
--- AddForeignKey
-ALTER TABLE "metrics_history" ADD CONSTRAINT "metrics_history_server_id_fkey" FOREIGN KEY ("server_id") REFERENCES "servers"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 

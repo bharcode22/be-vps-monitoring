@@ -4,12 +4,27 @@ const { getRemoteSSHMetrics } = require('./monitor/sshCollector');
 const { getPostgresMetrics } = require('./monitor/dbCollector');
 const { getS3Metrics } = require('./monitor/s3Collector');
 
-// In-memory cache tracking the last SQLite DB insert timestamp per server
-const lastDbSaveTimes = {};
-const DB_SAVE_INTERVAL_MS = 15000; // Save history snapshot every 15 seconds (reduces DB write I/O by 80%)
+// In-memory cache for live real-time metrics and rolling in-memory history (Zero DB write I/O)
+const liveMetricsCache = {};
+const liveMetricsHistoryCache = {};
+const MAX_IN_MEMORY_HISTORY = 60; // Keep last 60 live snapshots in RAM for quick chart rendering
 
 /**
- * Poll all servers in database in parallel, record metrics into SQLite, and broadcast via Socket.io
+ * Get latest in-memory metric snapshot for a server
+ */
+function getLatestCachedMetrics(serverId) {
+  return liveMetricsCache[serverId] || null;
+}
+
+/**
+ * Get in-memory sliding window history for chart rendering
+ */
+function getMetricsHistory(serverId) {
+  return liveMetricsHistoryCache[serverId] || [];
+}
+
+/**
+ * Poll all servers in database in parallel, store live metrics in RAM, and broadcast via Socket.io
  */
 async function collectAllServerMetrics(io) {
   try {
@@ -18,7 +33,7 @@ async function collectAllServerMetrics(io) {
     const storageServers = (await db.all('SELECT * FROM object_storages')).map(r => ({ ...r, host: r.s3_endpoint || 's3.amazonaws.com', username: r.s3_access_key }));
 
     const servers = [...sshServers, ...dbServers, ...storageServers];
-    const now = Date.now();
+    const now = new Date().toISOString();
 
     // Parallel metric collection using Promise.all for maximum efficiency & speed
     const results = await Promise.all(servers.map(async (server) => {
@@ -41,39 +56,30 @@ async function collectAllServerMetrics(io) {
         };
       }
 
-      // Save to database metrics_history table with throttling (every 15s) for SSH/POD servers
-      const isSshServer = server.type === 'vps' || server.type === 'pod' || server.is_local === 1 || !server.type;
-      const shouldSaveToDb = isSshServer && (!lastDbSaveTimes[server.id] || (now - lastDbSaveTimes[server.id] >= DB_SAVE_INTERVAL_MS));
-      if (shouldSaveToDb) {
-        lastDbSaveTimes[server.id] = now;
-        db.run(
-          `INSERT INTO metrics_history (
-            server_id, cpu_usage, cpu_cores, ram_usage, ram_used_mb, ram_free_mb, ram_total_mb,
-            bandwidth_rx_speed, bandwidth_tx_speed, disk_usage, disk_used_gb, disk_total_gb, disk_free_gb,
-            gpu_usage, gpu_memory_usage, gpu_name, gpu_temp, ping_ms, status
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            server.id,
-            metrics.cpuUsage,
-            metrics.cpuCores,
-            metrics.ramUsage,
-            metrics.ramUsedMb,
-            metrics.ramFreeMb,
-            metrics.ramTotalMb,
-            metrics.bandwidthRxSpeed,
-            metrics.bandwidthTxSpeed,
-            metrics.diskUsage,
-            metrics.diskUsedGb,
-            metrics.diskTotalGb,
-            metrics.diskFreeGb,
-            metrics.gpuUsage,
-            metrics.gpuMemoryUsage,
-            metrics.gpuName,
-            metrics.gpuTemp,
-            metrics.pingMs,
-            metrics.status
-          ]
-        ).catch(e => console.error('Error inserting metrics history:', e.message));
+      // Update in-memory real-time cache
+      liveMetricsCache[server.id] = { ...metrics, timestamp: now };
+
+      // Update in-memory sliding history window
+      if (!liveMetricsHistoryCache[server.id]) {
+        liveMetricsHistoryCache[server.id] = [];
+      }
+      liveMetricsHistoryCache[server.id].push({
+        cpu_usage: metrics.cpuUsage || 0,
+        ram_usage: metrics.ramUsage || 0,
+        ram_used_mb: metrics.ramUsedMb || 0,
+        ram_total_mb: metrics.ramTotalMb || 0,
+        bandwidth_rx_speed: metrics.bandwidthRxSpeed || 0,
+        bandwidth_tx_speed: metrics.bandwidthTxSpeed || 0,
+        disk_usage: metrics.diskUsage || 0,
+        gpu_usage: metrics.gpuUsage || 0,
+        gpu_memory_usage: metrics.gpuMemoryUsage || 0,
+        gpu_temp: metrics.gpuTemp || 0,
+        ping_ms: metrics.pingMs || 0,
+        timestamp: now
+      });
+
+      if (liveMetricsHistoryCache[server.id].length > MAX_IN_MEMORY_HISTORY) {
+        liveMetricsHistoryCache[server.id].shift();
       }
 
       return {
@@ -83,10 +89,7 @@ async function collectAllServerMetrics(io) {
       };
     }));
 
-    // Cleanup history older than 24 hours to keep DB lightweight
-    await db.run(`DELETE FROM metrics_history WHERE timestamp < NOW() - INTERVAL '24 hours'`).catch(() => {});
-
-    // Broadcast lightweight payload to Socket.io subscribers
+    // Broadcast lightweight payload to Socket.io subscribers in real-time
     if (io) {
       io.emit('metrics_update', results);
     }
@@ -101,5 +104,7 @@ async function collectAllServerMetrics(io) {
 module.exports = {
   getLocalMetrics,
   getRemoteSSHMetrics,
-  collectAllServerMetrics
+  collectAllServerMetrics,
+  getLatestCachedMetrics,
+  getMetricsHistory
 };

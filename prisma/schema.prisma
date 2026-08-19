@@ -8,58 +8,27 @@ generator client {
 }
 
 model Server {
-  id             Int              @id @default(autoincrement())
-  name           String
-  host           String
-  port           Int              @default(22)
-  username       String           @default("root")
-  auth_type      String           @default("password")
-  password       String?
-  private_key    String?
-  is_local       Int              @default(0)
-  type           String           @default("vps") // 'vps' | 'pod'
-  pod_version    String           @default("")   // 'v2' | 'v3' | ''
-  db_name        String           @default("")
-  db_user        String           @default("")
-  s3_endpoint    String           @default("")
-  s3_access_key  String           @default("")
-  s3_secret_key  String           @default("")
-  s3_region      String           @default("us-east-1")
-  s3_bucket      String           @default("")
-  created_at     DateTime         @default(now())
-
-  metrics        MetricsHistory[]
+  id            Int      @id @default(autoincrement())
+  name          String
+  host          String
+  port          Int      @default(22)
+  username      String   @default("root")
+  auth_type     String   @default("password")
+  password      String?
+  private_key   String?
+  is_local      Int      @default(0)
+  type          String   @default("vps") // 'vps' | 'pod'
+  pod_version   String   @default("") // 'v2' | 'v3' | ''
+  db_name       String   @default("")
+  db_user       String   @default("")
+  s3_endpoint   String   @default("")
+  s3_access_key String   @default("")
+  s3_secret_key String   @default("")
+  s3_region     String   @default("us-east-1")
+  s3_bucket     String   @default("")
+  created_at    DateTime @default(now())
 
   @@map("servers")
-}
-
-model MetricsHistory {
-  id                   Int      @id @default(autoincrement())
-  server_id            Int
-  cpu_usage            Float    @default(0)
-  cpu_cores            Int      @default(1)
-  ram_usage            Float    @default(0)
-  ram_used_mb          Float    @default(0)
-  ram_free_mb          Float    @default(0)
-  ram_total_mb         Float    @default(0)
-  bandwidth_rx_speed   Float    @default(0)
-  bandwidth_tx_speed   Float    @default(0)
-  disk_usage           Float    @default(0)
-  disk_used_gb         Float    @default(0)
-  disk_total_gb        Float    @default(0)
-  disk_free_gb         Float    @default(0)
-  gpu_usage            Float    @default(0)
-  gpu_memory_usage     Float    @default(0)
-  gpu_name             String   @default("")
-  gpu_temp             Float    @default(0)
-  ping_ms              Float    @default(0)
-  status               String   @default("online")
-  timestamp            DateTime @default(now())
-
-  server               Server   @relation(fields: [server_id], references: [id], onDelete: Cascade)
-
-  @@index([server_id, timestamp])
-  @@map("metrics_history")
 }
 
 model Setting {
@@ -99,7 +68,7 @@ model DatabasePostgres {
 model ObjectStorage {
   id            Int      @id @default(autoincrement())
   name          String
-  type          String   // 'minio' | 's3'
+  type          String // 'minio' | 's3'
   s3_endpoint   String?
   s3_access_key String?
   s3_secret_key String?
