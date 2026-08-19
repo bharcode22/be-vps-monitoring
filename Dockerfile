@@ -1,6 +1,6 @@
 FROM node:20-alpine
 
-# Install build dependencies, OpenSSL (required by Prisma), and system tools
+# Install OpenSSL (required by Prisma) and essential runtime tools (without heavy C++ compilers)
 RUN apk add --no-cache \
     openssl \
     curl \
@@ -8,10 +8,7 @@ RUN apk add --no-cache \
     git \
     bash \
     docker-cli \
-    docker-cli-compose \
-    python3 \
-    make \
-    g++
+    docker-cli-compose
 
 WORKDIR /app
 
@@ -19,7 +16,7 @@ WORKDIR /app
 COPY package*.json ./
 COPY prisma ./prisma/
 
-# Install dependencies and generate Prisma Client engine
+# Install dependencies, generate Prisma Client engine, and prune dev dependencies
 RUN npm install
 RUN npx prisma generate
 RUN npm prune --production
