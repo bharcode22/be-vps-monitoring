@@ -307,41 +307,46 @@ async function deleteArtifactVersion({ app_name, env, version }) {
     }
 
     const { s3Client, bucket } = await getMinioClientInstance();
-    const minioAppPath = resolveMinioAppPath(app_name);
-    const prefix = `${minioAppPath}/${env}/${version}/`;
 
-    // 1. List all objects under the version prefix
-    const listCommand = new ListObjectsV2Command({
-      Bucket: bucket,
-      Prefix: prefix
-    });
+    const candidateAppNames = app_name === 'mobile-consume'
+      ? ['mobile-consume', 'mobile-consumer']
+      : [app_name];
 
-    const listRes = await s3Client.send(listCommand);
-    const contents = listRes.Contents || [];
+    let totalDeleted = 0;
 
-    if (contents.length === 0) {
-      return {
-        success: true,
-        message: `Tidak ada file ditemukan di prefix ${prefix}, folder versi kosong atau sudah dihapus`,
-        deletedCount: 0,
-        version
-      };
-    }
+    for (const app of candidateAppNames) {
+      const minioAppPath = resolveMinioAppPath(app);
+      const prefix = `${minioAppPath}/${env}/${version}/`;
 
-    // 2. Delete all objects in batch
-    const deleteCommand = new DeleteObjectsCommand({
-      Bucket: bucket,
-      Delete: {
-        Objects: contents.map(obj => ({ Key: obj.Key }))
+      // 1. List all objects under the version prefix
+      const listCommand = new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix
+      });
+
+      const listRes = await s3Client.send(listCommand);
+      const contents = listRes.Contents || [];
+
+      if (contents.length > 0) {
+        // 2. Delete objects concurrently using DeleteObjectCommand (avoids MissingContentMD5 error on MinIO)
+        await Promise.all(
+          contents.map(obj =>
+            s3Client.send(
+              new DeleteObjectCommand({
+                Bucket: bucket,
+                Key: obj.Key
+              })
+            )
+          )
+        );
+        totalDeleted += contents.length;
       }
-    });
-
-    await s3Client.send(deleteCommand);
+    }
 
     return {
       success: true,
-      message: `Versi ${version} (${contents.length} file) berhasil dihapus dari MinIO bucket ${bucket}`,
-      deletedCount: contents.length,
+      message: `Versi ${version} (${totalDeleted} file) berhasil dihapus dari MinIO bucket ${bucket}`,
+      deletedCount: totalDeleted,
       version
     };
   } catch (err) {
