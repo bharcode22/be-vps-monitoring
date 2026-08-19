@@ -5,14 +5,24 @@
 const installation = require('./installation');
 
 module.exports = {
-  // MinIO S3 Version Services
+  // MinIO S3 Version & Artifact Services
   getInstallationVersions: installation.getInstallationVersions,
+  getDetailedArtifactVersions: installation.getDetailedArtifactVersions,
+  deleteArtifactVersion: installation.deleteArtifactVersion,
+  deleteBatchArtifactVersions: installation.deleteBatchArtifactVersions,
+  cleanupOldArtifactVersions: installation.cleanupOldArtifactVersions,
   sortVersionsByNewest: installation.sortVersionsByNewest,
   resolveMinioAppPath: installation.resolveMinioAppPath,
 
-  // Environment File Configuration Services
+  // Environment File Configuration & Manager Services
   getEnvFiles: installation.getEnvFiles,
   readEnvFileContent: installation.readEnvFileContent,
+  parseEnvContent: installation.parseEnvContent,
+  serializeEnvKv: installation.serializeEnvKv,
+  createEnvFile: installation.createEnvFile,
+  saveEnvFile: installation.saveEnvFile,
+  deleteEnvFile: installation.deleteEnvFile,
+  compareEnvFiles: installation.compareEnvFiles,
 
   // SSH Execution Services
   executeSSHCommand: installation.executeSSHCommand,

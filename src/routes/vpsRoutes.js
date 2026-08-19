@@ -10,6 +10,7 @@ const podConfigController = require('../controllers/podConfigController');
 const syncController = require('../controllers/syncController');
 const rabbitmqController = require('../controllers/rabbitmqController');
 const installationController = require('../controllers/installationController');
+const envController = require('../controllers/envController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // Health check endpoint
@@ -102,6 +103,17 @@ router.post('/rabbitmq/trace-event', rabbitmqController.receiveTraceEvent);
 // Protected POD v3 Installation routes
 router.get('/vps/installation/env-files', requireAuth, installationController.getEnvFiles);
 router.get('/vps/installation/versions', requireAuth, installationController.getVersions);
+router.get('/vps/installation/minio-artifacts/details', requireAuth, installationController.getArtifactDetails);
+router.delete('/vps/installation/minio-artifacts/version', requireAuth, installationController.deleteArtifactVersion);
+router.post('/vps/installation/minio-artifacts/batch-delete', requireAuth, installationController.deleteBatchArtifactVersions);
+router.post('/vps/installation/minio-artifacts/cleanup-older', requireAuth, installationController.cleanupOldArtifactVersions);
 router.post('/vps/installation/deploy', requireAuth, installationController.deployApp);
+
+// Protected Environment Manager & Comparison routes
+router.get('/vps/env-manager/files', requireAuth, envController.getAllEnvFiles);
+router.post('/vps/env-manager/files', requireAuth, envController.handleCreateEnvFile);
+router.put('/vps/env-manager/files/:filename', requireAuth, envController.handleSaveEnvFile);
+router.delete('/vps/env-manager/files/:filename', requireAuth, envController.handleDeleteEnvFile);
+router.post('/vps/env-manager/compare', requireAuth, envController.handleCompareEnvFiles);
 
 module.exports = router;
