@@ -16,6 +16,10 @@ model Server {
   auth_type     String   @default("password")
   password      String?
   private_key   String?
+  code          String?
+  latitude      String?
+  longitude     String?
+  mac_address   String?
   is_local      Int      @default(0)
   type          String   @default("vps") // 'vps' | 'pod'
   pod_version   String   @default("") // 'v2' | 'v3' | ''

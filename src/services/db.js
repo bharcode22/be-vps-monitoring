@@ -103,9 +103,17 @@ const dbAsync = {
 // Initialize connection test and Super Admin check
 async function initPostgresConnection() {
   try {
-    const client = await pool.connect();
-    console.log('🐘 Terhubung sukses ke PostgreSQL Database di Cloud RDS!');
-    client.release();
+    // Ensure servers table has columns code, latitude, longitude, mac_address
+    try {
+      await pool.query(`
+        ALTER TABLE servers ADD COLUMN IF NOT EXISTS code VARCHAR(255);
+        ALTER TABLE servers ADD COLUMN IF NOT EXISTS latitude VARCHAR(255);
+        ALTER TABLE servers ADD COLUMN IF NOT EXISTS longitude VARCHAR(255);
+        ALTER TABLE servers ADD COLUMN IF NOT EXISTS mac_address VARCHAR(255);
+      `);
+    } catch (e) {
+      console.warn('Columns migration check:', e.message);
+    }
 
     // Ensure super admin exists
     const superAdminEmail = process.env.SUPER_ADMIN_EMAIL || 'zaqqwer758@gmail.com';

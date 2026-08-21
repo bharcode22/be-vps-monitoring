@@ -11,6 +11,7 @@ const syncController = require('../controllers/syncController');
 const rabbitmqController = require('../controllers/rabbitmqController');
 const installationController = require('../controllers/installationController');
 const envController = require('../controllers/envController');
+const heartbeatController = require('../controllers/heartbeatController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // Health check endpoint
@@ -115,5 +116,9 @@ router.post('/vps/env-manager/files', requireAuth, envController.handleCreateEnv
 router.put('/vps/env-manager/files/:filename', requireAuth, envController.handleSaveEnvFile);
 router.delete('/vps/env-manager/files/:filename', requireAuth, envController.handleDeleteEnvFile);
 router.post('/vps/env-manager/compare', requireAuth, envController.handleCompareEnvFiles);
+
+// Heartbeat & Geo-Location Sync routes
+router.get('/heartbeat/live', optionalAuth, heartbeatController.getHeartbeatData);
+router.post('/heartbeat/sync', requireAuth, heartbeatController.syncHeartbeatToServers);
 
 module.exports = router;

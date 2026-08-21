@@ -82,7 +82,7 @@ const getAllServers = async (req, res) => {
     const term = `%${search}%`;
 
     // 1. Fetch SSH Servers (servers table)
-    let vpsQuery = 'SELECT id, name, host, port, username, auth_type, is_local, type, pod_version, created_at FROM servers';
+    let vpsQuery = 'SELECT id, name, host, port, username, auth_type, is_local, type, pod_version, code, latitude, longitude, mac_address, created_at FROM servers';
     let vpsParams = [];
     if (search) {
       vpsQuery += ' WHERE name LIKE ? OR host LIKE ? OR username LIKE ? OR type LIKE ? OR pod_version LIKE ?';
@@ -155,7 +155,7 @@ const getAllServers = async (req, res) => {
 const getVpsServers = async (req, res) => {
   try {
     const search = (req.query.q || req.query.search || '').trim();
-    let query = "SELECT id, name, host, port, username, auth_type, is_local, type, pod_version, created_at FROM servers WHERE (type = 'vps' OR type IS NULL OR type = '')";
+    let query = "SELECT id, name, host, port, username, auth_type, is_local, type, pod_version, code, latitude, longitude, mac_address, created_at FROM servers WHERE (type = 'vps' OR type IS NULL OR type = '')";
     let params = [];
 
     if (search) {
@@ -184,7 +184,7 @@ const getVpsServers = async (req, res) => {
 const getPodServers = async (req, res) => {
   try {
     const search = (req.query.q || req.query.search || '').trim();
-    let query = "SELECT id, name, host, port, username, auth_type, is_local, type, pod_version, created_at FROM servers WHERE type = 'pod'";
+    let query = "SELECT id, name, host, port, username, auth_type, is_local, type, pod_version, code, latitude, longitude, mac_address, created_at FROM servers WHERE type = 'pod'";
     let params = [];
 
     if (search) {
@@ -287,14 +287,14 @@ const getStorageServers = async (req, res) => {
  */
 const createVps = async (req, res) => {
   try {
-    const { name, host, port, username, auth_type, password, private_key } = req.body;
+    const { name, host, port, username, auth_type, password, private_key, code, latitude, longitude, mac_address } = req.body;
     if (!name || !host) {
       return res.status(400).json({ success: false, error: 'Nama Server dan Host IP wajib diisi.' });
     }
     const result = await db.run(
-      `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type, pod_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'vps', '')`,
-      [name, host, port || 22, username || 'root', auth_type || 'password', password || null, private_key || null]
+      `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type, pod_version, code, latitude, longitude, mac_address)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'vps', '', ?, ?, ?, ?)`,
+      [name, host, port || 22, username || 'root', auth_type || 'password', password || null, private_key || null, code || null, latitude || null, longitude || null, mac_address || null]
     );
     notifyServerListChange(req);
     res.json({ success: true, id: result.lastInsertRowid });
@@ -309,16 +309,20 @@ const createVps = async (req, res) => {
 const updateVps = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, host, port, username, auth_type, password, private_key } = req.body;
+    const { name, host, port, username, auth_type, password, private_key, code, latitude, longitude, mac_address } = req.body;
     const existing = await db.get('SELECT * FROM servers WHERE id = ?', [id]);
     if (!existing) return res.status(404).json({ success: false, error: 'Server VPS tidak ditemukan.' });
 
     const finalPassword = (password && password !== '******') ? password : existing.password;
     const finalPrivateKey = (private_key && private_key !== '******') ? private_key : existing.private_key;
+    const finalCode = code !== undefined ? code : existing.code;
+    const finalLat = latitude !== undefined ? latitude : existing.latitude;
+    const finalLong = longitude !== undefined ? longitude : existing.longitude;
+    const finalMac = mac_address !== undefined ? mac_address : existing.mac_address;
 
     await db.run(
-      `UPDATE servers SET name = ?, host = ?, port = ?, username = ?, auth_type = ?, password = ?, private_key = ? WHERE id = ?`,
-      [name, host, port || 22, username || 'root', auth_type || 'password', finalPassword, finalPrivateKey, id]
+      `UPDATE servers SET name = ?, host = ?, port = ?, username = ?, auth_type = ?, password = ?, private_key = ?, code = ?, latitude = ?, longitude = ?, mac_address = ? WHERE id = ?`,
+      [name, host, port || 22, username || 'root', auth_type || 'password', finalPassword, finalPrivateKey, finalCode, finalLat, finalLong, finalMac, id]
     );
     notifyServerListChange(req);
     res.json({ success: true, message: 'Server VPS berhasil diperbarui.' });
@@ -346,14 +350,14 @@ const deleteVps = async (req, res) => {
  */
 const createPod = async (req, res) => {
   try {
-    const { name, host, port, username, auth_type, password, private_key, pod_version } = req.body;
+    const { name, host, port, username, auth_type, password, private_key, pod_version, code, latitude, longitude, mac_address } = req.body;
     if (!name || !host) {
       return res.status(400).json({ success: false, error: 'Nama POD dan Host IP wajib diisi.' });
     }
     const result = await db.run(
-      `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type, pod_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'pod', ?)`,
-      [name, host, port || 22, username || 'pod', auth_type || 'password', password || null, private_key || null, pod_version || 'v3']
+      `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type, pod_version, code, latitude, longitude, mac_address)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'pod', ?, ?, ?, ?, ?)`,
+      [name, host, port || 22, username || 'pod', auth_type || 'password', password || null, private_key || null, pod_version || 'v3', code || null, latitude || null, longitude || null, mac_address || null]
     );
     notifyServerListChange(req);
     res.json({ success: true, id: result.lastInsertRowid });
@@ -368,16 +372,20 @@ const createPod = async (req, res) => {
 const updatePod = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, host, port, username, auth_type, password, private_key, pod_version } = req.body;
+    const { name, host, port, username, auth_type, password, private_key, pod_version, code, latitude, longitude, mac_address } = req.body;
     const existing = await db.get('SELECT * FROM servers WHERE id = ?', [id]);
     if (!existing) return res.status(404).json({ success: false, error: 'POD Server tidak ditemukan.' });
 
     const finalPassword = (password && password !== '******') ? password : existing.password;
     const finalPrivateKey = (private_key && private_key !== '******') ? private_key : existing.private_key;
+    const finalCode = code !== undefined ? code : existing.code;
+    const finalLat = latitude !== undefined ? latitude : existing.latitude;
+    const finalLong = longitude !== undefined ? longitude : existing.longitude;
+    const finalMac = mac_address !== undefined ? mac_address : existing.mac_address;
 
     await db.run(
-      `UPDATE servers SET name = ?, host = ?, port = ?, username = ?, auth_type = ?, password = ?, private_key = ?, pod_version = ? WHERE id = ?`,
-      [name, host, port || 22, username || 'pod', auth_type || 'password', finalPassword, finalPrivateKey, pod_version || 'v3', id]
+      `UPDATE servers SET name = ?, host = ?, port = ?, username = ?, auth_type = ?, password = ?, private_key = ?, pod_version = ?, code = ?, latitude = ?, longitude = ?, mac_address = ? WHERE id = ?`,
+      [name, host, port || 22, username || 'pod', auth_type || 'password', finalPassword, finalPrivateKey, pod_version || 'v3', finalCode, finalLat, finalLong, finalMac, id]
     );
     notifyServerListChange(req);
     res.json({ success: true, message: 'POD Container berhasil diperbarui.' });
