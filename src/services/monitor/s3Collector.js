@@ -1,16 +1,18 @@
 const { S3Client, ListBucketsCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
+const { decrypt } = require('../../utils/crypto');
 
 /**
  * Gather real-time metrics for MinIO / AWS S3 Storage
  */
 async function getS3Metrics(server) {
   const startTime = Date.now();
+  const rawSecret = server.s3_secret_key || server.password || '';
 
   const clientConfig = {
     region: server.s3_region || 'us-east-1',
     credentials: {
       accessKeyId: server.s3_access_key || server.username || '',
-      secretAccessKey: server.s3_secret_key || server.password || ''
+      secretAccessKey: decrypt(rawSecret)
     }
   };
 

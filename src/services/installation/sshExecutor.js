@@ -1,5 +1,6 @@
 const { Client } = require('ssh2');
 const { exec } = require('child_process');
+const { decrypt } = require('../../utils/crypto');
 
 /**
  * Execute command on SSH remote server or local host
@@ -33,9 +34,9 @@ function executeSSHCommand(server, command) {
       };
 
       if (server.auth_type === 'key' && server.private_key) {
-        sshConfig.privateKey = server.private_key;
+        sshConfig.privateKey = decrypt(server.private_key);
       } else {
-        sshConfig.password = server.password;
+        sshConfig.password = decrypt(server.password);
       }
 
       conn.on('ready', () => {
@@ -59,28 +60,33 @@ function executeSSHCommand(server, command) {
           stream.on('close', (code) => {
             clearTimeout(timeout);
             conn.end();
-            if (!isHandled) {
-              isHandled = true;
-              resolve({
-                success: code === 0,
-                code,
-                stdout,
-                stderr
-              });
-            }
+            resolve({
+              success: code === 0,
+              stdout,
+              stderr,
+              code
+            });
           });
         });
       });
 
       conn.on('error', (err) => {
-        clearTimeout(timeout);
         if (!isHandled) {
           isHandled = true;
-          resolve({ success: false, stdout: '', stderr: `Error koneksi SSH: ${err.message}` });
+          clearTimeout(timeout);
+          resolve({ success: false, stdout: '', stderr: err.message });
         }
       });
 
-      conn.connect(sshConfig);
+      try {
+        conn.connect(sshConfig);
+      } catch (err) {
+        if (!isHandled) {
+          isHandled = true;
+          clearTimeout(timeout);
+          resolve({ success: false, stdout: '', stderr: err.message });
+        }
+      }
     }
   });
 }
@@ -91,9 +97,11 @@ function executeSSHCommand(server, command) {
 function executeSSHCommandStream(server, command, onData) {
   return new Promise((resolve) => {
     if (server.is_local === 1) {
-      const child = exec(command, { timeout: 600000 });
+      const child = exec(command, { maxBuffer: 10 * 1024 * 1024 });
+
       let stdout = '';
       let stderr = '';
+
       if (child.stdout) {
         child.stdout.on('data', data => {
           const str = data.toString();
@@ -112,6 +120,7 @@ function executeSSHCommandStream(server, command, onData) {
         resolve({ success: code === 0, code, stdout, stderr });
       });
       child.on('error', err => {
+        if (onData) onData(`\n❌ Error: ${err.message}\n`);
         resolve({ success: false, stdout, stderr: err.message });
       });
     } else {
@@ -135,9 +144,9 @@ function executeSSHCommandStream(server, command, onData) {
       };
 
       if (server.auth_type === 'key' && server.private_key) {
-        sshConfig.privateKey = server.private_key;
+        sshConfig.privateKey = decrypt(server.private_key);
       } else {
-        sshConfig.password = server.password;
+        sshConfig.password = decrypt(server.password);
       }
 
       conn.on('ready', () => {

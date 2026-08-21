@@ -6,7 +6,7 @@ const http = require('http');
 const cors = require('cors');
 const { Server } = require('socket.io');
 const vpsRoutes = require('./routes/vpsRoutes');
-const { collectAllServerMetrics } = require('./services/vpsMonitor');
+const { collectAllServerMetrics, getAllCachedMetricsList } = require('./services/vpsMonitor');
 const { registerDockerStreamHandlers } = require('./services/dockerLogStreamer');
 const { registerPm2StreamHandlers } = require('./services/pm2LogStreamer');
 const { registerRabbitMqTracerHandlers } = require('./services/rabbitmqTracer');
@@ -35,7 +35,13 @@ app.use('/api', vpsRoutes);
 io.on('connection', (socket) => {
   console.log(`🔌 Client dashboard terhubung: ${socket.id}`);
 
-  // Immediately collect and send metrics on connection
+  // Instantly send latest cached metrics to newly connected socket
+  const cachedList = getAllCachedMetricsList();
+  if (cachedList && cachedList.length > 0) {
+    socket.emit('metrics_update', cachedList);
+  }
+
+  // Trigger fresh collection
   collectAllServerMetrics(io);
 
   // Register real-time Docker Log Streaming handlers
@@ -55,15 +61,25 @@ io.on('connection', (socket) => {
   });
 });
 
-// Periodic monitoring interval (every 3 seconds)
+// Adaptive, self-scheduling metrics polling loop (Prevents overlapping SSH connections)
 const MONITOR_INTERVAL = 3000;
-setInterval(async () => {
+let isLoopRunning = false;
+
+async function runPollingLoop() {
+  if (isLoopRunning) return;
+  isLoopRunning = true;
   try {
     await collectAllServerMetrics(io);
   } catch (err) {
     console.error('Error during scheduled metrics collection:', err.message);
+  } finally {
+    isLoopRunning = false;
+    setTimeout(runPollingLoop, MONITOR_INTERVAL);
   }
-}, MONITOR_INTERVAL);
+}
+
+// Start continuous polling loop
+setTimeout(runPollingLoop, 1000);
 
 // Set HTTP server timeout for long-running SSH deployment tasks (5 minutes)
 server.timeout = 300000;

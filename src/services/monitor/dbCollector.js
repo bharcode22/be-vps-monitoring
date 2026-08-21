@@ -1,4 +1,5 @@
 const { Client } = require('pg');
+const { decrypt } = require('../../utils/crypto');
 
 /**
  * Gather real-time metrics for PostgreSQL database
@@ -13,7 +14,7 @@ async function getPostgresMetrics(server) {
     port: server.port || 5432,
     database: server.db_name || 'postgres',
     user: server.db_user || server.username || 'postgres',
-    password: server.password || '',
+    password: decrypt(server.password) || '',
     ssl: isCloudOrRds ? { rejectUnauthorized: false } : false,
     connectionTimeoutMillis: 5000
   });

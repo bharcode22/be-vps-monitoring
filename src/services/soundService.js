@@ -1,6 +1,7 @@
 const { exec } = require('child_process');
 const { Client } = require('ssh2');
 const path = require('path');
+const { decrypt } = require('../utils/crypto');
 
 /**
  * Execute command on local host or remote SSH server
@@ -34,9 +35,9 @@ function executeCommand(server, command) {
       };
 
       if (server.auth_type === 'key' && server.private_key) {
-        sshConfig.privateKey = server.private_key;
+        sshConfig.privateKey = decrypt(server.private_key);
       } else {
-        sshConfig.password = server.password;
+        sshConfig.password = decrypt(server.password);
       }
 
       conn.on('ready', () => {

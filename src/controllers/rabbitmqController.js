@@ -1,4 +1,5 @@
 const dbAsync = require('../services/db');
+const { encrypt } = require('../utils/crypto');
 const { fetchRabbitMqStatus } = require('../services/rabbitmqService');
 const { exec } = require('child_process');
 
@@ -8,7 +9,11 @@ const { exec } = require('child_process');
 const getRabbitMqs = async (req, res) => {
   try {
     const servers = await dbAsync.all('SELECT id, name, host, port, username, password, created_at FROM rabbitmq_servers ORDER BY created_at DESC');
-    res.json({ success: true, data: servers });
+    const sanitized = servers.map(s => ({
+      ...s,
+      password: s.password ? '******' : ''
+    }));
+    res.json({ success: true, data: sanitized });
   } catch (err) {
     console.error('Failed to get RabbitMQs:', err.message);
     res.status(500).json({ success: false, error: err.message });
@@ -25,15 +30,16 @@ const createRabbitMq = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Name and Host are required' });
     }
 
+    const encPassword = password ? encrypt(password) : '';
     const r = await dbAsync.run(
       'INSERT INTO rabbitmq_servers (name, host, port, username, password) VALUES (?, ?, ?, ?, ?)',
-      [name, host, port || 15672, username || 'guest', password || '']
+      [name, host, port || 15672, username || 'guest', encPassword]
     );
 
     res.json({
       success: true,
       message: 'RabbitMQ server added successfully',
-      data: { id: r.lastID, name, host, port: port || 15672, username: username || 'guest' }
+      data: { id: r.lastInsertRowid || r.lastID, name, host, port: port || 15672, username: username || 'guest' }
     });
   } catch (err) {
     console.error('Failed to create RabbitMQ:', err.message);
@@ -57,9 +63,11 @@ const updateRabbitMq = async (req, res) => {
       return res.status(404).json({ success: false, error: 'RabbitMQ server not found' });
     }
 
+    const finalPassword = (password && password !== '******') ? encrypt(password) : existing.password;
+
     await dbAsync.run(
       'UPDATE rabbitmq_servers SET name = ?, host = ?, port = ?, username = ?, password = ? WHERE id = ?',
-      [name, host, port || 15672, username || 'guest', password || '', id]
+      [name, host, port || 15672, username || 'guest', finalPassword, id]
     );
 
     res.json({ success: true, message: 'RabbitMQ server updated successfully' });

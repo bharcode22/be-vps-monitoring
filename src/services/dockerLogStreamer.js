@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const { Client } = require('ssh2');
 const { spawn } = require('child_process');
 const dbAsync = require('./db');
+const { decrypt } = require('../utils/crypto');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -25,38 +26,24 @@ function registerDockerStreamHandlers(socket, io) {
         return socket.emit('docker:stream-error', { error: 'Token otentikasi tidak valid.' });
       }
 
-      const user = await dbAsync.get('SELECT * FROM users WHERE id = ?', [decoded.id]);
-      if (!user || user.status !== 'approved') {
-        return socket.emit('docker:stream-error', { error: 'Akses ditolak.' });
-      }
-
-      // 2. Fetch server
-      const server = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
-      if (!server) {
-        return socket.emit('docker:stream-error', { error: 'Server tidak ditemukan.' });
+      if (!serverId || !containerName) {
+        return socket.emit('docker:stream-error', { error: 'Parameter serverId dan containerName harus diisi.' });
       }
 
       // Stop any existing stream for this socket
       stopStream(socket.id);
 
-      const safeContainer = String(containerName).replace(/[^a-zA-Z0-9_\-\.]/g, '');
-      if (!safeContainer) {
-        return socket.emit('docker:stream-error', { error: 'Nama container tidak valid.' });
+      // 2. Fetch server details from database
+      const server = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
+      if (!server) {
+        return socket.emit('docker:stream-error', { error: 'Server tidak ditemukan di database.' });
       }
 
-      const isSystemApp = safeContainer === 'big-screen' || safeContainer === 'small-screen';
-
-      const command = isSystemApp
-        ? `journalctl -u ${safeContainer} -f -n 100 2>/dev/null || journalctl --user -u ${safeContainer} -f -n 100 2>/dev/null || tail -f /home/pod/.config/${safeContainer}/*.log 2>/dev/null || tail -f /home/pod/.config/${safeContainer}/logs/*.log 2>/dev/null || tail -f /tmp/${safeContainer}.log 2>/dev/null`
-        : `docker logs -f --tail 100 ${safeContainer} 2>&1`;
+      const safeContainer = containerName.replace(/[^a-zA-Z0-9_.-]/g, '');
+      const command = `docker logs -f --tail 100 ${safeContainer} 2>&1`;
 
       if (server.is_local === 1) {
-        let child;
-        if (isSystemApp) {
-          child = spawn('sh', ['-c', command]);
-        } else {
-          child = spawn('docker', ['logs', '-f', '--tail', '100', safeContainer]);
-        }
+        const child = spawn('docker', ['logs', '-f', '--tail', '100', safeContainer]);
 
         child.stdout.on('data', (chunk) => {
           socket.emit('docker:stream-data', { containerName: safeContainer, chunk: chunk.toString() });
@@ -81,9 +68,9 @@ function registerDockerStreamHandlers(socket, io) {
         };
 
         if (server.auth_type === 'key' && server.private_key) {
-          sshConfig.privateKey = server.private_key;
+          sshConfig.privateKey = decrypt(server.private_key);
         } else {
-          sshConfig.password = server.password;
+          sshConfig.password = decrypt(server.password);
         }
 
         conn.on('ready', () => {

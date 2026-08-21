@@ -1,5 +1,6 @@
 const { exec } = require('child_process');
 const { Client } = require('ssh2');
+const { decrypt } = require('../utils/crypto');
 
 const ALLOWED_SCRIPTS = ['auto-script.sh', 'kill-process.sh'];
 const SCRIPT_DIR = '/home/pod/scripts/exec';
@@ -23,11 +24,7 @@ async function runVpsScript(server, scriptName) {
         }
         resolve({
           success: true,
-          script: scriptName,
-          path: scriptPath,
-          output: stdout || '',
-          stderr: stderr || '',
-          exitCode: error ? error.code : 0
+          output: stdout || stderr || 'Skrip selesai tanpa output.'
         });
       });
     } else {
@@ -50,9 +47,9 @@ async function runVpsScript(server, scriptName) {
       };
 
       if (server.auth_type === 'key' && server.private_key) {
-        sshConfig.privateKey = server.private_key;
+        sshConfig.privateKey = decrypt(server.private_key);
       } else {
-        sshConfig.password = server.password;
+        sshConfig.password = decrypt(server.password);
       }
 
       conn.on('ready', () => {

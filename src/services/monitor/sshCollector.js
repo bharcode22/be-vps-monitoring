@@ -1,5 +1,6 @@
 const { Client } = require('ssh2');
 const { parseSSHOutput } = require('./sshParsers');
+const { decrypt } = require('../../utils/crypto');
 
 /**
  * Gather metrics for remote VPS via SSH
@@ -45,9 +46,9 @@ function getRemoteSSHMetrics(server) {
     };
 
     if (server.auth_type === 'key' && server.private_key) {
-      sshConfig.privateKey = server.private_key;
+      sshConfig.privateKey = decrypt(server.private_key);
     } else {
-      sshConfig.password = server.password;
+      sshConfig.password = decrypt(server.password);
     }
 
     conn.on('ready', () => {
@@ -97,6 +98,7 @@ function getRemoteSSHMetrics(server) {
       clearTimeout(timeout);
       if (!isHandled) {
         isHandled = true;
+        try { conn.end(); } catch (e) {}
         resolve({
           cpuUsage: 0,
           cpuCores: 1,
@@ -118,7 +120,37 @@ function getRemoteSSHMetrics(server) {
           status: 'offline'
         });
       }
-    }).connect(sshConfig);
+    });
+
+    try {
+      conn.connect(sshConfig);
+    } catch (connErr) {
+      clearTimeout(timeout);
+      if (!isHandled) {
+        isHandled = true;
+        try { conn.end(); } catch (e) {}
+        resolve({
+          cpuUsage: 0,
+          cpuCores: 1,
+          ramUsage: 0,
+          ramUsedMb: 0,
+          ramFreeMb: 0,
+          ramTotalMb: 0,
+          bandwidthRxSpeed: 0,
+          bandwidthTxSpeed: 0,
+          diskUsage: 0,
+          diskUsedGb: 0,
+          diskTotalGb: 0,
+          diskFreeGb: 0,
+          gpuUsage: 0,
+          gpuMemoryUsage: 0,
+          gpuName: 'N/A',
+          gpuTemp: 0,
+          pingMs: 0,
+          status: 'offline'
+        });
+      }
+    }
   });
 }
 

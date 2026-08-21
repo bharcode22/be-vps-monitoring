@@ -100,9 +100,11 @@ const dbAsync = {
   }
 };
 
-// Initialize connection test and Super Admin check
+// Initialize connection test, Super Admin check, and Credentials Encryption Migration
 async function initPostgresConnection() {
   try {
+    const { encrypt, isEncrypted } = require('../utils/crypto');
+
     // Ensure servers table has columns code, latitude, longitude, mac_address
     try {
       await pool.query(`
@@ -130,6 +132,58 @@ async function initPostgresConnection() {
       });
     } catch (e) {
       console.warn('Super admin upsert check:', e.message);
+    }
+
+    // Auto-migrate existing plain-text passwords to AES-256-GCM ciphertext
+    try {
+      // 1. servers (password, private_key)
+      const servers = await pool.query('SELECT id, password, private_key FROM servers');
+      for (const s of servers.rows) {
+        let needsUpdate = false;
+        let encPass = s.password;
+        let encKey = s.private_key;
+
+        if (s.password && !isEncrypted(s.password)) {
+          encPass = encrypt(s.password);
+          needsUpdate = true;
+        }
+        if (s.private_key && !isEncrypted(s.private_key)) {
+          encKey = encrypt(s.private_key);
+          needsUpdate = true;
+        }
+        if (needsUpdate) {
+          await pool.query('UPDATE servers SET password = $1, private_key = $2 WHERE id = $3', [encPass, encKey, s.id]);
+        }
+      }
+
+      // 2. databases_postgres (password)
+      const dbs = await pool.query('SELECT id, password FROM databases_postgres');
+      for (const d of dbs.rows) {
+        if (d.password && !isEncrypted(d.password)) {
+          const encPass = encrypt(d.password);
+          await pool.query('UPDATE databases_postgres SET password = $1 WHERE id = $2', [encPass, d.id]);
+        }
+      }
+
+      // 3. object_storages (s3_secret_key)
+      const storages = await pool.query('SELECT id, s3_secret_key FROM object_storages');
+      for (const st of storages.rows) {
+        if (st.s3_secret_key && !isEncrypted(st.s3_secret_key)) {
+          const encSecret = encrypt(st.s3_secret_key);
+          await pool.query('UPDATE object_storages SET s3_secret_key = $1 WHERE id = $2', [encSecret, st.id]);
+        }
+      }
+
+      // 4. rabbitmq_servers (password)
+      const rabbitmqs = await pool.query('SELECT id, password FROM rabbitmq_servers');
+      for (const rb of rabbitmqs.rows) {
+        if (rb.password && !isEncrypted(rb.password)) {
+          const encPass = encrypt(rb.password);
+          await pool.query('UPDATE rabbitmq_servers SET password = $1 WHERE id = $2', [encPass, rb.id]);
+        }
+      }
+    } catch (migErr) {
+      console.warn('Auto-encrypt migration warning:', migErr.message);
     }
   } catch (err) {
     console.error('❌ Gagal terhubung ke PostgreSQL RDS:', err.message);

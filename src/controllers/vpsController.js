@@ -1,4 +1,5 @@
 const db = require('../services/db');
+const { encrypt, decrypt } = require('../utils/crypto');
 const { getRemoteSSHMetrics } = require('../services/monitor/sshCollector');
 const { collectAllServerMetrics, getLatestCachedMetrics, getMetricsHistory } = require('../services/vpsMonitor');
 
@@ -99,8 +100,9 @@ const getAllServers = async (req, res) => {
     }
     const dbRows = await db.all(dbQuery, dbParams);
     const dbServers = dbRows.map(r => {
+      const clearPassword = decrypt(r.password);
       const user = encodeURIComponent(r.db_user || 'postgres');
-      const pass = r.password ? encodeURIComponent(r.password) : '';
+      const pass = clearPassword ? encodeURIComponent(clearPassword) : '';
       const auth = pass ? `${user}:${pass}` : user;
       const connString = `postgresql://${auth}@${r.host}:${r.port || 5432}/${r.db_name || 'postgres'}`;
       return {
@@ -131,11 +133,12 @@ const getAllServers = async (req, res) => {
 
     // Read latest real-time metrics for each server item from in-memory cache
     const rawResult = allItems.map((server) => {
-      const latestMetrics = getLatestCachedMetrics(server.id);
+      const serverType = server.type || 'vps';
+      const latestMetrics = getLatestCachedMetrics(server.id, serverType);
 
       return {
         ...server,
-        type: server.type || 'vps',
+        type: serverType,
         pod_version: server.pod_version || '',
         currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS
       };
@@ -166,7 +169,7 @@ const getVpsServers = async (req, res) => {
 
     const sshServers = await db.all(query, params);
     const rawResult = sshServers.map((server) => {
-      const latestMetrics = getLatestCachedMetrics(server.id);
+      const latestMetrics = getLatestCachedMetrics(server.id, 'vps');
       return { ...server, type: 'vps', currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS };
     });
 
@@ -195,7 +198,7 @@ const getPodServers = async (req, res) => {
 
     const podServers = await db.all(query, params);
     const rawResult = podServers.map((server) => {
-      const latestMetrics = getLatestCachedMetrics(server.id);
+      const latestMetrics = getLatestCachedMetrics(server.id, 'pod');
       return { ...server, type: 'pod', currentMetrics: latestMetrics || DEFAULT_FALLBACK_METRICS };
     });
 
@@ -224,9 +227,10 @@ const getDatabaseServers = async (req, res) => {
 
     const dbRows = await db.all(query, params);
     const rawResult = dbRows.map((server) => {
-      const latestMetrics = getLatestCachedMetrics(server.id);
+      const latestMetrics = getLatestCachedMetrics(server.id, 'postgresql');
+      const clearPassword = decrypt(server.password);
       const user = encodeURIComponent(server.db_user || 'postgres');
-      const pass = server.password ? encodeURIComponent(server.password) : '';
+      const pass = clearPassword ? encodeURIComponent(clearPassword) : '';
       const auth = pass ? `${user}:${pass}` : user;
       const connString = `postgresql://${auth}@${server.host}:${server.port || 5432}/${server.db_name || 'postgres'}`;
       return {
@@ -264,7 +268,7 @@ const getStorageServers = async (req, res) => {
 
     const storageRows = await db.all(query, params);
     const rawResult = storageRows.map((server) => {
-      const latestMetrics = getLatestCachedMetrics(server.id);
+      const latestMetrics = getLatestCachedMetrics(server.id, server.type || 'minio');
       return {
         ...server,
         host: server.s3_endpoint || 's3.amazonaws.com',
@@ -291,10 +295,13 @@ const createVps = async (req, res) => {
     if (!name || !host) {
       return res.status(400).json({ success: false, error: 'Nama Server dan Host IP wajib diisi.' });
     }
+    const encPassword = password ? encrypt(password) : null;
+    const encPrivateKey = private_key ? encrypt(private_key) : null;
+
     const result = await db.run(
       `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type, pod_version, code, latitude, longitude, mac_address)
        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'vps', '', ?, ?, ?, ?)`,
-      [name, host, port || 22, username || 'root', auth_type || 'password', password || null, private_key || null, code || null, latitude || null, longitude || null, mac_address || null]
+      [name, host, port || 22, username || 'root', auth_type || 'password', encPassword, encPrivateKey, code || null, latitude || null, longitude || null, mac_address || null]
     );
     notifyServerListChange(req);
     res.json({ success: true, id: result.lastInsertRowid });
@@ -313,8 +320,8 @@ const updateVps = async (req, res) => {
     const existing = await db.get('SELECT * FROM servers WHERE id = ?', [id]);
     if (!existing) return res.status(404).json({ success: false, error: 'Server VPS tidak ditemukan.' });
 
-    const finalPassword = (password && password !== '******') ? password : existing.password;
-    const finalPrivateKey = (private_key && private_key !== '******') ? private_key : existing.private_key;
+    const finalPassword = (password && password !== '******') ? encrypt(password) : existing.password;
+    const finalPrivateKey = (private_key && private_key !== '******') ? encrypt(private_key) : existing.private_key;
     const finalCode = code !== undefined ? code : existing.code;
     const finalLat = latitude !== undefined ? latitude : existing.latitude;
     const finalLong = longitude !== undefined ? longitude : existing.longitude;
@@ -354,10 +361,13 @@ const createPod = async (req, res) => {
     if (!name || !host) {
       return res.status(400).json({ success: false, error: 'Nama POD dan Host IP wajib diisi.' });
     }
+    const encPassword = password ? encrypt(password) : null;
+    const encPrivateKey = private_key ? encrypt(private_key) : null;
+
     const result = await db.run(
       `INSERT INTO servers (name, host, port, username, auth_type, password, private_key, is_local, type, pod_version, code, latitude, longitude, mac_address)
        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'pod', ?, ?, ?, ?, ?)`,
-      [name, host, port || 22, username || 'pod', auth_type || 'password', password || null, private_key || null, pod_version || 'v3', code || null, latitude || null, longitude || null, mac_address || null]
+      [name, host, port || 22, username || 'pod', auth_type || 'password', encPassword, encPrivateKey, pod_version || 'v3', code || null, latitude || null, longitude || null, mac_address || null]
     );
     notifyServerListChange(req);
     res.json({ success: true, id: result.lastInsertRowid });
@@ -376,8 +386,8 @@ const updatePod = async (req, res) => {
     const existing = await db.get('SELECT * FROM servers WHERE id = ?', [id]);
     if (!existing) return res.status(404).json({ success: false, error: 'POD Server tidak ditemukan.' });
 
-    const finalPassword = (password && password !== '******') ? password : existing.password;
-    const finalPrivateKey = (private_key && private_key !== '******') ? private_key : existing.private_key;
+    const finalPassword = (password && password !== '******') ? encrypt(password) : existing.password;
+    const finalPrivateKey = (private_key && private_key !== '******') ? encrypt(private_key) : existing.private_key;
     const finalCode = code !== undefined ? code : existing.code;
     const finalLat = latitude !== undefined ? latitude : existing.latitude;
     const finalLong = longitude !== undefined ? longitude : existing.longitude;
@@ -418,10 +428,11 @@ const createDatabase = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Nama Database dan Host IP wajib diisi.' });
     }
     const finalDbUser = db_user || 'postgres';
+    const encPassword = password ? encrypt(password) : '';
     const result = await db.run(
       `INSERT INTO databases_postgres (name, host, port, db_name, db_user, password)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      [name, host, port || 5432, db_name || 'postgres', finalDbUser, password || '']
+      [name, host, port || 5432, db_name || 'postgres', finalDbUser, encPassword]
     );
     notifyServerListChange(req);
     res.json({ success: true, id: result.lastInsertRowid });
@@ -439,7 +450,7 @@ const updateDatabase = async (req, res) => {
     const { name, host, port, db_name, db_user, password } = req.body;
     let existing = await db.get('SELECT * FROM databases_postgres WHERE id = ?', [id]);
     if (existing) {
-      const finalPassword = (password && password !== '******') ? password : existing.password;
+      const finalPassword = (password && password !== '******') ? encrypt(password) : existing.password;
       await db.run(
         `UPDATE databases_postgres SET name = ?, host = ?, port = ?, db_name = ?, db_user = ?, password = ? WHERE id = ?`,
         [name, host, port || 5432, db_name || 'postgres', db_user || 'postgres', finalPassword, id]
@@ -451,7 +462,7 @@ const updateDatabase = async (req, res) => {
     // Fallback: Check legacy servers table
     existing = await db.get('SELECT * FROM servers WHERE id = ?', [id]);
     if (existing) {
-      const finalPassword = (password && password !== '******') ? password : existing.password;
+      const finalPassword = (password && password !== '******') ? encrypt(password) : existing.password;
       await db.run(
         `UPDATE servers SET name = ?, host = ?, port = ?, db_name = ?, db_user = ?, password = ? WHERE id = ?`,
         [name, host, port || 5432, db_name || 'postgres', db_user || 'postgres', finalPassword, id]
@@ -495,7 +506,7 @@ const createStorage = async (req, res) => {
     }
 
     const accessKey = s3_access_key || '';
-    const secretKey = s3_secret_key || '';
+    const secretKey = s3_secret_key ? encrypt(s3_secret_key) : '';
 
     const result = await db.run(
       `INSERT INTO object_storages (name, type, s3_endpoint, s3_access_key, s3_secret_key, s3_region, s3_bucket, port)
@@ -529,7 +540,7 @@ const updateStorage = async (req, res) => {
 
     let existing = await db.get('SELECT * FROM object_storages WHERE id = ?', [id]);
     if (existing) {
-      const finalSecretKey = (s3_secret_key && s3_secret_key !== '******') ? s3_secret_key : existing.s3_secret_key;
+      const finalSecretKey = (s3_secret_key && s3_secret_key !== '******') ? encrypt(s3_secret_key) : existing.s3_secret_key;
       await db.run(
         `UPDATE object_storages SET name = ?, type = ?, s3_endpoint = ?, s3_access_key = ?, s3_secret_key = ?, s3_region = ?, s3_bucket = ?, port = ? WHERE id = ?`,
         [name, storageType, s3_endpoint || host, s3_access_key, finalSecretKey, s3_region || 'us-east-1', s3_bucket || '', port || (storageType === 'minio' ? 9000 : 443), id]
@@ -541,7 +552,7 @@ const updateStorage = async (req, res) => {
     // Fallback: Check legacy servers table
     existing = await db.get('SELECT * FROM servers WHERE id = ?', [id]);
     if (existing) {
-      const finalSecretKey = (s3_secret_key && s3_secret_key !== '******') ? s3_secret_key : existing.s3_secret_key;
+      const finalSecretKey = (s3_secret_key && s3_secret_key !== '******') ? encrypt(s3_secret_key) : existing.s3_secret_key;
       await db.run(
         `UPDATE servers SET name = ?, type = ?, s3_endpoint = ?, s3_access_key = ?, s3_secret_key = ?, s3_region = ?, s3_bucket = ?, port = ? WHERE id = ?`,
         [name, storageType, s3_endpoint || host, s3_access_key, finalSecretKey, s3_region || 'us-east-1', s3_bucket || '', port || (storageType === 'minio' ? 9000 : 443), id]
@@ -781,9 +792,9 @@ const redeployBackend = async (req, res) => {
         };
 
         if (server.auth_type === 'key' && server.private_key) {
-          sshConfig.privateKey = server.private_key;
+          sshConfig.privateKey = decrypt(server.private_key);
         } else {
-          sshConfig.password = server.password;
+          sshConfig.password = decrypt(server.password);
         }
 
         conn.on('ready', () => {

@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const { Client } = require('ssh2');
 const { spawn } = require('child_process');
 const dbAsync = require('./db');
+const { decrypt } = require('../utils/crypto');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const PM2_PATH_ENV = 'export PATH=$PATH:/usr/local/bin:/usr/bin:/bin:~/.nvm/versions/node/$(ls ~/.nvm/versions/node 2>/dev/null | tail -n 1)/bin;';
@@ -26,26 +27,26 @@ function registerPm2StreamHandlers(socket, io) {
         return socket.emit('pm2:stream-error', { error: 'Token otentikasi tidak valid.' });
       }
 
+      if (!serverId || !appName) {
+        return socket.emit('pm2:stream-error', { error: 'Parameter serverId dan appName harus diisi.' });
+      }
+
       const user = await dbAsync.get('SELECT * FROM users WHERE id = ?', [decoded.id]);
       if (!user || user.status !== 'approved') {
         return socket.emit('pm2:stream-error', { error: 'Akses ditolak.' });
       }
 
-      // 2. Fetch server
+      // 2. Fetch server details from database
       const server = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
       if (!server) {
-        return socket.emit('pm2:stream-error', { error: 'Server tidak ditemukan.' });
+        return socket.emit('pm2:stream-error', { error: 'Server tidak ditemukan di database.' });
       }
 
       // Stop any existing stream for this socket
       stopPm2Stream(socket.id);
 
       const safeApp = String(appName).replace(/[^a-zA-Z0-9_\-\.]/g, '');
-      if (!safeApp) {
-        return socket.emit('pm2:stream-error', { error: 'Nama aplikasi PM2 tidak valid.' });
-      }
-
-      const command = `${PM2_PATH_ENV} pm2 logs ${safeApp} --lines 100 2>&1`;
+      const command = `${PM2_PATH_ENV} pm2 logs ${safeApp} --raw --lines 100 2>&1`;
 
       if (server.is_local === 1) {
         const child = spawn('sh', ['-c', command]);
@@ -73,9 +74,9 @@ function registerPm2StreamHandlers(socket, io) {
         };
 
         if (server.auth_type === 'key' && server.private_key) {
-          sshConfig.privateKey = server.private_key;
+          sshConfig.privateKey = decrypt(server.private_key);
         } else {
-          sshConfig.password = server.password;
+          sshConfig.password = decrypt(server.password);
         }
 
         conn.on('ready', () => {

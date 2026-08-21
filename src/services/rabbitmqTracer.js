@@ -1,6 +1,7 @@
 const amqp = require('amqplib');
 const jwt = require('jsonwebtoken');
 const dbAsync = require('./db');
+const { decrypt } = require('../utils/crypto');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const activeSessions = new Map(); // Map<socketId, { conn, ch }>
@@ -56,8 +57,9 @@ function registerRabbitMqTracerHandlers(socket, io) {
       await stopTrace(socket.id);
 
       // 3. Connect to RabbitMQ using AMQP protocol
+      const clearPassword = decrypt(server.password) || '';
       const username = encodeURIComponent(server.username || 'guest');
-      const password = encodeURIComponent(server.password || '');
+      const password = encodeURIComponent(clearPassword);
       const host = server.host;
       const amqpPort = 5672; // Standard AMQP port
       const safeVhost = vhost === '/' ? '' : encodeURIComponent(vhost);

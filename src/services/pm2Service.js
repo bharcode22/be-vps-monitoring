@@ -1,5 +1,6 @@
 const { exec } = require('child_process');
 const { Client } = require('ssh2');
+const { decrypt } = require('../utils/crypto');
 
 const PM2_PATH_ENV = 'export PATH=$PATH:/usr/local/bin:/usr/bin:/bin:~/.nvm/versions/node/$(ls ~/.nvm/versions/node 2>/dev/null | tail -n 1)/bin;';
 
@@ -37,9 +38,9 @@ function executeCommand(server, command) {
       };
 
       if (server.auth_type === 'key' && server.private_key) {
-        sshConfig.privateKey = server.private_key;
+        sshConfig.privateKey = decrypt(server.private_key);
       } else {
-        sshConfig.password = server.password;
+        sshConfig.password = decrypt(server.password);
       }
 
       conn.on('ready', () => {

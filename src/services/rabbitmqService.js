@@ -1,3 +1,5 @@
+const { decrypt } = require('../utils/crypto');
+
 /**
  * Service to interact with RabbitMQ HTTP Management API
  */
@@ -9,7 +11,8 @@
 async function fetchRabbitMqStatus(server) {
   const { host, port, username, password } = server;
   const baseUrl = `http://${host}:${port}`;
-  const auth = Buffer.from(`${username || 'guest'}:${password || ''}`).toString('base64');
+  const clearPassword = decrypt(password) || '';
+  const auth = Buffer.from(`${username || 'guest'}:${clearPassword}`).toString('base64');
   const headers = {
     'Authorization': `Basic ${auth}`,
     'Accept': 'application/json'
