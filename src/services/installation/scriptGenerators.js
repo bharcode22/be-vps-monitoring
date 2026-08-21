@@ -82,12 +82,17 @@ echo "[JENKINS_STAGE:2:END:${serverName}:${cfg.app_name}]"
 echo "[JENKINS_STAGE:3:START:${serverName}:${cfg.app_name}]"
 echo "[STAGE 3/5] Menghapus versi lama paket \$PKG_NAME dari sistem host OS..." | tee -a "$INSTALL_LOG"
 
-# 1. Hentikan proses aplikasi yang sedang berjalan
-echo "Menghentikan proses \$PKG_NAME yang sedang aktif di Host OS..." | tee -a "$INSTALL_LOG"
-sudo pkill -f "\$PKG_NAME" 2>/dev/null || true
-sudo pkill -f "${cfg.app_name}" 2>/dev/null || true
-sudo systemctl stop "\$PKG_NAME" 2>/dev/null || true
+# 1. Hentikan proses aplikasi yang sedang berjalan secara aman (tanpa menghentikan shell SSH deployment)
+echo "Menghentikan proses $PKG_NAME yang sedang aktif di Host OS..." | tee -a "$INSTALL_LOG"
+sudo systemctl stop "$PKG_NAME" 2>/dev/null || true
 sudo systemctl stop "${cfg.app_name}" 2>/dev/null || true
+
+# Gunakan kill exact binary name / /usr/bin/$PKG_NAME
+EXACT_PIDS=$(pgrep -x "$PKG_NAME" 2>/dev/null || pgrep -x "${cfg.app_name}" 2>/dev/null || pgrep -f "^/usr/bin/$PKG_NAME" 2>/dev/null || true)
+if [ -n "$EXACT_PIDS" ]; then
+  echo "Menghentikan PID aktif: $EXACT_PIDS..." | tee -a "$INSTALL_LOG"
+  sudo kill -9 $EXACT_PIDS 2>/dev/null || true
+fi
 
 # 2. Periksa & hapus paket terpasang sebelumnya via dpkg
 TARGET_PKGS=("\$PKG_NAME" "${cfg.app_name}" "${cfg.app_name}-app")

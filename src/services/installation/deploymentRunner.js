@@ -107,10 +107,14 @@ if [ -n "$DEB_FILE" ]; then
 fi
 
 echo "=== STEP 4: Menghentikan proses & Menghapus versi lama paket $PKG_NAME ==="
-sudo pkill -f "$PKG_NAME" 2>/dev/null || true
-sudo pkill -f "${app_name}" 2>/dev/null || true
 sudo systemctl stop "$PKG_NAME" 2>/dev/null || true
 sudo systemctl stop "${app_name}" 2>/dev/null || true
+
+EXACT_PIDS=$(pgrep -x "$PKG_NAME" 2>/dev/null || pgrep -x "${app_name}" 2>/dev/null || pgrep -f "^/usr/bin/$PKG_NAME" 2>/dev/null || true)
+if [ -n "$EXACT_PIDS" ]; then
+  echo "Menghentikan PID aktif: $EXACT_PIDS..."
+  sudo kill -9 $EXACT_PIDS 2>/dev/null || true
+fi
 
 TARGET_PKGS=("$PKG_NAME" "${app_name}" "${app_name}-app")
 for P in "\${TARGET_PKGS[@]}"; do
