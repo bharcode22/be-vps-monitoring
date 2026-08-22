@@ -13,6 +13,7 @@ const installationController = require('../controllers/installationController');
 const bundleController = require('../controllers/bundleController');
 const envController = require('../controllers/envController');
 const heartbeatController = require('../controllers/heartbeatController');
+const contentController = require('../controllers/contentController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // 1. Health check & Settings
@@ -61,7 +62,21 @@ router.put('/vps/env-manager/files/:filename', requireAuth, envController.handle
 router.delete('/vps/env-manager/files/:filename', requireAuth, envController.handleDeleteEnvFile);
 router.post('/vps/env-manager/compare', requireAuth, envController.handleCompareEnvFiles);
 
-// 6. Category-specific Static CRUD routes
+// 6. AWS S3 Content Management & POD v3 Storage Cleanup routes
+router.get('/vps/content/s3/folders', optionalAuth, contentController.getS3Folders);
+router.get('/vps/content/s3/files', optionalAuth, contentController.getS3FolderFiles);
+router.delete('/vps/content/s3/folder/:code', requireAuth, contentController.deleteS3Folder);
+router.get('/vps/content/pods/storage', optionalAuth, contentController.getPodsStorage);
+router.get('/vps/content/pods/:id/scan', optionalAuth, contentController.scanPodJunk);
+router.post('/vps/content/pods/cleanup', requireAuth, contentController.cleanupPodJunk);
+router.post('/vps/content/pods/sync', requireAuth, contentController.syncS3ToPod);
+router.post('/vps/content/matrix/check-pods', optionalAuth, contentController.checkCodeOnPods);
+router.post('/vps/content/pods/delete-code', requireAuth, contentController.deleteCodeOnPod);
+router.post('/vps/content/batch-delete', requireAuth, contentController.batchDeleteCode);
+router.get('/vps/content/pods/file-stream', optionalAuth, contentController.streamPodFile);
+
+
+// 7. Category-specific Static CRUD routes
 router.get('/vps/vps', optionalAuth, vpsController.getVpsServers);
 router.post('/vps/vps', requireAuth, vpsController.createVps);
 router.put('/vps/vps/:id', requireAuth, vpsController.updateVps);
