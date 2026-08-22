@@ -9,9 +9,84 @@ const {
 } = require('./scriptGenerators');
 
 /**
+ * Record a deployment entry in deployment_history table
+ */
+async function recordDeploymentHistory({
+  batch_id = null,
+  pod_code,
+  server_name,
+  app_name,
+  app_type = 'backend',
+  environment = 'dev',
+  version,
+  env_filename = null,
+  run_prisma_migrate = false,
+  status = 'success',
+  duration_seconds = 0,
+  logs = '',
+  error_message = null,
+  deployed_by = 'Admin'
+}) {
+  try {
+    const res = await dbAsync.run(`
+      INSERT INTO deployment_history (
+        batch_id, pod_code, server_name, app_name, app_type,
+        environment, version, env_filename, run_prisma_migrate,
+        status, duration_seconds, logs, error_message, deployed_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      batch_id, pod_code, server_name, app_name, app_type,
+      environment, version, env_filename, run_prisma_migrate ? 1 : 0,
+      status, Math.round(duration_seconds), logs, error_message, deployed_by
+    ]);
+    return res.lastInsertRowid;
+  } catch (err) {
+    console.error('Error saving deployment_history:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Upsert active app version in pod_app_versions table
+ */
+async function upsertPodAppVersion({
+  pod_code,
+  app_name,
+  app_type = 'backend',
+  environment = 'dev',
+  current_version,
+  last_deployment_id = null,
+  status = 'active'
+}) {
+  if (!pod_code || !app_name || !current_version) return;
+  try {
+    const now = new Date().toISOString();
+    await dbAsync.run(`
+      INSERT INTO pod_app_versions (
+        pod_code, app_name, app_type, environment,
+        current_version, last_deployment_id, status, installed_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (pod_code, app_name) DO UPDATE SET
+        app_type = EXCLUDED.app_type,
+        environment = EXCLUDED.environment,
+        current_version = EXCLUDED.current_version,
+        last_deployment_id = EXCLUDED.last_deployment_id,
+        status = EXCLUDED.status,
+        updated_at = EXCLUDED.updated_at
+    `, [
+      pod_code, app_name, app_type, environment,
+      current_version, last_deployment_id, status, now, now
+    ]);
+  } catch (err) {
+    console.error('Error updating pod_app_versions:', err.message);
+  }
+}
+
+/**
  * Execute automated deployment on a single target POD v3 server via SSH
  */
-async function deployPodApp({ server_id, app_name, env, version, env_filename, run_prisma_migrate }) {
+async function deployPodApp({ server_id, app_name, env, version, env_filename, run_prisma_migrate, deployed_by = 'Admin' }) {
+  const startTime = Date.now();
   if (!server_id) {
     throw new Error('Server ID (POD v3) wajib ditentukan');
   }
@@ -28,6 +103,9 @@ async function deployPodApp({ server_id, app_name, env, version, env_filename, r
   }
 
   const environment = env || 'dev';
+  const isDebApp = app_name === 'big-screen' || app_name === 'small-screen';
+  const appType = isDebApp ? 'frontend' : 'backend';
+
   const logs = [];
   logs.push(`[1/6] Memulai deployment untuk aplikasi: ${app_name} (${environment}) versi: ${version}`);
   logs.push(`[2/6] Menghubungkan ke server ${server.name} (${server.host}:${server.port || 22})...`);
@@ -40,7 +118,6 @@ async function deployPodApp({ server_id, app_name, env, version, env_filename, r
 
   // Path in MinIO bucket & Deployment directory
   const minioAppPath = resolveMinioAppPath(app_name);
-  const isDebApp = app_name === 'big-screen' || app_name === 'small-screen';
   const appDeployDir = isDebApp
     ? `/home/pod/workspace/Deployment/${app_name}-app`
     : `$HOME/${environment}`;
@@ -212,13 +289,14 @@ echo "=== DEPLOYMENT COMPLETED SUCCESSFULLY ==="
   }
 
   const sshResult = await executeSSHCommand(server, deployScript);
+  const durationSeconds = (Date.now() - startTime) / 1000;
 
   if (sshResult.success) {
     logs.push(`[4/6] Artefak disalin & aplikasi ${app_name} berhasil dideploy.`);
     if (run_prisma_migrate) {
       logs.push(`[5/6] Prisma migration dieksekusi.`);
     }
-    logs.push(`[6/6] Selesai deployment aplikasi ${app_name} di server ${server.name}!`);
+    logs.push(`[6/6] Selesai deployment aplikasi ${app_name} di server ${server.name}! (Durasi: ${durationSeconds.toFixed(1)}s)`);
   } else {
     logs.push(`[ERR] Gagal menjalankan skrip deployment di server ${server.name}`);
     if (sshResult.stderr) {
@@ -226,10 +304,43 @@ echo "=== DEPLOYMENT COMPLETED SUCCESSFULLY ==="
     }
   }
 
+  const fullLogs = logs.join('\n') + (sshResult.stdout ? `\n\n=== TERMINAL OUTPUT ===\n${sshResult.stdout}` : '') + (sshResult.stderr ? `\n\n=== STDERR ===\n${sshResult.stderr}` : '');
+
+  // Record deployment history
+  const historyId = await recordDeploymentHistory({
+    pod_code: server.code,
+    server_name: server.name,
+    app_name,
+    app_type: appType,
+    environment,
+    version,
+    env_filename,
+    run_prisma_migrate,
+    status: sshResult.success ? 'success' : 'failed',
+    duration_seconds: durationSeconds,
+    logs: fullLogs,
+    error_message: sshResult.success ? null : (sshResult.stderr || 'Deployment script exited with error'),
+    deployed_by
+  });
+
+  // If success, upsert into pod_app_versions
+  if (sshResult.success && server.code) {
+    await upsertPodAppVersion({
+      pod_code: server.code,
+      app_name,
+      app_type: appType,
+      environment,
+      current_version: version,
+      last_deployment_id: historyId,
+      status: 'active'
+    });
+  }
+
   return {
     success: sshResult.success,
     server_id: server.id,
     server_name: server.name,
+    pod_code: server.code,
     host: server.host,
     app_name,
     env: environment,
@@ -245,7 +356,8 @@ echo "=== DEPLOYMENT COMPLETED SUCCESSFULLY ==="
 /**
  * Streaming Multi-POD & Multi-App Batch Deployment
  */
-async function deployBatchPodAppServerStream({ server_ids, env, app_configs, onLog }) {
+async function deployBatchPodAppServerStream({ server_ids, env, app_configs, onLog, deployed_by = 'Admin', bundle_id = null }) {
+  const batchId = `batch_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
   const environment = env || 'dev';
   const serverList = [];
   for (const sId of server_ids) {
@@ -257,15 +369,16 @@ async function deployBatchPodAppServerStream({ server_ids, env, app_configs, onL
     throw new Error('Tidak ada server target POD v3 ditemukan');
   }
 
-  onLog(`\n=== MEMULAI REAL-TIME BATCH DEPLOYMENT POD V3 (${serverList.length} SERVER, ${app_configs.length} APPS) ===\n`);
+  onLog(`\n=== MEMULAI REAL-TIME BATCH DEPLOYMENT POD V3 (Batch ID: ${batchId}, ${serverList.length} SERVER, ${app_configs.length} APPS) ===\n`);
 
   let totalSuccess = 0;
   let totalFail = 0;
 
   await Promise.all(
     serverList.map(async (server) => {
+      const serverStartTime = Date.now();
       onLog(`\n======================================================================`);
-      onLog(`>>> [PARALLEL NODE START] PROSES DEPLOYMENT UNTUK SERVER: ${server.name} (${server.host}:${server.port || 22})`);
+      onLog(`>>> [PARALLEL NODE START] PROSES DEPLOYMENT UNTUK SERVER: ${server.name} (Code: ${server.code || 'N/A'}, Host: ${server.host}:${server.port || 22})`);
       onLog(`======================================================================\n`);
 
       // Phase 1: Parallel downloads of all app artifacts from MinIO
@@ -324,9 +437,11 @@ echo "[JENKINS_STAGE:2:START:${server.name}:${cfg.app_name}]"
 
       let serverSuccessCount = 0;
       let serverFailCount = 0;
+      let fullStreamLog = '';
 
       const res = await executeSSHCommandStream(server, fullBatchScript, (chunk) => {
         onLog(chunk);
+        fullStreamLog += chunk;
         if (chunk.includes('STATUS_APP_SUCCESS:')) {
           serverSuccessCount++;
         }
@@ -335,6 +450,7 @@ echo "[JENKINS_STAGE:2:START:${server.name}:${cfg.app_name}]"
         }
       });
 
+      const isServerOverallSuccess = res.success && serverFailCount === 0;
       if (serverSuccessCount === 0 && serverFailCount === 0) {
         if (res.success) {
           totalSuccess += app_configs.length;
@@ -345,16 +461,70 @@ echo "[JENKINS_STAGE:2:START:${server.name}:${cfg.app_name}]"
         totalSuccess += serverSuccessCount;
         totalFail += serverFailCount;
       }
+
+      const serverDuration = (Date.now() - serverStartTime) / 1000;
+
+      // Record deployment history and update app versions for each configured app on this server
+      for (const cfg of app_configs) {
+        const isDebApp = cfg.app_name === 'big-screen' || cfg.app_name === 'small-screen';
+        const appType = isDebApp ? 'frontend' : (cfg.app_type || 'backend');
+        const isThisAppSuccess = fullStreamLog.includes(`STATUS_APP_SUCCESS:${server.name}:${cfg.app_name}`) || (res.success && serverFailCount === 0);
+
+        const historyId = await recordDeploymentHistory({
+          batch_id: batchId,
+          pod_code: server.code,
+          server_name: server.name,
+          app_name: cfg.app_name,
+          app_type: appType,
+          environment,
+          version: cfg.version,
+          env_filename: cfg.env_filename || null,
+          run_prisma_migrate: Boolean(cfg.run_prisma_migrate),
+          status: isThisAppSuccess ? 'success' : 'failed',
+          duration_seconds: serverDuration / app_configs.length,
+          logs: fullStreamLog,
+          error_message: isThisAppSuccess ? null : `Batch deployment failed on ${server.name}`,
+          deployed_by
+        });
+
+        if (isThisAppSuccess && server.code) {
+          await upsertPodAppVersion({
+            pod_code: server.code,
+            app_name: cfg.app_name,
+            app_type: appType,
+            environment,
+            current_version: cfg.version,
+            last_deployment_id: historyId,
+            status: 'active'
+          });
+        }
+      }
+
+      // If bundle_id provided and server succeeded, update pod_bundle_states
+      if (server.code && bundle_id && serverFailCount === 0) {
+        try {
+          const { assignPodBundleState } = require('./bundleService');
+          await assignPodBundleState({
+            pod_code: server.code,
+            bundle_id: Number(bundle_id),
+            deployed_by
+          });
+          onLog(`[BUNDLE SYNC] Server ${server.name} (#${server.code}) status bundle berhasil diselaraskan ke Bundle #${bundle_id} (100% Synced)`);
+        } catch (e) {
+          console.warn('Failed to assign bundle state:', e.message);
+        }
+      }
     })
   );
 
   onLog(`\n======================================================================`);
-  onLog(`=== SELURUH BATCH DEPLOYMENT SELESAI ===`);
+  onLog(`=== SELURUH BATCH DEPLOYMENT SELESAI (Batch ID: ${batchId}) ===`);
   onLog(`Total Tugas Sukses: ${totalSuccess} | Total Tugas Gagal: ${totalFail}`);
   onLog(`======================================================================\n`);
 
   return {
     success: totalFail === 0,
+    batchId,
     totalSuccess,
     totalFail,
     totalServers: serverList.length,
@@ -364,5 +534,7 @@ echo "[JENKINS_STAGE:2:START:${server.name}:${cfg.app_name}]"
 
 module.exports = {
   deployPodApp,
-  deployBatchPodAppServerStream
+  deployBatchPodAppServerStream,
+  recordDeploymentHistory,
+  upsertPodAppVersion
 };

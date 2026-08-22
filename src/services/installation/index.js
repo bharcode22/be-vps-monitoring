@@ -30,6 +30,22 @@ const {
 
 const { deployPodApp, deployBatchPodAppServerStream } = require('./deploymentRunner');
 
+const {
+  scanServerInstalledVersions,
+  scanAllPodAppVersions,
+  getPodAppVersionsMatrix
+} = require('./versionScanner');
+
+const {
+  getAllBundleDefinitions,
+  getBundleDefinitionById,
+  createBundleDefinition,
+  updateBundleDefinition,
+  deleteBundleDefinition,
+  getPodBundleMatrix,
+  assignPodBundleState
+} = require('./bundleService');
+
 module.exports = {
   getInstallationVersions,
   getDetailedArtifactVersions,
@@ -53,5 +69,15 @@ module.exports = {
   generateDebDeploymentSnippet,
   generateDockerDeploymentSnippet,
   deployPodApp,
-  deployBatchPodAppServerStream
+  deployBatchPodAppServerStream,
+  scanServerInstalledVersions,
+  scanAllPodAppVersions,
+  getPodAppVersionsMatrix,
+  getAllBundleDefinitions,
+  getBundleDefinitionById,
+  createBundleDefinition,
+  updateBundleDefinition,
+  deleteBundleDefinition,
+  getPodBundleMatrix,
+  assignPodBundleState
 };

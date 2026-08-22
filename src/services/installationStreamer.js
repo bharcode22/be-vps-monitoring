@@ -29,6 +29,8 @@ function registerInstallationStreamHandlers(socket, io) {
         server_ids: server_ids.map(Number),
         env: env || 'dev',
         app_configs,
+        deployed_by: payload.deployed_by || 'Admin',
+        bundle_id: payload.bundle_id || null,
         onLog: (logChunk) => {
           socket.emit('installation_batch_log', { text: logChunk });
         }

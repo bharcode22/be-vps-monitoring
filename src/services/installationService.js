@@ -36,5 +36,19 @@ module.exports = {
 
   // Deployment Runners
   deployPodApp: installation.deployPodApp,
-  deployBatchPodAppServerStream: installation.deployBatchPodAppServerStream
+  deployBatchPodAppServerStream: installation.deployBatchPodAppServerStream,
+
+  // Version Scanners & Live Matrix
+  scanServerInstalledVersions: installation.scanServerInstalledVersions,
+  scanAllPodAppVersions: installation.scanAllPodAppVersions,
+  getPodAppVersionsMatrix: installation.getPodAppVersionsMatrix,
+
+  // Bundle Version Definitions & Compliance Matrix
+  getAllBundleDefinitions: installation.getAllBundleDefinitions,
+  getBundleDefinitionById: installation.getBundleDefinitionById,
+  createBundleDefinition: installation.createBundleDefinition,
+  updateBundleDefinition: installation.updateBundleDefinition,
+  deleteBundleDefinition: installation.deleteBundleDefinition,
+  getPodBundleMatrix: installation.getPodBundleMatrix,
+  assignPodBundleState: installation.assignPodBundleState
 };
