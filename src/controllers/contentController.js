@@ -1,5 +1,5 @@
 const dbAsync = require('../services/db');
-const { listS3MediaFolders, listS3FolderFiles, deleteS3CodeFolder } = require('../services/s3Service');
+const { listS3MediaFolders, listS3FolderFiles, deleteS3CodeFolder, formatBytes } = require('../services/s3Service');
 const {
   getPodStorageSummary,
   scanPodPhysicalFiles,
@@ -8,6 +8,8 @@ const {
   checkCodeFilesOnSinglePod,
   hardDeletePodCodeFiles,
   streamPodPhysicalFile,
+  inspectPodDockerStorage,
+  cleanPodDockerStorage,
   executeCommand
 } = require('../services/podStorageService');
 
@@ -444,6 +446,143 @@ const streamPodFile = async (req, res) => {
   }
 };
 
+/**
+ * 12. Inspect Docker disk usage on a single POD server
+ */
+const inspectSinglePodDocker = async (req, res) => {
+  try {
+    const serverId = req.params.serverId || req.query.serverId;
+    if (!serverId) {
+      return res.status(400).json({ success: false, error: 'Parameter serverId harus diisi' });
+    }
+
+    const server = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
+    if (!server) {
+      return res.status(404).json({ success: false, error: 'Server POD tidak ditemukan' });
+    }
+
+    const data = await inspectPodDockerStorage(server);
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('Error inspecting POD Docker storage:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * 13. Inspect Docker disk usage across all POD v3 servers in parallel
+ */
+const inspectAllPodsDocker = async (req, res) => {
+  try {
+    const servers = await dbAsync.all(
+      "SELECT * FROM servers WHERE LOWER(category) = 'pod' OR LOWER(name) LIKE '%pod%' ORDER BY name ASC"
+    );
+
+    const results = await Promise.allSettled(
+      servers.map(server => inspectPodDockerStorage(server))
+    );
+
+    const podInspections = results.map((r, idx) => {
+      if (r.status === 'fulfilled') {
+        return r.value;
+      }
+      return {
+        serverId: servers[idx].id,
+        serverName: servers[idx].name,
+        code: servers[idx].code || '',
+        host: servers[idx].host,
+        status: 'offline',
+        error: r.reason?.message || 'SSH error'
+      };
+    });
+
+    res.json({
+      success: true,
+      totalPods: servers.length,
+      data: podInspections
+    });
+  } catch (err) {
+    console.error('Error inspecting all PODs Docker storage:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * 14. Execute Docker cleanup on a single POD server
+ */
+const cleanupSinglePodDocker = async (req, res) => {
+  if (req.setTimeout) req.setTimeout(360000); // 6 menit
+  try {
+    const { serverId, cleanType = 'safe' } = req.body;
+    if (!serverId) {
+      return res.status(400).json({ success: false, error: 'Parameter serverId harus diisi' });
+    }
+
+    const server = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
+    if (!server) {
+      return res.status(404).json({ success: false, error: 'Server POD tidak ditemukan' });
+    }
+
+    const result = await cleanPodDockerStorage(server, cleanType);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    console.error('Error cleaning single POD Docker storage:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * 15. Execute Docker cleanup in batch across multiple or all POD servers
+ */
+const cleanupBatchPodsDocker = async (req, res) => {
+  if (req.setTimeout) req.setTimeout(360000); // 6 menit
+  try {
+    const { serverIds, cleanType = 'safe' } = req.body;
+
+
+    let servers = [];
+    if (serverIds && Array.isArray(serverIds) && serverIds.length > 0) {
+      const placeholders = serverIds.map(() => '?').join(',');
+      servers = await dbAsync.all(`SELECT * FROM servers WHERE id IN (${placeholders})`, serverIds);
+    } else {
+      servers = await dbAsync.all(
+        "SELECT * FROM servers WHERE LOWER(category) = 'pod' OR LOWER(name) LIKE '%pod%' ORDER BY name ASC"
+      );
+    }
+
+    const results = await Promise.allSettled(
+      servers.map(server => cleanPodDockerStorage(server, cleanType))
+    );
+
+    let totalFreedBytes = 0;
+    const cleanResults = results.map((r, idx) => {
+      if (r.status === 'fulfilled') {
+        totalFreedBytes += r.value.freedBytes || 0;
+        return r.value;
+      }
+      return {
+        serverId: servers[idx].id,
+        serverName: servers[idx].name,
+        code: servers[idx].code || '',
+        status: 'error',
+        error: r.reason?.message || 'Gagal membersihkan Docker di server'
+      };
+    });
+
+    res.json({
+      success: true,
+      totalServers: servers.length,
+      totalFreedBytes,
+      totalFreedFormatted: formatBytes(totalFreedBytes),
+      cleanType,
+      data: cleanResults
+    });
+  } catch (err) {
+    console.error('Error in batch cleaning PODs Docker storage:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 module.exports = {
   getS3Folders,
   getS3FolderFiles,
@@ -455,7 +594,12 @@ module.exports = {
   checkCodeOnPods,
   deleteCodeOnPod,
   batchDeleteCode,
-  streamPodFile
+  streamPodFile,
+  inspectSinglePodDocker,
+  inspectAllPodsDocker,
+  cleanupSinglePodDocker,
+  cleanupBatchPodsDocker
 };
+
 
 

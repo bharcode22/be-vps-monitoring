@@ -75,6 +75,12 @@ router.post('/vps/content/pods/delete-code', requireAuth, contentController.dele
 router.post('/vps/content/batch-delete', requireAuth, contentController.batchDeleteCode);
 router.get('/vps/content/pods/file-stream', optionalAuth, contentController.streamPodFile);
 
+// Docker Build Junk & Fleet Storage Cleanup routes
+router.get('/vps/storage/docker/inspect/:serverId', optionalAuth, contentController.inspectSinglePodDocker);
+router.post('/vps/storage/docker/inspect-all', optionalAuth, contentController.inspectAllPodsDocker);
+router.post('/vps/storage/docker/cleanup', requireAuth, contentController.cleanupSinglePodDocker);
+router.post('/vps/storage/docker/cleanup-batch', requireAuth, contentController.cleanupBatchPodsDocker);
+
 
 // 7. Category-specific Static CRUD routes
 router.get('/vps/vps', optionalAuth, vpsController.getVpsServers);
