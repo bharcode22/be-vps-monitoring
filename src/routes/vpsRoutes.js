@@ -16,6 +16,7 @@ const envController = require('../controllers/envController');
 const heartbeatController = require('../controllers/heartbeatController');
 const contentController = require('../controllers/contentController');
 const podTopicController = require('../controllers/podTopicController');
+const masterToPodSyncController = require('../controllers/masterToPodSyncController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // 1. Health check & Settings
@@ -139,7 +140,13 @@ router.post('/pod-topics/register', requireAuth, podTopicController.registerPodT
 router.post('/pod-topics/test-publish', requireAuth, podTopicController.testPublishMqtt);
 router.get('/pod-topics/:serverId', requireAuth, podTopicController.getPodTopicDetail);
 
-// 12. Dynamic / Parameterized routes by Server ID (MUST BE AT THE END)
+// 12. Master DB to Multi-POD Sync Matrix routes
+router.get('/master-pod-sync/masters', requireAuth, masterToPodSyncController.getMasterDatabases);
+router.get('/master-pod-sync/tables', requireAuth, masterToPodSyncController.getMasterTables);
+router.get('/master-pod-sync/matrix', requireAuth, masterToPodSyncController.getTableComparisonMatrix);
+router.post('/master-pod-sync/sync', requireAuth, masterToPodSyncController.performSync);
+
+// 13. Dynamic / Parameterized routes by Server ID (MUST BE AT THE END)
 router.get('/vps/:id/history', optionalAuth, vpsController.getServerHistory);
 router.post('/vps/:id/deploy-backend', requireAuth, vpsController.redeployBackend);
 router.put('/vps/:id', requireAuth, vpsController.updateServer);
