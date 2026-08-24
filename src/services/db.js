@@ -97,12 +97,28 @@ const dbAsync = {
 
     try {
       const result = await pool.query(convertedSql, params);
-      const lastInsertRowid = (result.rows && result.rows[0] && result.rows[0].id) ? result.rows[0].id : null;
+      const lastInsertRowid = (result.rows && result.rows[0])
+        ? (result.rows[0].id || result.rows[0].key || null)
+        : null;
       return {
         lastInsertRowid,
         changes: result.rowCount || 0
       };
     } catch (err) {
+      // Fallback: If "column id does not exist" error happens because of appended RETURNING id, retry raw query
+      if (err.message && err.message.includes('column "id" does not exist')) {
+        try {
+          const rawSql = convertSqlPlaceholders(sql);
+          const result = await pool.query(rawSql, params);
+          return {
+            lastInsertRowid: null,
+            changes: result.rowCount || 0
+          };
+        } catch (retryErr) {
+          console.error(`❌ [dbAsync.run] Retry error: ${retryErr.message}\nSQL: ${convertedSql}`);
+          throw retryErr;
+        }
+      }
       console.error(`❌ [dbAsync.run] Query error: ${err.message}\nSQL: ${convertedSql}`);
       throw err;
     }

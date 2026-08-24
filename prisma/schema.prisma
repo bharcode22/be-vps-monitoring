@@ -40,7 +40,8 @@ model Server {
 }
 
 model Setting {
-  key        String   @id
+  id         Int      @id @default(autoincrement())
+  key        String   @unique
   value      String
   updated_at DateTime @default(now())
 
@@ -118,7 +119,7 @@ model DeploymentHistory {
   deployed_by        String?  @default("Admin")
   created_at         DateTime @default(now())
 
-  server             Server?  @relation(fields: [pod_code], references: [code], onDelete: Cascade)
+  server Server? @relation(fields: [pod_code], references: [code], onDelete: Cascade)
 
   @@index([pod_code])
   @@index([created_at])
@@ -137,7 +138,7 @@ model PodAppVersion {
   installed_at       DateTime @default(now())
   updated_at         DateTime @default(now())
 
-  server             Server   @relation(fields: [pod_code], references: [code], onDelete: Cascade)
+  server Server @relation(fields: [pod_code], references: [code], onDelete: Cascade)
 
   @@unique([pod_code, app_name], name: "uq_pod_app")
   @@index([pod_code])
@@ -145,12 +146,12 @@ model PodAppVersion {
 }
 
 model BundleDefinition {
-  id                        Int      @id @default(autoincrement())
-  bundle_name               String   @unique
-  bundle_version            String
-  environment               String   @default("dev") // 'dev' | 'release'
-  description               String?
-  
+  id             Int     @id @default(autoincrement())
+  bundle_name    String  @unique
+  bundle_version String
+  environment    String  @default("dev") // 'dev' | 'release'
+  description    String?
+
   // 5 Backend Microservices - Versi MinIO
   mobile_api_version        String
   mobile_synch_version      String
@@ -159,47 +160,47 @@ model BundleDefinition {
   assist_api_version        String
 
   // 5 Backend Microservices - File .env & Prisma Migrate Flag
-  mobile_api_env            String?  @default("")
-  mobile_api_prisma         Boolean  @default(false)
+  mobile_api_env    String? @default("")
+  mobile_api_prisma Boolean @default(false)
 
-  mobile_synch_env          String?  @default("")
-  mobile_synch_prisma       Boolean  @default(false)
+  mobile_synch_env    String? @default("")
+  mobile_synch_prisma Boolean @default(false)
 
-  mobile_consume_env        String?  @default("")
-  mobile_consume_prisma     Boolean  @default(false)
+  mobile_consume_env    String? @default("")
+  mobile_consume_prisma Boolean @default(false)
 
-  mobile_downloader_env     String?  @default("")
-  mobile_downloader_prisma  Boolean  @default(false)
+  mobile_downloader_env    String? @default("")
+  mobile_downloader_prisma Boolean @default(false)
 
-  assist_api_env            String?  @default("")
-  assist_api_prisma         Boolean  @default(false)
-  
+  assist_api_env    String? @default("")
+  assist_api_prisma Boolean @default(false)
+
   // 2 Frontend Screens (DEB)
-  small_screen_version      String
-  big_screen_version        String
-  
-  created_by                String?  @default("Admin")
-  created_at                DateTime @default(now())
-  updated_at                DateTime @default(now())
+  small_screen_version String
+  big_screen_version   String
 
-  pod_bundle_states         PodBundleState[]
+  created_by String?  @default("Admin")
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now())
+
+  pod_bundle_states PodBundleState[]
 
   @@map("bundle_definitions")
 }
 
 model PodBundleState {
-  id                 Int               @id @default(autoincrement())
-  pod_code           String            @unique
-  bundle_id          Int?
-  custom_bundle_tag  String?
-  compliance_status  String            @default("synced") // 'synced' | 'mismatched' | 'deploying'
-  compliance_pct     Int               @default(100)
-  last_deployed_by   String?           @default("Admin")
-  last_deployed_at   DateTime          @default(now())
-  updated_at         DateTime          @default(now())
+  id                Int      @id @default(autoincrement())
+  pod_code          String   @unique
+  bundle_id         Int?
+  custom_bundle_tag String?
+  compliance_status String   @default("synced") // 'synced' | 'mismatched' | 'deploying'
+  compliance_pct    Int      @default(100)
+  last_deployed_by  String?  @default("Admin")
+  last_deployed_at  DateTime @default(now())
+  updated_at        DateTime @default(now())
 
-  server             Server            @relation(fields: [pod_code], references: [code], onDelete: Cascade)
-  bundle             BundleDefinition? @relation(fields: [bundle_id], references: [id], onDelete: SetNull)
+  server Server            @relation(fields: [pod_code], references: [code], onDelete: Cascade)
+  bundle BundleDefinition? @relation(fields: [bundle_id], references: [id], onDelete: SetNull)
 
   @@index([pod_code])
   @@map("pod_bundle_states")
