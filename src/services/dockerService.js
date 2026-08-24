@@ -182,6 +182,25 @@ async function restartDockerContainer(server, containerName) {
     const stdout = await executeCommand(server, cmd);
     return { success: true, container: safeName, output: stdout.trim() };
   } catch (err) {
+    // Auto-recovery for Docker network disconnection bug ("failed to set up container networking: network ... not found")
+    if (err.message && (err.message.includes('network') || err.message.includes('not found') || err.message.includes('Cannot restart container'))) {
+      try {
+        const recoveryCmd = `
+          COMPOSE_PATH=$(find $HOME/dev $HOME/workspace $HOME/prod $HOME -maxdepth 3 -name "docker-compose*.y*ml" -o -name "compose*.y*ml" 2>/dev/null | xargs grep -l "${safeName}" 2>/dev/null | head -n 1)
+          if [ -n "$COMPOSE_PATH" ]; then
+            COMPOSE_DIR=$(dirname "$COMPOSE_PATH")
+            cd "$COMPOSE_DIR" && (docker compose up -d --force-recreate ${safeName} 2>&1 || docker-compose up -d --force-recreate ${safeName} 2>&1)
+          else
+            docker rm -f ${safeName} 2>/dev/null || true
+            docker start ${safeName} 2>&1 || true
+          fi
+        `;
+        const recoveryOut = await executeCommand(server, recoveryCmd, 60000);
+        return { success: true, container: safeName, output: `Container ${safeName} berhasil dipulihkan & direstart:\n${recoveryOut.trim()}` };
+      } catch (recErr) {
+        throw new Error(`Gagal memuat ulang (restart) container ${safeName}: ${err.message}. Upaya perbaikan otomatis: ${recErr.message}`);
+      }
+    }
     throw new Error(`Gagal memuat ulang (restart) container ${safeName}: ${err.message}`);
   }
 }

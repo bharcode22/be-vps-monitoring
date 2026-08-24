@@ -166,8 +166,9 @@ echo "[JENKINS_STAGE:3:END:${serverName}:${cfg.app_name}]"
 echo "[JENKINS_STAGE:4:START:${serverName}:${cfg.app_name}]"
 echo "[STAGE 4/5] Memuat Docker Image tarball & Pre-creating Host Volume Directories (${cfg.app_name})..."
 
-mkdir -p /home/pod/Documents/tokens /home/pod/videos /home/pod/images /home/pod/sounds /home/pod/logs /home/pod/flow-editor 2>/dev/null || true
-chmod -R 777 /home/pod/Documents/tokens /home/pod/videos /home/pod/images /home/pod/sounds /home/pod/logs /home/pod/flow-editor 2>/dev/null || true
+mkdir -p /home/pod/Documents/tokens /home/pod/videos /home/pod/images /home/pod/sounds /home/pod/logs /home/pod/flow-editor ./routes/others ./logs 2>/dev/null || true
+chmod -R 777 /home/pod/Documents/tokens /home/pod/videos /home/pod/images /home/pod/sounds /home/pod/logs /home/pod/flow-editor . 2>/dev/null || true
+sudo chmod -R 777 . 2>/dev/null || true
 
 COMPOSE_FILE=$(ls docker-compose.yaml docker-compose.yml docker-compose.prod.yaml docker-compose.prod.yml compose.yaml compose.yml 2>/dev/null | head -n 1)
 if [ -z "$COMPOSE_FILE" ]; then
@@ -179,8 +180,7 @@ if [ -n "$COMPOSE_FILE" ]; then
   docker compose -f "$COMPOSE_FILE" down 2>&1 | tee -a "$INSTALL_LOG" || docker-compose -f "$COMPOSE_FILE" down 2>&1 | tee -a "$INSTALL_LOG" || true
 fi
 docker stop ${cfg.app_name} 2>/dev/null || true
-docker rm ${cfg.app_name} 2>/dev/null || true
-docker network prune -f 2>/dev/null || true
+docker rm -f ${cfg.app_name} ${cfg.app_name}-1 dev-${cfg.app_name} dev-${cfg.app_name}-1 2>/dev/null || true
 docker image prune -f 2>/dev/null || true
 
 IMAGE_FILE=$(ls image-*.tar.gz 2>/dev/null | head -n 1)
@@ -197,8 +197,13 @@ echo "[JENKINS_STAGE:4:END:${serverName}:${cfg.app_name}]"
 echo "[JENKINS_STAGE:5:START:${serverName}:${cfg.app_name}]"
 echo "[STAGE 5/5] Menjalankan Docker Compose Up (${cfg.app_name})..."
 if [ -n "$COMPOSE_FILE" ]; then
+  # Pre-create internal directory as root to prevent EACCES on non-root container users
+  mkdir -p ./routes/others ./logs 2>/dev/null || true
+  chmod -R 777 . 2>/dev/null || true
+  docker compose -f "$COMPOSE_FILE" run --rm -u 0 "${cfg.app_name}" sh -c "mkdir -p /app/routes/others /app/logs && chmod -R 777 /app 2>/dev/null || true" 2>/dev/null || docker-compose -f "$COMPOSE_FILE" run --rm -u 0 "${cfg.app_name}" sh -c "mkdir -p /app/routes/others /app/logs && chmod -R 777 /app 2>/dev/null || true" 2>/dev/null || true
+
   echo "Menjalankan Docker Compose Up ($COMPOSE_FILE)..." | tee -a "$INSTALL_LOG"
-  docker compose -f "$COMPOSE_FILE" up -d 2>&1 | tee -a "$INSTALL_LOG" || docker-compose -f "$COMPOSE_FILE" up -d 2>&1 | tee -a "$INSTALL_LOG"
+  docker compose -f "$COMPOSE_FILE" up -d --force-recreate --remove-orphans 2>&1 | tee -a "$INSTALL_LOG" || docker-compose -f "$COMPOSE_FILE" up -d --force-recreate --remove-orphans 2>&1 | tee -a "$INSTALL_LOG"
 else
   echo "Peringatan: File docker-compose.yaml tidak ditemukan di $(pwd)" | tee -a "$INSTALL_LOG"
 fi
