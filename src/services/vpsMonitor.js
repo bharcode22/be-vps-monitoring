@@ -3,6 +3,7 @@ const { getLocalMetrics } = require('./monitor/localCollector');
 const { getRemoteSSHMetrics } = require('./monitor/sshCollector');
 const { getPostgresMetrics } = require('./monitor/dbCollector');
 const { getS3Metrics } = require('./monitor/s3Collector');
+const { fetchRawHeartbeat } = require('../controllers/heartbeatController');
 
 // In-memory cache for live real-time metrics and rolling in-memory history (Zero DB write I/O)
 const liveMetricsCache = {};
@@ -61,6 +62,20 @@ async function collectAllServerMetrics(io) {
     const servers = [...sshServers, ...dbServers, ...storageServers];
     const now = new Date().toISOString();
 
+    // Fetch live heartbeats for hybrid POD status matching (prevents false-offline flapping)
+    const heartbeatMap = new Map();
+    try {
+      const hbItems = await fetchRawHeartbeat();
+      if (Array.isArray(hbItems)) {
+        for (const hb of hbItems) {
+          if (hb.pod_id) heartbeatMap.set(String(hb.pod_id).trim(), hb);
+          if (hb.ip) heartbeatMap.set(String(hb.ip).trim(), hb);
+        }
+      }
+    } catch (_) {
+      // Heartbeat microservice may be temporarily busy, continue gracefully
+    }
+
     // Fast parallel collection across all registered servers
     const results = await Promise.all(servers.map(async (server) => {
       let metrics;
@@ -83,12 +98,32 @@ async function collectAllServerMetrics(io) {
       }
 
       const serverType = server.type || 'vps';
+
+      // For POD nodes: if SSH is not reachable but Heartbeat has ping_status === true, keep status online!
+      if (serverType === 'pod') {
+        const hb = (server.code && heartbeatMap.get(String(server.code).trim())) ||
+          (server.host && heartbeatMap.get(String(server.host).trim())) ||
+          (server.name && [...heartbeatMap.values()].find(h => h.pod_id && new RegExp(`\\b${h.pod_id}\\b`, 'i').test(server.name)));
+
+        if (hb && hb.ping_status) {
+          metrics.status = 'online';
+          if (!metrics.pingMs || metrics.pingMs === 0) {
+            metrics.pingMs = 5;
+          }
+          if (hb.heartbeat_metrics && typeof hb.heartbeat_metrics === 'object') {
+            if (hb.heartbeat_metrics.cpu_usage && !metrics.cpuUsage) metrics.cpuUsage = Number(hb.heartbeat_metrics.cpu_usage) || 0;
+            if (hb.heartbeat_metrics.ram_usage && !metrics.ramUsage) metrics.ramUsage = Number(hb.heartbeat_metrics.ram_usage) || 0;
+          }
+        }
+      }
+
       const cacheKey = `${serverType}_${server.id}`;
 
       // Update in-memory real-time cache (both compound key and legacy id)
       const snapshot = { ...metrics, timestamp: now };
       liveMetricsCache[cacheKey] = snapshot;
       liveMetricsCache[server.id] = snapshot;
+
 
       // Update in-memory sliding history window
       if (!liveMetricsHistoryCache[server.id]) {

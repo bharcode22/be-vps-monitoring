@@ -475,7 +475,7 @@ const inspectSinglePodDocker = async (req, res) => {
 const inspectAllPodsDocker = async (req, res) => {
   try {
     const servers = await dbAsync.all(
-      "SELECT * FROM servers WHERE LOWER(category) = 'pod' OR LOWER(name) LIKE '%pod%' ORDER BY name ASC"
+      "SELECT * FROM servers WHERE type = 'pod' OR LOWER(name) LIKE '%pod%' ORDER BY name ASC"
     );
 
     const results = await Promise.allSettled(
@@ -539,14 +539,13 @@ const cleanupBatchPodsDocker = async (req, res) => {
   try {
     const { serverIds, cleanType = 'safe' } = req.body;
 
-
     let servers = [];
     if (serverIds && Array.isArray(serverIds) && serverIds.length > 0) {
       const placeholders = serverIds.map(() => '?').join(',');
       servers = await dbAsync.all(`SELECT * FROM servers WHERE id IN (${placeholders})`, serverIds);
     } else {
       servers = await dbAsync.all(
-        "SELECT * FROM servers WHERE LOWER(category) = 'pod' OR LOWER(name) LIKE '%pod%' ORDER BY name ASC"
+        "SELECT * FROM servers WHERE type = 'pod' OR LOWER(name) LIKE '%pod%' ORDER BY name ASC"
       );
     }
 

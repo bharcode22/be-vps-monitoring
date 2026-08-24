@@ -63,23 +63,24 @@ router.delete('/vps/env-manager/files/:filename', requireAuth, envController.han
 router.post('/vps/env-manager/compare', requireAuth, envController.handleCompareEnvFiles);
 
 // 6. AWS S3 Content Management & POD v3 Storage Cleanup routes
-router.get('/vps/content/s3/folders', optionalAuth, contentController.getS3Folders);
-router.get('/vps/content/s3/files', optionalAuth, contentController.getS3FolderFiles);
+router.get('/vps/content/s3/folders', requireAuth, contentController.getS3Folders);
+router.get('/vps/content/s3/files', requireAuth, contentController.getS3FolderFiles);
 router.delete('/vps/content/s3/folder/:code', requireAuth, contentController.deleteS3Folder);
-router.get('/vps/content/pods/storage', optionalAuth, contentController.getPodsStorage);
-router.get('/vps/content/pods/:id/scan', optionalAuth, contentController.scanPodJunk);
+router.get('/vps/content/pods/storage', requireAuth, contentController.getPodsStorage);
+router.get('/vps/content/pods/:id/scan', requireAuth, contentController.scanPodJunk);
 router.post('/vps/content/pods/cleanup', requireAuth, contentController.cleanupPodJunk);
 router.post('/vps/content/pods/sync', requireAuth, contentController.syncS3ToPod);
-router.post('/vps/content/matrix/check-pods', optionalAuth, contentController.checkCodeOnPods);
+router.post('/vps/content/matrix/check-pods', requireAuth, contentController.checkCodeOnPods);
 router.post('/vps/content/pods/delete-code', requireAuth, contentController.deleteCodeOnPod);
 router.post('/vps/content/batch-delete', requireAuth, contentController.batchDeleteCode);
 router.get('/vps/content/pods/file-stream', optionalAuth, contentController.streamPodFile);
 
 // Docker Build Junk & Fleet Storage Cleanup routes
-router.get('/vps/storage/docker/inspect/:serverId', optionalAuth, contentController.inspectSinglePodDocker);
-router.post('/vps/storage/docker/inspect-all', optionalAuth, contentController.inspectAllPodsDocker);
+router.get('/vps/storage/docker/inspect/:serverId', requireAuth, contentController.inspectSinglePodDocker);
+router.post('/vps/storage/docker/inspect-all', requireAuth, contentController.inspectAllPodsDocker);
 router.post('/vps/storage/docker/cleanup', requireAuth, contentController.cleanupSinglePodDocker);
 router.post('/vps/storage/docker/cleanup-batch', requireAuth, contentController.cleanupBatchPodsDocker);
+
 
 
 // 7. Category-specific Static CRUD routes
