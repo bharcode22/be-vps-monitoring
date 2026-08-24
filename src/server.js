@@ -12,6 +12,7 @@ const { registerPm2StreamHandlers } = require('./services/pm2LogStreamer');
 const { registerRabbitMqTracerHandlers } = require('./services/rabbitmqTracer');
 const { registerInstallationStreamHandlers } = require('./services/installationStreamer');
 const { registerSshTerminalHandlers } = require('./services/sshTerminalStreamer');
+const { registerMqttSnifferHandlers } = require('./services/mqttSnifferService');
 
 const app = express();
 const server = http.createServer(app);
@@ -59,6 +60,9 @@ io.on('connection', (socket) => {
 
   // Register real-time Interactive SSH Terminal handlers
   registerSshTerminalHandlers(socket, io);
+
+  // Register real-time Native MQTT Sniffer & Tester handlers
+  registerMqttSnifferHandlers(socket, io);
 
   socket.on('disconnect', () => {
     console.log(`❌ Client disconnected: ${socket.id}`);

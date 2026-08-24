@@ -15,6 +15,7 @@ const bundleController = require('../controllers/bundleController');
 const envController = require('../controllers/envController');
 const heartbeatController = require('../controllers/heartbeatController');
 const contentController = require('../controllers/contentController');
+const podTopicController = require('../controllers/podTopicController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // 1. Health check & Settings
@@ -130,7 +131,15 @@ router.get('/rabbitmq/:id/status', requireAuth, rabbitmqController.getRabbitMqSt
 router.post('/rabbitmq/:id/commands/execute', requireAuth, rabbitmqController.executeCommand);
 router.post('/rabbitmq/trace-event', rabbitmqController.receiveTraceEvent);
 
-// 11. Dynamic / Parameterized routes by Server ID (MUST BE AT THE END)
+// 11. POD Topics & MQTT Debugger routes
+router.get('/pod-topics/matrix', requireAuth, podTopicController.getPodTopicMatrix);
+router.get('/pod-topics/mqtt-status', requireAuth, podTopicController.getMqttBrokerStatus);
+router.post('/pod-topics/sync', requireAuth, podTopicController.syncPodTopics);
+router.post('/pod-topics/register', requireAuth, podTopicController.registerPodTopic);
+router.post('/pod-topics/test-publish', requireAuth, podTopicController.testPublishMqtt);
+router.get('/pod-topics/:serverId', requireAuth, podTopicController.getPodTopicDetail);
+
+// 12. Dynamic / Parameterized routes by Server ID (MUST BE AT THE END)
 router.get('/vps/:id/history', optionalAuth, vpsController.getServerHistory);
 router.post('/vps/:id/deploy-backend', requireAuth, vpsController.redeployBackend);
 router.put('/vps/:id', requireAuth, vpsController.updateServer);
