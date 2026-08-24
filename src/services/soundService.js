@@ -1,82 +1,11 @@
-const { exec } = require('child_process');
-const { Client } = require('ssh2');
+const { executeSshCommand } = require('../utils/sshExecutor');
 const path = require('path');
-const { decrypt } = require('../utils/crypto');
 
 /**
  * Execute command on local host or remote SSH server
  */
-function executeCommand(server, command) {
-  return new Promise((resolve, reject) => {
-    if (server.is_local === 1) {
-      exec(command, { timeout: 35000 }, (error, stdout, stderr) => {
-        if (error && !stdout) {
-          return reject(new Error(stderr.trim() || error.message));
-        }
-        resolve(stdout || '');
-      });
-    } else {
-      const conn = new Client();
-      let isHandled = false;
-
-      const timeout = setTimeout(() => {
-        if (!isHandled) {
-          isHandled = true;
-          conn.end();
-          reject(new Error('Koneksi SSH ke server waktu habis saat memproses data sounds (timeout 35 detik)'));
-        }
-      }, 35000);
-
-      const sshConfig = {
-        host: server.host,
-        port: server.port || 22,
-        username: server.username || 'root',
-        readyTimeout: 10000
-      };
-
-      if (server.auth_type === 'key' && server.private_key) {
-        sshConfig.privateKey = decrypt(server.private_key);
-      } else {
-        sshConfig.password = decrypt(server.password);
-      }
-
-      conn.on('ready', () => {
-        conn.exec(command, (err, stream) => {
-          if (err) {
-            clearTimeout(timeout);
-            conn.end();
-            return reject(err);
-          }
-
-          let stdout = '';
-          let stderr = '';
-
-          stream.on('close', (code, signal) => {
-            clearTimeout(timeout);
-            conn.end();
-            if (!isHandled) {
-              isHandled = true;
-              resolve(stdout || '');
-            }
-          }).on('data', (data) => {
-            stdout += data.toString();
-          }).stderr.on('data', (data) => {
-            stderr += data.toString();
-          });
-        });
-      });
-
-      conn.on('error', (err) => {
-        if (!isHandled) {
-          isHandled = true;
-          clearTimeout(timeout);
-          reject(new Error(`Gagal menghubungkan SSH: ${err.message}`));
-        }
-      });
-
-      conn.connect(sshConfig);
-    }
-  });
+function executeCommand(server, command, timeoutMs = 35000) {
+  return executeSshCommand(server, command, { timeoutMs });
 }
 
 /**

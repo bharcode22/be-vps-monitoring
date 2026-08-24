@@ -30,6 +30,11 @@ function registerDockerStreamHandlers(socket, io) {
         return socket.emit('docker:stream-error', { error: 'Parameter serverId dan containerName harus diisi.' });
       }
 
+      const user = await dbAsync.get('SELECT * FROM users WHERE id = ?', [decoded.id]);
+      if (!user || user.status !== 'approved') {
+        return socket.emit('docker:stream-error', { error: 'Akses ditolak. Akun belum disetujui.' });
+      }
+
       // Stop any existing stream for this socket
       stopStream(socket.id);
 

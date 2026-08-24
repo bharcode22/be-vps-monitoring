@@ -23,10 +23,31 @@ pool.on('error', (err) => {
 
 /**
  * Convert SQLite ? placeholders into PostgreSQL $1, $2, ... positional parameters
+ * Safely ignores ? characters inside single-quoted string literals.
  */
 function convertSqlPlaceholders(sql) {
   let paramIndex = 1;
-  return sql.replace(/\?/g, () => `$${paramIndex++}`);
+  let inString = false;
+  let result = '';
+
+  for (let i = 0; i < sql.length; i++) {
+    const char = sql[i];
+    if (char === "'") {
+      if (inString && sql[i + 1] === "'") {
+        result += "''";
+        i++;
+        continue;
+      }
+      inString = !inString;
+      result += char;
+    } else if (char === '?' && !inString) {
+      result += `$${paramIndex++}`;
+    } else {
+      result += char;
+    }
+  }
+
+  return result;
 }
 
 /**

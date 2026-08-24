@@ -3,6 +3,7 @@ const router = express.Router();
 const vpsController = require('../controllers/vpsController');
 const authController = require('../controllers/authController');
 const dockerController = require('../controllers/dockerController');
+const screenAppController = require('../controllers/screenAppController');
 const pm2Controller = require('../controllers/pm2Controller');
 const scriptController = require('../controllers/scriptController');
 const soundController = require('../controllers/soundController');
@@ -141,6 +142,12 @@ router.post('/vps/:id/docker/restart', requireAuth, dockerController.restartCont
 router.post('/vps/:id/docker/stop', requireAuth, dockerController.stopContainer);
 router.post('/vps/:id/docker/remove', requireAuth, dockerController.removeContainer);
 router.get('/vps/:id/docker/:containerName/logs', requireAuth, dockerController.getContainerLogs);
+
+// Screen Apps (Native Linux GUI) management
+router.get('/vps/:id/screen-apps', requireAuth, screenAppController.getScreenApps);
+router.post('/vps/:id/screen-apps/restart', requireAuth, screenAppController.restartApp);
+router.post('/vps/:id/screen-apps/stop', requireAuth, screenAppController.stopApp);
+router.get('/vps/:id/screen-apps/:appName/logs', requireAuth, screenAppController.getAppLogs);
 
 // PM2 management
 router.get('/vps/:id/pm2', requireAuth, pm2Controller.getApps);
