@@ -11,6 +11,7 @@ const { registerDockerStreamHandlers } = require('./services/dockerLogStreamer')
 const { registerPm2StreamHandlers } = require('./services/pm2LogStreamer');
 const { registerRabbitMqTracerHandlers } = require('./services/rabbitmqTracer');
 const { registerInstallationStreamHandlers } = require('./services/installationStreamer');
+const { registerSshTerminalHandlers } = require('./services/sshTerminalStreamer');
 
 const app = express();
 const server = http.createServer(app);
@@ -55,6 +56,9 @@ io.on('connection', (socket) => {
 
   // Register real-time Batch Installation Stream handlers
   registerInstallationStreamHandlers(socket, io);
+
+  // Register real-time Interactive SSH Terminal handlers
+  registerSshTerminalHandlers(socket, io);
 
   socket.on('disconnect', () => {
     console.log(`❌ Client disconnected: ${socket.id}`);
