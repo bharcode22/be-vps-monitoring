@@ -627,6 +627,45 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
     }
   }
 
+  // 🚀 HARD VERIFICATION FOR MASTER DB
+  // This completely fixes the "Fake Missing in Master" bug caused by LIMIT 500 when tables have > 500 rows.
+  // We explicitly ask Master if it actually has these PKs before marking them as truly missing.
+  const missingInMasterKeys = Array.from(allRowsMap.values())
+    .filter(item => !item.inMaster)
+    .map(item => item.sampleData && item.sampleData[masterPkColumn])
+    .filter(val => val !== undefined && val !== null);
+
+  if (missingInMasterKeys.length > 0) {
+    const masterClientVerification = createMasterClient(master);
+    await masterClientVerification.connect();
+    try {
+      // Process in chunks to prevent query size limit issues
+      for (let i = 0; i < missingInMasterKeys.length; i += 1000) {
+        const chunk = missingInMasterKeys.slice(i, i + 1000);
+        // Cast the array to the correct type of the column dynamically, or rely on PG auto-casting
+        // ANY($1) usually auto-casts from string arrays to uuid arrays if the column is uuid
+        const verifyQuery = `SELECT "${masterPkColumn}" FROM public."${tableName}" WHERE "${masterPkColumn}" = ANY($1)`;
+        const verifyRes = await masterClientVerification.query(verifyQuery, [chunk]);
+
+        if (verifyRes.rows && verifyRes.rows.length > 0) {
+          const verifiedPkSet = new Set(verifyRes.rows.map(r => String(r[masterPkColumn])));
+          for (const item of allRowsMap.values()) {
+            if (!item.inMaster) {
+              const pk = item.sampleData && item.sampleData[masterPkColumn];
+              if (pk !== undefined && verifiedPkSet.has(String(pk))) {
+                item.inMaster = true; // ✅ Data actually exists in Master, just wasn't in the top 500!
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[Matrix Sync] Error verifying missing master rows for ${tableName}:`, err.message);
+    } finally {
+      await masterClientVerification.end().catch(() => {});
+    }
+  }
+
   // C. Map presence across all PODs for every row in both Master & PODs
   const dataMatrix = Array.from(allRowsMap.values()).map(item => {
     const presenceByPod = {};
@@ -1434,14 +1473,15 @@ async function syncSinglePodRowToMaster({
   serverIds,
   tableName,
   pkColumn = 'id',
-  pkValue
+  pkValue,
+  rowData
 }) {
   const targetServerIds = Array.isArray(serverIds) && serverIds.length > 0
     ? serverIds.map(Number)
     : (serverId ? [Number(serverId)] : []);
 
-  if (!masterId || targetServerIds.length === 0 || !tableName || pkValue === undefined) {
-    throw new Error('masterId, serverId/serverIds, tableName, dan pkValue wajib diisi.');
+  if (!masterId || !tableName || (pkValue === undefined && !rowData)) {
+    throw new Error('masterId, tableName, dan pkValue/rowData wajib diisi.');
   }
 
   const master = await dbAsync.get('SELECT * FROM databases_postgres WHERE id = ?', [masterId]);
@@ -1450,57 +1490,72 @@ async function syncSinglePodRowToMaster({
   let singleRow = null;
   let sourcePod = null;
 
-  for (const sId of targetServerIds) {
-    const pod = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [sId]);
-    if (!pod) continue;
+  // 1. If rowData is directly provided, clean and use it
+  if (rowData && typeof rowData === 'object') {
+    singleRow = { ...rowData };
+    Object.keys(singleRow).forEach(k => {
+      if (k.startsWith('__')) delete singleRow[k];
+    });
+  }
 
-    // 1. Fetch from POD (Direct PG or SSH)
-    try {
-      const podClient = new Client({
-        connectionString: getPodDbUrl(pod.host),
-        connectionTimeoutMillis: 3000,
-        statement_timeout: 6000
-      });
-      await podClient.connect();
+  // 2. Otherwise fetch from POD
+  if (!singleRow) {
+    for (const sId of targetServerIds) {
+      const pod = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [sId]);
+      if (!pod) continue;
+
+      // Direct PG
       try {
-        const res = await podClient.query(`SELECT * FROM public."${tableName}" WHERE "${pkColumn}"::text = $1::text LIMIT 1;`, [String(pkValue)]);
-        if (res.rows.length > 0) {
-          singleRow = res.rows[0];
-          sourcePod = pod;
-          break;
-        }
-      } finally {
-        await podClient.end().catch(() => { });
-      }
-    } catch (directErr) {
-      // SSH Fallback
-      try {
-        const sshCmd = `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -t -A -c "SELECT json_agg(t) FROM (SELECT * FROM public.\\"${tableName}\\" WHERE \\"${pkColumn}\\"::text='${String(pkValue).replace(/'/g, "''")}' LIMIT 1) t;"`;
-        const raw = await executeSshCommand(pod, sshCmd);
+        const podClient = new Client({
+          connectionString: getPodDbUrl(pod.host),
+          connectionTimeoutMillis: 3000,
+          statement_timeout: 6000
+        });
+        await podClient.connect();
         try {
-          const parsed = JSON.parse(raw || '[]');
-          if (parsed.length > 0) {
-            singleRow = parsed[0];
+          const res = await podClient.query(`SELECT * FROM public."${tableName}" WHERE "${pkColumn}"::text = $1::text LIMIT 1;`, [String(pkValue)]);
+          if (res.rows.length > 0) {
+            singleRow = res.rows[0];
             sourcePod = pod;
             break;
           }
-        } catch (err) { }
-      } catch (sshErr) { }
+        } finally {
+          await podClient.end().catch(() => { });
+        }
+      } catch (directErr) {
+        // SSH Fallback
+        try {
+          const sshCmd = `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -t -A -c "SELECT json_agg(t) FROM (SELECT * FROM public.\\"${tableName}\\" WHERE \\"${pkColumn}\\"::text='${String(pkValue).replace(/'/g, "''")}' LIMIT 1) t;"`;
+          const raw = await executeSshCommand(pod, sshCmd);
+          try {
+            const parsed = JSON.parse(raw || '[]');
+            if (parsed.length > 0) {
+              singleRow = parsed[0];
+              sourcePod = pod;
+              break;
+            }
+          } catch (err) { }
+        } catch (sshErr) { }
+      }
     }
   }
 
   if (!singleRow) {
-    throw new Error(`Baris dengan ${pkColumn} = '${pkValue}' tidak ditemukan pada database unit POD.`);
+    throw new Error(`Baris dengan ${pkColumn} = '${pkValue}' tidak ditemukan.`);
   }
 
-  // 2. Upsert into Master DB
+  // 3. Upsert into Master DB
   const masterClient = createMasterClient(master);
   await masterClient.connect();
   try {
     const masterColumns = await getTableColumnsFromClient(masterClient, tableName);
     const colNames = Array.from(new Set(masterColumns.map(c => c.column_name)));
     const colListStr = colNames.map(c => `"${c}"`).join(', ');
-    const conflictCol = colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : pkColumn);
+
+    const conflictCol = pkColumn && colNames.includes(pkColumn)
+      ? pkColumn
+      : (colNames.includes('id') ? 'id' : (colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : colNames[0])));
+
     const updateSet = colNames
       .filter(c => c !== conflictCol && c !== 'id')
       .map(c => `"${c}" = EXCLUDED."${c}"`)
@@ -1518,8 +1573,25 @@ async function syncSinglePodRowToMaster({
 
     await masterClient.query('BEGIN');
     await masterClient.query("SET LOCAL session_replication_role = 'replica';");
-    await masterClient.query(upsertSql, values);
+    try {
+      await masterClient.query(upsertSql, values);
+    } catch (upsertErr) {
+      // If table (e.g. pod_logs) has no unique constraint matching conflictCol, fallback to direct INSERT
+      if (
+        upsertErr.message &&
+        (upsertErr.message.includes('no unique or exclusion constraint') ||
+          upsertErr.message.includes('ON CONFLICT DO UPDATE') ||
+          upsertErr.code === '42P10')
+      ) {
+        const plainInsertSql = `INSERT INTO public."${tableName}" (${colListStr}) VALUES (${placeholders})`;
+        await masterClient.query(plainInsertSql, values);
+      } else {
+        throw upsertErr;
+      }
+    }
     await masterClient.query('COMMIT');
+
+    clearSchemaCache(masterId);
 
     return {
       success: true,

@@ -195,25 +195,26 @@ const syncPodToMaster = async (req, res) => {
  */
 const syncSinglePodRow = async (req, res) => {
   try {
-    const { masterId, serverId, serverIds, tableName, pkColumn, pkValue } = req.body;
+    const { masterId, serverId, serverIds, tableName, pkColumn, pkValue, rowData } = req.body;
     const targetIds = Array.isArray(serverIds) && serverIds.length > 0
       ? serverIds.map(Number)
       : (serverId ? [Number(serverId)] : []);
 
-    if (!masterId || targetIds.length === 0 || !tableName || pkValue === undefined) {
+    if (!masterId || !tableName || (pkValue === undefined && !rowData)) {
       return res.status(400).json({
         success: false,
-        error: 'masterId, serverId/serverIds, tableName, dan pkValue wajib disertakan.'
+        error: 'masterId, tableName, dan pkValue/rowData wajib disertakan.'
       });
     }
 
     const result = await masterToPodSyncService.syncSinglePodRowToMaster({
       masterId: Number(masterId),
-      serverId: targetIds[0],
+      serverId: targetIds[0] || null,
       serverIds: targetIds,
       tableName,
       pkColumn: pkColumn || 'id',
-      pkValue
+      pkValue,
+      rowData
     });
 
     res.json({ success: true, data: result });
