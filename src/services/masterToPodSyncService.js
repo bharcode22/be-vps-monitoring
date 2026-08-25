@@ -169,7 +169,7 @@ async function getMasterTables(masterId) {
       tables: tablesWithRows
     };
   } finally {
-    await client.end().catch(() => {});
+    await client.end().catch(() => { });
   }
 }
 
@@ -231,6 +231,55 @@ async function getTableColumnsFromClient(client, tableName) {
 }
 
 /**
+ * Helper to execute high-performance multi-row batch upserts into PostgreSQL.
+ * Chunks rows into batches (e.g. 150 rows per batch query) to prevent connection timeouts and scale to thousands of rows.
+ */
+async function executeBatchUpsert({
+  client,
+  tableName,
+  colNames,
+  rows,
+  conflictCol,
+  updateSet,
+  batchSize = 150
+}) {
+  if (!rows || rows.length === 0) return 0;
+
+  // Ensure unique column names
+  const uniqueCols = Array.from(new Set(colNames));
+  const colListStr = uniqueCols.map(c => `"${c}"`).join(', ');
+
+  let processedCount = 0;
+
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const chunk = rows.slice(i, i + batchSize);
+    const valuePlaceholders = [];
+    const values = [];
+
+    chunk.forEach(row => {
+      const rowPlaceholders = [];
+      uniqueCols.forEach(col => {
+        values.push(row[col] !== undefined ? row[col] : null);
+        rowPlaceholders.push(`$${values.length}`);
+      });
+      valuePlaceholders.push(`(${rowPlaceholders.join(', ')})`);
+    });
+
+    let upsertSql = `INSERT INTO public."${tableName}" (${colListStr}) VALUES ${valuePlaceholders.join(', ')}`;
+    if (updateSet) {
+      upsertSql += ` ON CONFLICT ("${conflictCol}") DO UPDATE SET ${updateSet}`;
+    } else {
+      upsertSql += ` ON CONFLICT ("${conflictCol}") DO NOTHING`;
+    }
+
+    await client.query(upsertSql, values);
+    processedCount += chunk.length;
+  }
+
+  return processedCount;
+}
+
+/**
  * Helper to fetch table data & columns from a POD (Direct PG with SSH Fallback)
  */
 async function fetchPodTableInfo(podServer, tableName) {
@@ -287,7 +336,7 @@ async function fetchPodTableInfo(podServer, tableName) {
         pkColumn: pkCol
       };
     } finally {
-      await client.end().catch(() => {});
+      await client.end().catch(() => { });
     }
   } catch (directErr) {
     // 2. SSH Fallback
@@ -394,7 +443,7 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
     const rowsRes = await masterClient.query(`SELECT * FROM public."${tableName}" ORDER BY "${masterPkColumn}" ASC LIMIT 500`);
     masterRows = rowsRes.rows;
   } finally {
-    await masterClient.end().catch(() => {});
+    await masterClient.end().catch(() => { });
   }
 
   // 2. Fetch all POD V3 servers
@@ -676,7 +725,7 @@ async function syncMasterTableToPods({ masterId, tableName, targetPodIds = [], d
     const dataRes = await masterClient.query(`SELECT * FROM public."${tableName}" ORDER BY "${pkColumn}" ASC`);
     masterRows = dataRes.rows;
   } finally {
-    await masterClient.end().catch(() => {});
+    await masterClient.end().catch(() => { });
   }
 
   // 2. Fetch target POD servers
@@ -710,7 +759,7 @@ async function syncMasterTableToPods({ masterId, tableName, targetPodIds = [], d
       try {
         if (!dryRun) {
           await client.query('BEGIN');
-          await client.query("SET LOCAL session_replication_role = 'replica';").catch(() => {});
+          await client.query("SET LOCAL session_replication_role = 'replica';").catch(() => { });
         }
 
         // A. Ensure Table and Missing Columns Exist
@@ -753,31 +802,26 @@ async function syncMasterTableToPods({ masterId, tableName, targetPodIds = [], d
         }
 
         if (syncData && rowsToSync.length > 0) {
-          const colNames = masterColumns.map(c => c.column_name);
-          const colListStr = colNames.map(c => `"${c}"`).join(', ');
-
-          // Determine conflict target (PK column or unique key)
+          const colNames = Array.from(new Set(masterColumns.map(c => c.column_name)));
           const conflictCol = colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : pkColumn);
           const updateSet = colNames
             .filter(c => c !== conflictCol && c !== 'id')
             .map(c => `"${c}" = EXCLUDED."${c}"`)
             .join(', ');
 
-          for (const row of rowsToSync) {
-            const values = colNames.map(c => row[c]);
-            const placeholders = colNames.map((_, i) => `$${i + 1}`).join(', ');
-
-            let upsertSql = `INSERT INTO public."${tableName}" (${colListStr}) VALUES (${placeholders})`;
-            if (updateSet) {
-              upsertSql += ` ON CONFLICT ("${conflictCol}") DO UPDATE SET ${updateSet}`;
-            } else {
-              upsertSql += ` ON CONFLICT ("${conflictCol}") DO NOTHING`;
-            }
-
-            if (!dryRun) {
-              await client.query(upsertSql, values);
-            }
-            podResult.rowsSynced++;
+          if (!dryRun) {
+            const syncedCount = await executeBatchUpsert({
+              client,
+              tableName,
+              colNames,
+              rows: rowsToSync,
+              conflictCol,
+              updateSet,
+              batchSize: 150
+            });
+            podResult.rowsSynced = syncedCount;
+          } else {
+            podResult.rowsSynced = rowsToSync.length;
           }
         }
 
@@ -789,11 +833,11 @@ async function syncMasterTableToPods({ masterId, tableName, targetPodIds = [], d
         podResult.logs.push(`[Completed] ${dryRun ? 'Simulasi' : 'Sinkronisasi'} sukses: ${podResult.rowsSynced} baris data diproses.`);
       } catch (execErr) {
         if (!dryRun) {
-          await client.query('ROLLBACK').catch(() => {});
+          await client.query('ROLLBACK').catch(() => { });
         }
         throw execErr;
       } finally {
-        await client.end().catch(() => {});
+        await client.end().catch(() => { });
       }
     } catch (podErr) {
       podResult.success = false;
@@ -881,10 +925,10 @@ async function deleteMasterTableRow({ masterId, tableName, pkColumn = 'id', pkVa
 
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     throw err;
   } finally {
-    await client.end().catch(() => {});
+    await client.end().catch(() => { });
   }
 
   // 3. Propagate delete to ALL POD V3 servers so rows with these IDs are also purged in every POD
@@ -984,10 +1028,10 @@ async function deletePodTableRow({ serverId, serverIds, tableName, pkColumn = 'i
         deletedCount = res.rowCount;
         await client.query('COMMIT');
       } catch (err) {
-        await client.query('ROLLBACK').catch(() => {});
+        await client.query('ROLLBACK').catch(() => { });
         throw err;
       } finally {
-        await client.end().catch(() => {});
+        await client.end().catch(() => { });
       }
     } catch (err) {
       // 2. SSH Fallback
@@ -1054,7 +1098,7 @@ async function syncSingleMasterRowToPods({ masterId, tableName, pkColumn = 'id',
     }
     singleRow = res.rows[0];
   } finally {
-    await masterClient.end().catch(() => {});
+    await masterClient.end().catch(() => { });
   }
 
   // 2. Fetch target POD servers
@@ -1110,11 +1154,11 @@ async function syncSingleMasterRowToPods({ masterId, tableName, pkColumn = 'id',
           }
         }
 
-        await client.query("SET LOCAL session_replication_role = 'replica';").catch(() => {});
+        await client.query("SET LOCAL session_replication_role = 'replica';").catch(() => { });
         await client.query(upsertSql, values);
         podResult.success = true;
       } finally {
-        await client.end().catch(() => {});
+        await client.end().catch(() => { });
       }
     } catch (directErr) {
       // SSH Fallback
@@ -1207,12 +1251,11 @@ async function syncPodTableToMaster({
     if (pkRes.rows.length > 0) pkColumn = pkRes.rows[0].column_name;
     else pkColumn = masterColumns[0].column_name;
   } catch (err) {
-    await masterClient.end().catch(() => {});
+    await masterClient.end().catch(() => { });
     throw err;
   }
 
-  const colNames = masterColumns.map(c => c.column_name);
-  const colListStr = colNames.map(c => `"${c}"`).join(', ');
+  const colNames = Array.from(new Set(masterColumns.map(c => c.column_name)));
   const conflictCol = colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : pkColumn);
   const updateSet = colNames
     .filter(c => c !== conflictCol && c !== 'id')
@@ -1224,8 +1267,8 @@ async function syncPodTableToMaster({
   try {
     const podClient = new Client({
       connectionString: getPodDbUrl(pod.host),
-      connectionTimeoutMillis: 4000,
-      statement_timeout: 15000
+      connectionTimeoutMillis: 8000,
+      statement_timeout: 45000
     });
     await podClient.connect();
     try {
@@ -1245,12 +1288,12 @@ async function syncPodTableToMaster({
       if (conditions.length > 0) {
         query += ` WHERE ${conditions.join(' AND ')}`;
       }
-      query += ` ORDER BY "${pkColumn}" ASC LIMIT 2000`;
+      query += ` ORDER BY "${pkColumn}" ASC LIMIT 10000`;
 
       const res = await podClient.query(query, params);
       podRows = res.rows;
     } finally {
-      await podClient.end().catch(() => {});
+      await podClient.end().catch(() => { });
     }
   } catch (directErr) {
     // SSH Fallback
@@ -1259,11 +1302,11 @@ async function syncPodTableToMaster({
       if (dateFrom && dateTo) {
         filterClause = ` WHERE created_at BETWEEN '${dateFrom}' AND '${dateTo}'`;
       }
-      const dataCmd = `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -t -A -c "SELECT json_agg(t) FROM (SELECT * FROM public.\\"${tableName}\\"${filterClause} ORDER BY \\"${pkColumn}\\" ASC LIMIT 2000) t;"`;
+      const dataCmd = `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -t -A -c "SELECT json_agg(t) FROM (SELECT * FROM public.\\"${tableName}\\"${filterClause} ORDER BY \\"${pkColumn}\\" ASC LIMIT 10000) t;"`;
       const dataRaw = await executeSshCommand(pod, dataCmd);
       try { podRows = JSON.parse(dataRaw || '[]'); } catch (e) { podRows = []; }
     } catch (sshErr) {
-      await masterClient.end().catch(() => {});
+      await masterClient.end().catch(() => { });
       throw new Error(`Gagal mengambil data dari POD ${pod.name}: ${sshErr.message}`);
     }
   }
@@ -1276,32 +1319,29 @@ async function syncPodTableToMaster({
       await masterClient.query('BEGIN');
       await masterClient.query("SET LOCAL session_replication_role = 'replica';");
 
-      for (const row of podRows) {
-        const values = colNames.map(c => row[c] !== undefined ? row[c] : null);
-        const placeholders = colNames.map((_, i) => `$${i + 1}`).join(', ');
-
-        let upsertSql = `INSERT INTO public."${tableName}" (${colListStr}) VALUES (${placeholders})`;
-        if (updateSet) {
-          upsertSql += ` ON CONFLICT ("${conflictCol}") DO UPDATE SET ${updateSet}`;
-        } else {
-          upsertSql += ` ON CONFLICT ("${conflictCol}") DO NOTHING`;
-        }
-
-        await masterClient.query(upsertSql, values);
-        rowsProcessed++;
-      }
+      rowsProcessed = await executeBatchUpsert({
+        client: masterClient,
+        tableName,
+        colNames,
+        rows: podRows,
+        conflictCol,
+        updateSet,
+        batchSize: 150
+      });
 
       await masterClient.query('COMMIT');
+    } else if (dryRun) {
+      rowsProcessed = podRows.length;
     }
 
-    logs.push(`[Selesai] ${dryRun ? 'Simulasi' : 'Tarik data'} berhasil: ${podRows.length} baris dari ${pod.name} disinkronkan ke Master DB.`);
+    logs.push(`[Selesai] ${dryRun ? 'Simulasi' : 'Tarik data batch'} berhasil: ${rowsProcessed} baris dari ${pod.name} disinkronkan ke Master DB.`);
   } catch (err) {
     if (!dryRun) {
-      await masterClient.query('ROLLBACK').catch(() => {});
+      await masterClient.query('ROLLBACK').catch(() => { });
     }
     throw err;
   } finally {
-    await masterClient.end().catch(() => {});
+    await masterClient.end().catch(() => { });
   }
 
   return {
@@ -1362,7 +1402,7 @@ async function syncSinglePodRowToMaster({
           break;
         }
       } finally {
-        await podClient.end().catch(() => {});
+        await podClient.end().catch(() => { });
       }
     } catch (directErr) {
       // SSH Fallback
@@ -1376,8 +1416,8 @@ async function syncSinglePodRowToMaster({
             sourcePod = pod;
             break;
           }
-        } catch (err) {}
-      } catch (sshErr) {}
+        } catch (err) { }
+      } catch (sshErr) { }
     }
   }
 
@@ -1424,10 +1464,10 @@ async function syncSinglePodRowToMaster({
       syncedRow: singleRow
     };
   } catch (err) {
-    await masterClient.query('ROLLBACK').catch(() => {});
+    await masterClient.query('ROLLBACK').catch(() => { });
     throw err;
   } finally {
-    await masterClient.end().catch(() => {});
+    await masterClient.end().catch(() => { });
   }
 }
 
