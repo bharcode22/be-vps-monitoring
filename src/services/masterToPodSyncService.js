@@ -450,7 +450,9 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
       inMaster: true,
       originPodId: null,
       originPodName: null,
-      podSources: []
+      podSources: [],
+      podIds: [],
+      podSourcesDetail: []
     });
   });
 
@@ -460,8 +462,20 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
     if (podRes && podRes.isOnline && podRes.tableExists && Array.isArray(podRes.rows)) {
       for (const pr of podRes.rows) {
         const key = getRowKey(pr);
+        const podLabel = `${pod.name}${pod.host ? ` (${pod.host})` : ''}`;
         if (allRowsMap.has(key)) {
-          allRowsMap.get(key).podSources.push(pod.name);
+          const item = allRowsMap.get(key);
+          if (!item.podSources.includes(pod.name)) {
+            item.podSources.push(pod.name);
+          }
+          if (!item.podIds) item.podIds = [];
+          if (!item.podIds.includes(pod.id)) {
+            item.podIds.push(pod.id);
+          }
+          if (!item.podSourcesDetail) item.podSourcesDetail = [];
+          if (!item.podSourcesDetail.includes(podLabel)) {
+            item.podSourcesDetail.push(podLabel);
+          }
         } else {
           allRowsMap.set(key, {
             rowKey: key,
@@ -469,7 +483,10 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
             inMaster: false,
             originPodId: pod.id,
             originPodName: pod.name,
-            podSources: [pod.name]
+            originPodHost: pod.host,
+            podSources: [pod.name],
+            podIds: [pod.id],
+            podSourcesDetail: [podLabel]
           });
         }
       }
@@ -505,7 +522,10 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
       isPodOnly: !item.inMaster,
       originPodId: item.originPodId,
       originPodName: item.originPodName,
-      podSources: item.podSources,
+      originPodHost: item.originPodHost,
+      podSources: item.podSources || [],
+      podIds: item.podIds || (item.originPodId ? [item.originPodId] : []),
+      podSourcesDetail: item.podSourcesDetail || item.podSources || [],
       presence: presenceByPod,
       presentCount,
       totalPods: podV3List.length
@@ -806,9 +826,9 @@ async function findChildRelations(client, tableName) {
 }
 
 /**
- * 5. Cascade Hard Delete specific row(s) from Master Database
+ * 5. Cascade Hard Delete specific row(s) from Master Database (and propagate to all PODs)
  */
-async function deleteMasterTableRow({ masterId, tableName, pkColumn = 'id', pkValue, pkValues, cascade = true }) {
+async function deleteMasterTableRow({ masterId, tableName, pkColumn = 'id', pkValue, pkValues, cascade = true, deleteFromPods = true }) {
   const valuesToDelete = Array.isArray(pkValues) && pkValues.length > 0 ? pkValues : (pkValue !== undefined ? [pkValue] : []);
   if (!masterId || !tableName || valuesToDelete.length === 0) {
     throw new Error('masterId, tableName, dan pkValue/pkValues wajib diisi.');
@@ -837,109 +857,156 @@ async function deleteMasterTableRow({ masterId, tableName, pkColumn = 'id', pkVa
       }
     }
 
-    // 2. Delete parent rows
+    // 2. Delete parent rows in Master
     const query = `DELETE FROM public."${tableName}" WHERE "${pkColumn}"::text = ANY($1::text[]) RETURNING *;`;
     const res = await client.query(query, [valuesToDelete.map(String)]);
     deletedCount = res.rowCount;
 
     await client.query('COMMIT');
-
-    return {
-      success: true,
-      masterId,
-      tableName,
-      pkColumn,
-      deletedCount,
-      deletedKeys: valuesToDelete,
-      cascadeCount
-    };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
   } finally {
     await client.end().catch(() => {});
   }
+
+  // 3. Propagate delete to ALL POD V3 servers so rows with these IDs are also purged in every POD
+  const podDeleteResults = [];
+  if (deleteFromPods !== false) {
+    const podV3List = await dbAsync.all(
+      "SELECT id, name, host, port, username, password, private_key FROM servers WHERE pod_version = 'v3' ORDER BY name ASC"
+    );
+
+    for (const pod of podV3List) {
+      try {
+        const podRes = await deletePodTableRow({
+          serverId: pod.id,
+          tableName,
+          pkColumn,
+          pkValues: valuesToDelete,
+          cascade
+        });
+        podDeleteResults.push({
+          serverId: pod.id,
+          serverName: pod.name,
+          deletedCount: podRes.deletedCount || 0,
+          cascadeCount: podRes.cascadeCount || 0
+        });
+      } catch (podErr) {
+        console.warn(`[DeleteMaster] Gagal propagate delete ke ${pod.name}:`, podErr.message);
+        podDeleteResults.push({
+          serverId: pod.id,
+          serverName: pod.name,
+          error: podErr.message
+        });
+      }
+    }
+  }
+
+  return {
+    success: true,
+    masterId,
+    tableName,
+    pkColumn,
+    deletedCount,
+    deletedKeys: valuesToDelete,
+    cascadeCount,
+    podDeleteResults
+  };
 }
 
 /**
- * 6. Cascade Hard Delete specific row(s) from a target POD Database
+ * 6. Cascade Hard Delete specific row(s) from a target POD Database (or across multiple PODs)
  */
-async function deletePodTableRow({ serverId, tableName, pkColumn = 'id', pkValue, pkValues, cascade = true }) {
+async function deletePodTableRow({ serverId, serverIds, tableName, pkColumn = 'id', pkValue, pkValues, cascade = true }) {
   const valuesToDelete = Array.isArray(pkValues) && pkValues.length > 0 ? pkValues : (pkValue !== undefined ? [pkValue] : []);
-  if (!serverId || !tableName || valuesToDelete.length === 0) {
-    throw new Error('serverId, tableName, dan pkValue/pkValues wajib diisi.');
+  const targetServerIds = Array.isArray(serverIds) && serverIds.length > 0
+    ? serverIds.map(Number)
+    : (serverId ? [Number(serverId)] : []);
+
+  if (targetServerIds.length === 0 || !tableName || valuesToDelete.length === 0) {
+    throw new Error('serverId/serverIds, tableName, dan pkValue/pkValues wajib diisi.');
   }
 
-  const pod = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
-  if (!pod) throw new Error('Server POD tidak ditemukan.');
+  let totalDeleted = 0;
+  let totalCascade = 0;
+  const podResults = [];
 
-  let deletedCount = 0;
-  let cascadeCount = 0;
+  for (const sId of targetServerIds) {
+    const pod = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [sId]);
+    if (!pod) continue;
 
-  // 1. Direct PG
-  try {
-    const client = new Client({
-      connectionString: getPodDbUrl(pod.host),
-      connectionTimeoutMillis: 3000,
-      statement_timeout: 6000
-    });
-    await client.connect();
+    let deletedCount = 0;
+    let cascadeCount = 0;
+
+    // 1. Direct PG
     try {
-      await client.query('BEGIN');
-      await client.query("SET LOCAL session_replication_role = 'replica';");
+      const client = new Client({
+        connectionString: getPodDbUrl(pod.host),
+        connectionTimeoutMillis: 3000,
+        statement_timeout: 6000
+      });
+      await client.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SET LOCAL session_replication_role = 'replica';");
 
-      if (cascade) {
-        const childRelations = await findChildRelations(client, tableName);
-        for (const rel of childRelations) {
-          if (rel.child_table !== tableName) {
-            const childDeleteSql = `DELETE FROM public."${rel.child_table}" WHERE "${rel.child_column}"::text = ANY($1::text[])`;
-            const childRes = await client.query(childDeleteSql, [valuesToDelete.map(String)]).catch(() => ({ rowCount: 0 }));
-            cascadeCount += (childRes.rowCount || 0);
+        if (cascade) {
+          const childRelations = await findChildRelations(client, tableName);
+          for (const rel of childRelations) {
+            if (rel.child_table !== tableName) {
+              const childDeleteSql = `DELETE FROM public."${rel.child_table}" WHERE "${rel.child_column}"::text = ANY($1::text[])`;
+              const childRes = await client.query(childDeleteSql, [valuesToDelete.map(String)]).catch(() => ({ rowCount: 0 }));
+              cascadeCount += (childRes.rowCount || 0);
+            }
           }
         }
+
+        const query = `DELETE FROM public."${tableName}" WHERE "${pkColumn}"::text = ANY($1::text[]) RETURNING *;`;
+        const res = await client.query(query, [valuesToDelete.map(String)]);
+        deletedCount = res.rowCount;
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        await client.end().catch(() => {});
       }
-
-      const query = `DELETE FROM public."${tableName}" WHERE "${pkColumn}"::text = ANY($1::text[]) RETURNING *;`;
-      const res = await client.query(query, [valuesToDelete.map(String)]);
-      deletedCount = res.rowCount;
-      await client.query('COMMIT');
-
-      return {
-        success: true,
-        serverId: pod.id,
-        serverName: pod.name,
-        tableName,
-        pkColumn,
-        deletedCount,
-        deletedKeys: valuesToDelete,
-        cascadeCount
-      };
     } catch (err) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw err;
-    } finally {
-      await client.end().catch(() => {});
+      // 2. SSH Fallback
+      try {
+        const formattedKeys = valuesToDelete.map(v => `'${String(v).replace(/'/g, "''")}'`).join(',');
+        const deleteCmd = `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -c "SET session_replication_role = 'replica'; DELETE FROM public.\\"${tableName}\\" WHERE \\"${pkColumn}\\"::text IN (${formattedKeys});"`;
+        await executeSshCommand(pod, deleteCmd);
+        deletedCount = valuesToDelete.length;
+      } catch (sshErr) {
+        console.warn(`[DeletePod] Gagal delete di ${pod.name}:`, sshErr.message);
+      }
     }
-  } catch (err) {
-    // 2. SSH Fallback
-    try {
-      const formattedKeys = valuesToDelete.map(v => `'${String(v).replace(/'/g, "''")}'`).join(',');
-      const deleteCmd = `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -c "SET session_replication_role = 'replica'; DELETE FROM public.\\"${tableName}\\" WHERE \\"${pkColumn}\\" IN (${formattedKeys});"`;
-      await executeSshCommand(pod, deleteCmd);
-      return {
-        success: true,
-        serverId: pod.id,
-        serverName: pod.name,
-        tableName,
-        pkColumn,
-        deletedCount: valuesToDelete.length,
-        deletedKeys: valuesToDelete,
-        cascadeCount: 0
-      };
-    } catch (sshErr) {
-      throw new Error(`Gagal melakukan cascade hard delete di ${pod.name}: ${sshErr.message}`);
-    }
+
+    totalDeleted += deletedCount;
+    totalCascade += cascadeCount;
+    podResults.push({
+      serverId: pod.id,
+      serverName: pod.name,
+      deletedCount,
+      cascadeCount
+    });
   }
+
+  const primaryPod = podResults[0] || {};
+
+  return {
+    success: true,
+    serverId: primaryPod.serverId,
+    serverName: primaryPod.serverName,
+    tableName,
+    pkColumn,
+    deletedCount: totalDeleted,
+    deletedKeys: valuesToDelete,
+    cascadeCount: totalCascade,
+    podResults
+  };
 }
 
 /**
@@ -1239,48 +1306,66 @@ async function syncPodTableToMaster({
 async function syncSinglePodRowToMaster({
   masterId,
   serverId,
+  serverIds,
   tableName,
   pkColumn = 'id',
   pkValue
 }) {
-  if (!masterId || !serverId || !tableName || pkValue === undefined) {
-    throw new Error('masterId, serverId, tableName, dan pkValue wajib diisi.');
+  const targetServerIds = Array.isArray(serverIds) && serverIds.length > 0
+    ? serverIds.map(Number)
+    : (serverId ? [Number(serverId)] : []);
+
+  if (!masterId || targetServerIds.length === 0 || !tableName || pkValue === undefined) {
+    throw new Error('masterId, serverId/serverIds, tableName, dan pkValue wajib diisi.');
   }
 
   const master = await dbAsync.get('SELECT * FROM databases_postgres WHERE id = ?', [masterId]);
   if (!master) throw new Error('Master DB tidak ditemukan.');
 
-  const pod = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
-  if (!pod) throw new Error('Server POD tidak ditemukan.');
-
   let singleRow = null;
+  let sourcePod = null;
 
-  // 1. Fetch from POD (Direct PG or SSH)
-  try {
-    const podClient = new Client({
-      connectionString: getPodDbUrl(pod.host),
-      connectionTimeoutMillis: 3000,
-      statement_timeout: 6000
-    });
-    await podClient.connect();
+  for (const sId of targetServerIds) {
+    const pod = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [sId]);
+    if (!pod) continue;
+
+    // 1. Fetch from POD (Direct PG or SSH)
     try {
-      const res = await podClient.query(`SELECT * FROM public."${tableName}" WHERE "${pkColumn}" = $1 LIMIT 1;`, [pkValue]);
-      if (res.rows.length > 0) singleRow = res.rows[0];
-    } finally {
-      await podClient.end().catch(() => {});
+      const podClient = new Client({
+        connectionString: getPodDbUrl(pod.host),
+        connectionTimeoutMillis: 3000,
+        statement_timeout: 6000
+      });
+      await podClient.connect();
+      try {
+        const res = await podClient.query(`SELECT * FROM public."${tableName}" WHERE "${pkColumn}"::text = $1::text LIMIT 1;`, [String(pkValue)]);
+        if (res.rows.length > 0) {
+          singleRow = res.rows[0];
+          sourcePod = pod;
+          break;
+        }
+      } finally {
+        await podClient.end().catch(() => {});
+      }
+    } catch (directErr) {
+      // SSH Fallback
+      try {
+        const sshCmd = `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -t -A -c "SELECT json_agg(t) FROM (SELECT * FROM public.\\"${tableName}\\" WHERE \\"${pkColumn}\\"::text='${String(pkValue).replace(/'/g, "''")}' LIMIT 1) t;"`;
+        const raw = await executeSshCommand(pod, sshCmd);
+        try {
+          const parsed = JSON.parse(raw || '[]');
+          if (parsed.length > 0) {
+            singleRow = parsed[0];
+            sourcePod = pod;
+            break;
+          }
+        } catch (err) {}
+      } catch (sshErr) {}
     }
-  } catch (directErr) {
-    // SSH Fallback
-    const sshCmd = `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -t -A -c "SELECT json_agg(t) FROM (SELECT * FROM public.\\"${tableName}\\" WHERE \\"${pkColumn}\\"='${pkValue}' LIMIT 1) t;"`;
-    const raw = await executeSshCommand(pod, sshCmd);
-    try {
-      const parsed = JSON.parse(raw || '[]');
-      if (parsed.length > 0) singleRow = parsed[0];
-    } catch (err) {}
   }
 
   if (!singleRow) {
-    throw new Error(`Baris dengan ${pkColumn} = '${pkValue}' tidak ditemukan pada POD '${pod.name}'.`);
+    throw new Error(`Baris dengan ${pkColumn} = '${pkValue}' tidak ditemukan pada database unit POD.`);
   }
 
   // 2. Upsert into Master DB
@@ -1306,19 +1391,24 @@ async function syncSinglePodRowToMaster({
       upsertSql += ` ON CONFLICT ("${conflictCol}") DO NOTHING`;
     }
 
+    await masterClient.query('BEGIN');
     await masterClient.query("SET LOCAL session_replication_role = 'replica';");
     await masterClient.query(upsertSql, values);
+    await masterClient.query('COMMIT');
 
     return {
       success: true,
       masterId,
-      serverId,
-      serverName: pod.name,
+      serverId: sourcePod?.id || targetServerIds[0],
+      serverName: sourcePod?.name || 'POD',
       tableName,
       pkColumn,
       pkValue,
       syncedRow: singleRow
     };
+  } catch (err) {
+    await masterClient.query('ROLLBACK').catch(() => {});
+    throw err;
   } finally {
     await masterClient.end().catch(() => {});
   }

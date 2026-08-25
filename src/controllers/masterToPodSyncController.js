@@ -106,17 +106,22 @@ const deleteMasterRow = async (req, res) => {
  */
 const deletePodRow = async (req, res) => {
   try {
-    const { serverId, tableName, pkColumn, pkValue, pkValues, cascade } = req.body;
+    const { serverId, serverIds, tableName, pkColumn, pkValue, pkValues, cascade } = req.body;
     const values = Array.isArray(pkValues) && pkValues.length > 0 ? pkValues : (pkValue !== undefined ? [pkValue] : []);
-    if (!serverId || !tableName || values.length === 0) {
+    const targetIds = Array.isArray(serverIds) && serverIds.length > 0
+      ? serverIds.map(Number)
+      : (serverId ? [Number(serverId)] : []);
+
+    if (targetIds.length === 0 || !tableName || values.length === 0) {
       return res.status(400).json({
         success: false,
-        error: 'serverId, tableName, dan pkValue/pkValues wajib disertakan.'
+        error: 'serverId/serverIds, tableName, dan pkValue/pkValues wajib disertakan.'
       });
     }
 
     const result = await masterToPodSyncService.deletePodTableRow({
-      serverId: Number(serverId),
+      serverId: targetIds[0],
+      serverIds: targetIds,
       tableName,
       pkColumn: pkColumn || 'id',
       pkValue,
@@ -190,17 +195,22 @@ const syncPodToMaster = async (req, res) => {
  */
 const syncSinglePodRow = async (req, res) => {
   try {
-    const { masterId, serverId, tableName, pkColumn, pkValue } = req.body;
-    if (!masterId || !serverId || !tableName || pkValue === undefined) {
+    const { masterId, serverId, serverIds, tableName, pkColumn, pkValue } = req.body;
+    const targetIds = Array.isArray(serverIds) && serverIds.length > 0
+      ? serverIds.map(Number)
+      : (serverId ? [Number(serverId)] : []);
+
+    if (!masterId || targetIds.length === 0 || !tableName || pkValue === undefined) {
       return res.status(400).json({
         success: false,
-        error: 'masterId, serverId, tableName, dan pkValue wajib disertakan.'
+        error: 'masterId, serverId/serverIds, tableName, dan pkValue wajib disertakan.'
       });
     }
 
     const result = await masterToPodSyncService.syncSinglePodRowToMaster({
       masterId: Number(masterId),
-      serverId: Number(serverId),
+      serverId: targetIds[0],
+      serverIds: targetIds,
       tableName,
       pkColumn: pkColumn || 'id',
       pkValue
