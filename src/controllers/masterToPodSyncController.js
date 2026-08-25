@@ -222,6 +222,22 @@ const syncSinglePodRow = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/master-pod-sync/fleet-audit?masterId=X
+ */
+const getFleetAudit = async (req, res) => {
+  try {
+    const { masterId } = req.query;
+    if (!masterId) {
+      return res.status(400).json({ success: false, error: 'Parameter masterId wajib diisi.' });
+    }
+    const auditData = await masterToPodSyncService.auditFleetDiscrepancies(Number(masterId));
+    res.json({ success: true, data: auditData });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 module.exports = {
   getMasterDatabases,
   getMasterTables,
@@ -231,5 +247,6 @@ module.exports = {
   deletePodRow,
   syncSingleMasterRow,
   syncPodToMaster,
-  syncSinglePodRow
+  syncSinglePodRow,
+  getFleetAudit
 };

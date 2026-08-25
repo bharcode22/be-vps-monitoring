@@ -144,6 +144,7 @@ router.get('/pod-topics/:serverId', requireAuth, podTopicController.getPodTopicD
 router.get('/master-pod-sync/masters', requireAuth, masterToPodSyncController.getMasterDatabases);
 router.get('/master-pod-sync/tables', requireAuth, masterToPodSyncController.getMasterTables);
 router.get('/master-pod-sync/matrix', requireAuth, masterToPodSyncController.getTableComparisonMatrix);
+router.get('/master-pod-sync/fleet-audit', requireAuth, masterToPodSyncController.getFleetAudit);
 router.post('/master-pod-sync/sync', requireAuth, masterToPodSyncController.performSync);
 router.post('/master-pod-sync/sync-single-row', requireAuth, masterToPodSyncController.syncSingleMasterRow);
 router.post('/master-pod-sync/pod-to-master', requireAuth, masterToPodSyncController.syncPodToMaster);
