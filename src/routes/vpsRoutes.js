@@ -145,6 +145,9 @@ router.get('/master-pod-sync/masters', requireAuth, masterToPodSyncController.ge
 router.get('/master-pod-sync/tables', requireAuth, masterToPodSyncController.getMasterTables);
 router.get('/master-pod-sync/matrix', requireAuth, masterToPodSyncController.getTableComparisonMatrix);
 router.post('/master-pod-sync/sync', requireAuth, masterToPodSyncController.performSync);
+router.post('/master-pod-sync/sync-single-row', requireAuth, masterToPodSyncController.syncSingleMasterRow);
+router.delete('/master-pod-sync/master-row', requireAuth, masterToPodSyncController.deleteMasterRow);
+router.delete('/master-pod-sync/pod-row', requireAuth, masterToPodSyncController.deletePodRow);
 
 // 13. Dynamic / Parameterized routes by Server ID (MUST BE AT THE END)
 router.get('/vps/:id/history', optionalAuth, vpsController.getServerHistory);

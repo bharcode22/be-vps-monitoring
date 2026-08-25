@@ -72,9 +72,91 @@ const performSync = async (req, res) => {
   }
 };
 
+/**
+ * DELETE /api/master-pod-sync/master-row
+ */
+const deleteMasterRow = async (req, res) => {
+  try {
+    const { masterId, tableName, pkColumn, pkValue } = req.body;
+    if (!masterId || !tableName || pkValue === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: 'masterId, tableName, dan pkValue wajib disertakan.'
+      });
+    }
+
+    const result = await masterToPodSyncService.deleteMasterTableRow({
+      masterId: Number(masterId),
+      tableName,
+      pkColumn: pkColumn || 'id',
+      pkValue
+    });
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * DELETE /api/master-pod-sync/pod-row
+ */
+const deletePodRow = async (req, res) => {
+  try {
+    const { serverId, tableName, pkColumn, pkValue } = req.body;
+    if (!serverId || !tableName || pkValue === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: 'serverId, tableName, dan pkValue wajib disertakan.'
+      });
+    }
+
+    const result = await masterToPodSyncService.deletePodTableRow({
+      serverId: Number(serverId),
+      tableName,
+      pkColumn: pkColumn || 'id',
+      pkValue
+    });
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * POST /api/master-pod-sync/sync-single-row
+ */
+const syncSingleMasterRow = async (req, res) => {
+  try {
+    const { masterId, tableName, pkColumn, pkValue, targetPodIds } = req.body;
+    if (!masterId || !tableName || pkValue === undefined || !targetPodIds || targetPodIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'masterId, tableName, pkValue, dan targetPodIds wajib disertakan.'
+      });
+    }
+
+    const result = await masterToPodSyncService.syncSingleMasterRowToPods({
+      masterId: Number(masterId),
+      tableName,
+      pkColumn: pkColumn || 'id',
+      pkValue,
+      targetPodIds
+    });
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 module.exports = {
   getMasterDatabases,
   getMasterTables,
   getTableComparisonMatrix,
-  performSync
+  performSync,
+  deleteMasterRow,
+  deletePodRow,
+  syncSingleMasterRow
 };

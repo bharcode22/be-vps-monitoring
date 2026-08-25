@@ -51,7 +51,7 @@ async function getMasterDatabases() {
 }
 
 /**
- * 2. Fetch public tables and their row counts from selected Master Database
+ * 2. Fetch public tables and their row counts + FK relations from selected Master Database
  */
 async function getMasterTables(masterId) {
   const master = await dbAsync.get('SELECT * FROM databases_postgres WHERE id = ?', [masterId]);
@@ -73,20 +73,72 @@ async function getMasterTables(masterId) {
     `;
     const res = await client.query(query);
 
+    // Fetch all foreign key constraints in public schema
+    const fkQuery = `
+      SELECT
+        tc.table_name, 
+        kcu.column_name, 
+        ccu.table_name AS foreign_table_name,
+        ccu.column_name AS foreign_column_name 
+      FROM information_schema.table_constraints AS tc 
+      JOIN information_schema.key_column_usage AS kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+      JOIN information_schema.constraint_column_usage AS ccu
+        ON ccu.constraint_name = tc.constraint_name
+        AND ccu.table_schema = tc.table_schema
+      WHERE tc.constraint_type = 'FOREIGN KEY' 
+        AND tc.table_schema = 'public';
+    `;
+    let allForeignKeys = [];
+    try {
+      const fkRes = await client.query(fkQuery);
+      allForeignKeys = fkRes.rows || [];
+    } catch (e) {
+      allForeignKeys = [];
+    }
+
     const tablesWithRows = [];
     for (const row of res.rows) {
+      const tName = row.table_name;
+      const parents = allForeignKeys
+        .filter(fk => fk.table_name === tName)
+        .map(fk => ({
+          columnName: fk.column_name,
+          foreignTableName: fk.foreign_table_name,
+          foreignColumnName: fk.foreign_column_name
+        }));
+      const children = allForeignKeys
+        .filter(fk => fk.foreign_table_name === tName)
+        .map(fk => ({
+          tableName: fk.table_name,
+          columnName: fk.column_name,
+          foreignColumnName: fk.foreign_column_name
+        }));
+
+      let relationType = 'standalone';
+      if (parents.length > 0 && children.length > 0) relationType = 'complex';
+      else if (parents.length > 0) relationType = 'child';
+      else if (children.length > 0) relationType = 'parent';
+
       try {
-        const countRes = await client.query(`SELECT COUNT(*) as cnt FROM public."${row.table_name}"`);
+        const countRes = await client.query(`SELECT COUNT(*) as cnt FROM public."${tName}"`);
         tablesWithRows.push({
-          tableName: row.table_name,
+          tableName: tName,
           columnCount: parseInt(row.column_count, 10),
-          rowCount: parseInt(countRes.rows[0].cnt, 10)
+          rowCount: parseInt(countRes.rows[0].cnt, 10),
+          parents,
+          children,
+          relationType
         });
       } catch (cntErr) {
         tablesWithRows.push({
-          tableName: row.table_name,
+          tableName: tName,
           columnCount: parseInt(row.column_count, 10),
-          rowCount: 0
+          rowCount: 0,
+          parents,
+          children,
+          relationType
         });
       }
     }
@@ -100,22 +152,43 @@ async function getMasterTables(masterId) {
 }
 
 /**
- * Fetch table columns info from a PG connection
+ * Fetch table columns info from a PG connection (including FK relations)
  */
 async function getTableColumnsFromClient(client, tableName) {
   const query = `
     SELECT 
-      column_name,
-      data_type,
-      is_nullable,
-      column_default,
-      character_maximum_length
-    FROM information_schema.columns
-    WHERE table_schema = 'public' AND table_name = $1
-    ORDER BY ordinal_position ASC;
+      c.column_name,
+      c.data_type,
+      c.is_nullable,
+      c.column_default,
+      c.character_maximum_length,
+      ccu.table_name AS foreign_table_name,
+      ccu.column_name AS foreign_column_name
+    FROM information_schema.columns c
+    LEFT JOIN information_schema.key_column_usage kcu
+      ON c.table_schema = kcu.table_schema
+      AND c.table_name = kcu.table_name
+      AND c.column_name = kcu.column_name
+    LEFT JOIN information_schema.table_constraints tc
+      ON tc.constraint_name = kcu.constraint_name
+      AND tc.table_schema = kcu.table_schema
+      AND tc.constraint_type = 'FOREIGN KEY'
+    LEFT JOIN information_schema.constraint_column_usage ccu
+      ON ccu.constraint_name = tc.constraint_name
+      AND ccu.table_schema = tc.table_schema
+    WHERE c.table_schema = 'public' AND c.table_name = $1
+    ORDER BY c.ordinal_position ASC;
   `;
   const res = await client.query(query, [tableName]);
-  return res.rows;
+  return res.rows.map(r => ({
+    column_name: r.column_name,
+    data_type: r.data_type,
+    is_nullable: r.is_nullable,
+    column_default: r.column_default,
+    character_maximum_length: r.character_maximum_length,
+    foreignTable: r.foreign_table_name || null,
+    foreignColumn: r.foreign_column_name || null
+  }));
 }
 
 /**
@@ -534,6 +607,7 @@ async function syncMasterTableToPods({ masterId, tableName, targetPodIds = [], d
       try {
         if (!dryRun) {
           await client.query('BEGIN');
+          await client.query("SET LOCAL session_replication_role = 'replica';").catch(() => {});
         }
 
         // A. Ensure Table and Missing Columns Exist
@@ -631,9 +705,227 @@ async function syncMasterTableToPods({ masterId, tableName, targetPodIds = [], d
   };
 }
 
+/**
+ * 5. Delete specific row from Master Database
+ */
+async function deleteMasterTableRow({ masterId, tableName, pkColumn = 'id', pkValue }) {
+  if (!masterId || !tableName || pkValue === undefined) {
+    throw new Error('masterId, tableName, dan pkValue wajib diisi.');
+  }
+
+  const master = await dbAsync.get('SELECT * FROM databases_postgres WHERE id = ?', [masterId]);
+  if (!master) throw new Error('Master DB tidak ditemukan.');
+
+  const client = createMasterClient(master);
+  await client.connect();
+  try {
+    const query = `DELETE FROM public."${tableName}" WHERE "${pkColumn}" = $1 RETURNING *;`;
+    const res = await client.query(query, [pkValue]);
+    return {
+      success: true,
+      masterId,
+      tableName,
+      deletedCount: res.rowCount,
+      deletedRow: res.rows[0] || null
+    };
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+/**
+ * 6. Delete specific row from a target POD Database
+ */
+async function deletePodTableRow({ serverId, tableName, pkColumn = 'id', pkValue }) {
+  if (!serverId || !tableName || pkValue === undefined) {
+    throw new Error('serverId, tableName, dan pkValue wajib diisi.');
+  }
+
+  const pod = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
+  if (!pod) throw new Error('Server POD tidak ditemukan.');
+
+  // 1. Direct PG
+  try {
+    const client = new Client({
+      connectionString: getPodDbUrl(pod.host),
+      connectionTimeoutMillis: 3000,
+      statement_timeout: 6000
+    });
+    await client.connect();
+    try {
+      const query = `DELETE FROM public."${tableName}" WHERE "${pkColumn}" = $1 RETURNING *;`;
+      const res = await client.query(query, [pkValue]);
+      return {
+        success: true,
+        serverId: pod.id,
+        serverName: pod.name,
+        tableName,
+        deletedCount: res.rowCount,
+        deletedRow: res.rows[0] || null
+      };
+    } finally {
+      await client.end().catch(() => {});
+    }
+  } catch (err) {
+    // 2. SSH Fallback
+    try {
+      const escapedVal = String(pkValue).replace(/'/g, "''");
+      const deleteCmd = `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -c "DELETE FROM public.\\"${tableName}\\" WHERE \\"${pkColumn}\\" = '${escapedVal}';"`;
+      await executeSshCommand(pod, deleteCmd);
+      return {
+        success: true,
+        serverId: pod.id,
+        serverName: pod.name,
+        tableName,
+        deletedCount: 1
+      };
+    } catch (sshErr) {
+      throw new Error(`Gagal menghapus baris di ${pod.name}: ${sshErr.message}`);
+    }
+  }
+}
+
+/**
+ * 7. Sync a single row from Master Database to Selected PODs
+ */
+async function syncSingleMasterRowToPods({ masterId, tableName, pkColumn = 'id', pkValue, targetPodIds = [] }) {
+  if (!masterId || !tableName || pkValue === undefined || targetPodIds.length === 0) {
+    throw new Error('masterId, tableName, pkValue, dan targetPodIds wajib diisi.');
+  }
+
+  // 1. Fetch Master Row & Column metadata
+  const master = await dbAsync.get('SELECT * FROM databases_postgres WHERE id = ?', [masterId]);
+  if (!master) throw new Error('Master DB tidak ditemukan.');
+
+  const masterClient = createMasterClient(master);
+  let masterColumns = [];
+  let singleRow = null;
+
+  await masterClient.connect();
+  try {
+    masterColumns = await getTableColumnsFromClient(masterClient, tableName);
+    if (masterColumns.length === 0) throw new Error(`Tabel ${tableName} tidak ada di Master DB.`);
+
+    const query = `SELECT * FROM public."${tableName}" WHERE "${pkColumn}" = $1 LIMIT 1;`;
+    const res = await masterClient.query(query, [pkValue]);
+    if (res.rows.length === 0) {
+      throw new Error(`Baris dengan ${pkColumn} = '${pkValue}' tidak ditemukan pada Master Database.`);
+    }
+    singleRow = res.rows[0];
+  } finally {
+    await masterClient.end().catch(() => {});
+  }
+
+  // 2. Fetch target POD servers
+  const targetPods = await dbAsync.all(
+    `SELECT id, name, host, port, username, password, private_key FROM servers WHERE id IN (${targetPodIds.map(() => '?').join(',')})`,
+    targetPodIds
+  );
+
+  const colNames = masterColumns.map(c => c.column_name);
+  const colListStr = colNames.map(c => `"${c}"`).join(', ');
+  const conflictCol = colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : pkColumn);
+  const updateSet = colNames
+    .filter(c => c !== conflictCol && c !== 'id')
+    .map(c => `"${c}" = EXCLUDED."${c}"`)
+    .join(', ');
+
+  const values = colNames.map(c => singleRow[c]);
+  const placeholders = colNames.map((_, i) => `$${i + 1}`).join(', ');
+
+  let upsertSql = `INSERT INTO public."${tableName}" (${colListStr}) VALUES (${placeholders})`;
+  if (updateSet) {
+    upsertSql += ` ON CONFLICT ("${conflictCol}") DO UPDATE SET ${updateSet}`;
+  } else {
+    upsertSql += ` ON CONFLICT ("${conflictCol}") DO NOTHING`;
+  }
+
+  const results = [];
+
+  for (const pod of targetPods) {
+    const podResult = {
+      serverId: pod.id,
+      serverName: pod.name,
+      success: false,
+      syncedRow: singleRow,
+      error: null
+    };
+
+    // Try Direct PG
+    try {
+      const client = new Client({
+        connectionString: getPodDbUrl(pod.host),
+        connectionTimeoutMillis: 3000,
+        statement_timeout: 10000
+      });
+      await client.connect();
+      try {
+        // Ensure missing columns exist
+        const podColumns = await getTableColumnsFromClient(client, tableName);
+        for (const mc of masterColumns) {
+          const exists = podColumns.some(pc => pc.column_name === mc.column_name);
+          if (!exists) {
+            await client.query(`ALTER TABLE public."${tableName}" ADD COLUMN IF NOT EXISTS "${mc.column_name}" ${mc.data_type};`);
+          }
+        }
+
+        await client.query("SET LOCAL session_replication_role = 'replica';").catch(() => {});
+        await client.query(upsertSql, values);
+        podResult.success = true;
+      } finally {
+        await client.end().catch(() => {});
+      }
+    } catch (directErr) {
+      // SSH Fallback
+      try {
+        const escapedValues = colNames.map(c => {
+          const val = singleRow[c];
+          if (val === null || val === undefined) return 'NULL';
+          if (typeof val === 'number') return val;
+          if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE';
+          return `'${String(val).replace(/'/g, "''")}'`;
+        }).join(', ');
+
+        let sshUpsert = `INSERT INTO public.\\"${tableName}\\" (${colNames.map(c => `\\"${c}\\"`).join(', ')}) VALUES (${escapedValues})`;
+        if (updateSet) {
+          const sshUpdateSet = colNames
+            .filter(c => c !== conflictCol && c !== 'id')
+            .map(c => `\\"${c}\\" = EXCLUDED.\\"${c}\\"`)
+            .join(', ');
+          sshUpsert += ` ON CONFLICT (\\"${conflictCol}\\") DO UPDATE SET ${sshUpdateSet};`;
+        } else {
+          sshUpsert += ` ON CONFLICT (\\"${conflictCol}\\") DO NOTHING;`;
+        }
+
+        await executeSshCommand(pod, `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -c "${sshUpsert}"`);
+        podResult.success = true;
+      } catch (sshErr) {
+        podResult.success = false;
+        podResult.error = sshErr.message;
+      }
+    }
+
+    results.push(podResult);
+  }
+
+  return {
+    success: true,
+    masterId,
+    tableName,
+    pkColumn,
+    pkValue,
+    totalTargets: targetPods.length,
+    successfulTargets: results.filter(r => r.success).length,
+    results
+  };
+}
+
 module.exports = {
   getMasterDatabases,
   getMasterTables,
   compareMasterTableAcrossPods,
-  syncMasterTableToPods
+  syncMasterTableToPods,
+  deleteMasterTableRow,
+  deletePodTableRow,
+  syncSingleMasterRowToPods
 };
