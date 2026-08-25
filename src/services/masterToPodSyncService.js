@@ -35,9 +35,31 @@ function createMasterClient(masterRecord) {
     port,
     database: dbName,
     ssl: isCloudDb ? { rejectUnauthorized: false } : false,
-    connectionTimeoutMillis: 6000,
-    statement_timeout: 15000
   });
+}
+
+/**
+ * Helper to filter rows for partitioned tables like 'pod'
+ */
+function filterRowsForPod(tableName, rows, podServer) {
+  if (!rows || rows.length === 0) return [];
+  if (tableName === 'pod') {
+    const podName = (podServer.name || '').toLowerCase();
+    const digits = (podName.match(/\d+/) || [])[0];
+
+    const matched = rows.filter(r => {
+      // 1. Match IP address
+      if (r.ip_address && podServer.host && r.ip_address.trim() === podServer.host.trim()) return true;
+      // 2. Match code (e.g. '31', '36', '41')
+      if (digits && r.code && String(r.code).trim() === digits) return true;
+      // 3. Match name (e.g. 'F3-1' vs 'POD 31' -> '31' in name)
+      if (digits && r.name && r.name.replace(/[^0-9]/g, '') === digits) return true;
+      return false;
+    });
+
+    if (matched.length > 0) return matched;
+  }
+  return rows;
 }
 
 /**
@@ -407,9 +429,9 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
     };
   });
 
-  // 5. Build Data Row Matrix
-  // Unique comparison identifier for rows
+  // 5. Build True Bidirectional Data Row Matrix (Master Rows + POD-exclusive Rows)
   const getRowKey = (row) => {
+    if (!row) return '';
     if (row.key) return String(row.key);
     if (row.topic) return String(row.topic);
     if (row.code) return String(row.code);
@@ -417,8 +439,45 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
     return JSON.stringify(row);
   };
 
-  const dataMatrix = masterRows.map((masterRow, idx) => {
-    const rowKey = getRowKey(masterRow);
+  const allRowsMap = new Map();
+
+  // A. Add Master rows
+  masterRows.forEach(mr => {
+    const key = getRowKey(mr);
+    allRowsMap.set(key, {
+      rowKey: key,
+      sampleData: mr,
+      inMaster: true,
+      originPodId: null,
+      originPodName: null,
+      podSources: []
+    });
+  });
+
+  // B. Add rows found exclusively in PODs (born in POD, not yet in Master)
+  for (const pod of podV3List) {
+    const podRes = podResults.find(r => r.serverId === pod.id);
+    if (podRes && podRes.isOnline && podRes.tableExists && Array.isArray(podRes.rows)) {
+      for (const pr of podRes.rows) {
+        const key = getRowKey(pr);
+        if (allRowsMap.has(key)) {
+          allRowsMap.get(key).podSources.push(pod.name);
+        } else {
+          allRowsMap.set(key, {
+            rowKey: key,
+            sampleData: pr,
+            inMaster: false,
+            originPodId: pod.id,
+            originPodName: pod.name,
+            podSources: [pod.name]
+          });
+        }
+      }
+    }
+  }
+
+  // C. Map presence across all PODs for every row in both Master & PODs
+  const dataMatrix = Array.from(allRowsMap.values()).map(item => {
     const presenceByPod = {};
     let presentCount = 0;
 
@@ -429,7 +488,7 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
       } else if (!podRes.tableExists) {
         presenceByPod[pod.id] = { isOnline: true, present: false };
       } else {
-        const found = podRes.rows.some(pr => getRowKey(pr) === rowKey);
+        const found = podRes.rows.some(pr => getRowKey(pr) === item.rowKey);
         if (found) {
           presenceByPod[pod.id] = { isOnline: true, present: true };
           presentCount++;
@@ -440,8 +499,13 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
     }
 
     return {
-      rowKey,
-      sampleData: masterRow,
+      rowKey: item.rowKey,
+      sampleData: item.sampleData,
+      inMaster: item.inMaster,
+      isPodOnly: !item.inMaster,
+      originPodId: item.originPodId,
+      originPodName: item.originPodName,
+      podSources: item.podSources,
       presence: presenceByPod,
       presentCount,
       totalPods: podV3List.length
@@ -509,6 +573,7 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
   const onlinePodsCount = podSummaries.filter(p => p.isOnline).length;
   const syncedPodsCount = podSummaries.filter(p => p.status === 'SYNCED').length;
   const mismatchPodsCount = podSummaries.filter(p => p.isOnline && p.status !== 'SYNCED').length;
+  const podOnlyRowsCount = dataMatrix.filter(d => !d.inMaster).length;
 
   return {
     master: {
@@ -529,7 +594,8 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
       offlinePods: podV3List.length - onlinePodsCount,
       syncedPods: syncedPodsCount,
       mismatchPods: mismatchPodsCount,
-      isAllSynced: onlinePodsCount > 0 && syncedPodsCount === onlinePodsCount
+      podOnlyRowsCount,
+      isAllSynced: onlinePodsCount > 0 && syncedPodsCount === onlinePodsCount && podOnlyRowsCount === 0
     }
   };
 }
@@ -643,8 +709,13 @@ async function syncMasterTableToPods({ masterId, tableName, targetPodIds = [], d
           }
         }
 
-        // B. Upsert Master Rows
-        if (syncData && masterRows.length > 0) {
+        // B. Upsert Master Rows (with Partition Scope awareness for table 'pod')
+        const rowsToSync = filterRowsForPod(tableName, masterRows, pod);
+        if (tableName === 'pod' && rowsToSync.length < masterRows.length) {
+          podResult.logs.push(`[Partisi] Menggunakan filter partisi khusus POD: ${rowsToSync.length} dari total ${masterRows.length} baris Master.`);
+        }
+
+        if (syncData && rowsToSync.length > 0) {
           const colNames = masterColumns.map(c => c.column_name);
           const colListStr = colNames.map(c => `"${c}"`).join(', ');
 
@@ -655,7 +726,7 @@ async function syncMasterTableToPods({ masterId, tableName, targetPodIds = [], d
             .map(c => `"${c}" = EXCLUDED."${c}"`)
             .join(', ');
 
-          for (const row of masterRows) {
+          for (const row of rowsToSync) {
             const values = colNames.map(c => row[c]);
             const placeholders = colNames.map((_, i) => `$${i + 1}`).join(', ');
 
@@ -706,11 +777,41 @@ async function syncMasterTableToPods({ masterId, tableName, targetPodIds = [], d
 }
 
 /**
- * 5. Delete specific row from Master Database
+ * Helper to discover all child tables referencing tableName(pkColumn)
  */
-async function deleteMasterTableRow({ masterId, tableName, pkColumn = 'id', pkValue }) {
-  if (!masterId || !tableName || pkValue === undefined) {
-    throw new Error('masterId, tableName, dan pkValue wajib diisi.');
+async function findChildRelations(client, tableName) {
+  const fkQuery = `
+    SELECT
+      tc.table_name AS child_table,
+      kcu.column_name AS child_column,
+      ccu.table_name AS parent_table,
+      ccu.column_name AS parent_column
+    FROM information_schema.table_constraints AS tc
+    JOIN information_schema.key_column_usage AS kcu
+      ON tc.constraint_name = kcu.constraint_name
+      AND tc.table_schema = kcu.table_schema
+    JOIN information_schema.constraint_column_usage AS ccu
+      ON ccu.constraint_name = tc.constraint_name
+      AND ccu.table_schema = tc.table_schema
+    WHERE tc.constraint_type = 'FOREIGN KEY'
+      AND tc.table_schema = 'public'
+      AND ccu.table_name = $1;
+  `;
+  try {
+    const res = await client.query(fkQuery, [tableName]);
+    return res.rows || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * 5. Cascade Hard Delete specific row(s) from Master Database
+ */
+async function deleteMasterTableRow({ masterId, tableName, pkColumn = 'id', pkValue, pkValues, cascade = true }) {
+  const valuesToDelete = Array.isArray(pkValues) && pkValues.length > 0 ? pkValues : (pkValue !== undefined ? [pkValue] : []);
+  if (!masterId || !tableName || valuesToDelete.length === 0) {
+    throw new Error('masterId, tableName, dan pkValue/pkValues wajib diisi.');
   }
 
   const master = await dbAsync.get('SELECT * FROM databases_postgres WHERE id = ?', [masterId]);
@@ -718,31 +819,62 @@ async function deleteMasterTableRow({ masterId, tableName, pkColumn = 'id', pkVa
 
   const client = createMasterClient(master);
   await client.connect();
+  let deletedCount = 0;
+  let cascadeCount = 0;
   try {
-    const query = `DELETE FROM public."${tableName}" WHERE "${pkColumn}" = $1 RETURNING *;`;
-    const res = await client.query(query, [pkValue]);
+    await client.query('BEGIN');
+    await client.query("SET LOCAL session_replication_role = 'replica';");
+
+    // 1. If cascade is true, find child tables and delete referencing child rows first
+    if (cascade) {
+      const childRelations = await findChildRelations(client, tableName);
+      for (const rel of childRelations) {
+        if (rel.child_table !== tableName) {
+          const childDeleteSql = `DELETE FROM public."${rel.child_table}" WHERE "${rel.child_column}"::text = ANY($1::text[])`;
+          const childRes = await client.query(childDeleteSql, [valuesToDelete.map(String)]).catch(() => ({ rowCount: 0 }));
+          cascadeCount += (childRes.rowCount || 0);
+        }
+      }
+    }
+
+    // 2. Delete parent rows
+    const query = `DELETE FROM public."${tableName}" WHERE "${pkColumn}"::text = ANY($1::text[]) RETURNING *;`;
+    const res = await client.query(query, [valuesToDelete.map(String)]);
+    deletedCount = res.rowCount;
+
+    await client.query('COMMIT');
+
     return {
       success: true,
       masterId,
       tableName,
-      deletedCount: res.rowCount,
-      deletedRow: res.rows[0] || null
+      pkColumn,
+      deletedCount,
+      deletedKeys: valuesToDelete,
+      cascadeCount
     };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
   } finally {
     await client.end().catch(() => {});
   }
 }
 
 /**
- * 6. Delete specific row from a target POD Database
+ * 6. Cascade Hard Delete specific row(s) from a target POD Database
  */
-async function deletePodTableRow({ serverId, tableName, pkColumn = 'id', pkValue }) {
-  if (!serverId || !tableName || pkValue === undefined) {
-    throw new Error('serverId, tableName, dan pkValue wajib diisi.');
+async function deletePodTableRow({ serverId, tableName, pkColumn = 'id', pkValue, pkValues, cascade = true }) {
+  const valuesToDelete = Array.isArray(pkValues) && pkValues.length > 0 ? pkValues : (pkValue !== undefined ? [pkValue] : []);
+  if (!serverId || !tableName || valuesToDelete.length === 0) {
+    throw new Error('serverId, tableName, dan pkValue/pkValues wajib diisi.');
   }
 
   const pod = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
   if (!pod) throw new Error('Server POD tidak ditemukan.');
+
+  let deletedCount = 0;
+  let cascadeCount = 0;
 
   // 1. Direct PG
   try {
@@ -753,34 +885,59 @@ async function deletePodTableRow({ serverId, tableName, pkColumn = 'id', pkValue
     });
     await client.connect();
     try {
-      const query = `DELETE FROM public."${tableName}" WHERE "${pkColumn}" = $1 RETURNING *;`;
-      const res = await client.query(query, [pkValue]);
+      await client.query('BEGIN');
+      await client.query("SET LOCAL session_replication_role = 'replica';");
+
+      if (cascade) {
+        const childRelations = await findChildRelations(client, tableName);
+        for (const rel of childRelations) {
+          if (rel.child_table !== tableName) {
+            const childDeleteSql = `DELETE FROM public."${rel.child_table}" WHERE "${rel.child_column}"::text = ANY($1::text[])`;
+            const childRes = await client.query(childDeleteSql, [valuesToDelete.map(String)]).catch(() => ({ rowCount: 0 }));
+            cascadeCount += (childRes.rowCount || 0);
+          }
+        }
+      }
+
+      const query = `DELETE FROM public."${tableName}" WHERE "${pkColumn}"::text = ANY($1::text[]) RETURNING *;`;
+      const res = await client.query(query, [valuesToDelete.map(String)]);
+      deletedCount = res.rowCount;
+      await client.query('COMMIT');
+
       return {
         success: true,
         serverId: pod.id,
         serverName: pod.name,
         tableName,
-        deletedCount: res.rowCount,
-        deletedRow: res.rows[0] || null
+        pkColumn,
+        deletedCount,
+        deletedKeys: valuesToDelete,
+        cascadeCount
       };
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
     } finally {
       await client.end().catch(() => {});
     }
   } catch (err) {
     // 2. SSH Fallback
     try {
-      const escapedVal = String(pkValue).replace(/'/g, "''");
-      const deleteCmd = `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -c "DELETE FROM public.\\"${tableName}\\" WHERE \\"${pkColumn}\\" = '${escapedVal}';"`;
+      const formattedKeys = valuesToDelete.map(v => `'${String(v).replace(/'/g, "''")}'`).join(',');
+      const deleteCmd = `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -c "SET session_replication_role = 'replica'; DELETE FROM public.\\"${tableName}\\" WHERE \\"${pkColumn}\\" IN (${formattedKeys});"`;
       await executeSshCommand(pod, deleteCmd);
       return {
         success: true,
         serverId: pod.id,
         serverName: pod.name,
         tableName,
-        deletedCount: 1
+        pkColumn,
+        deletedCount: valuesToDelete.length,
+        deletedKeys: valuesToDelete,
+        cascadeCount: 0
       };
     } catch (sshErr) {
-      throw new Error(`Gagal menghapus baris di ${pod.name}: ${sshErr.message}`);
+      throw new Error(`Gagal melakukan cascade hard delete di ${pod.name}: ${sshErr.message}`);
     }
   }
 }
@@ -920,6 +1077,253 @@ async function syncSingleMasterRowToPods({ masterId, tableName, pkColumn = 'id',
   };
 }
 
+/**
+ * 8. Pull Table Data from a single POD to Master Database (POD ➔ Master)
+ */
+async function syncPodTableToMaster({
+  masterId,
+  serverId,
+  tableName,
+  dryRun = false,
+  dateFrom = null,
+  dateTo = null
+}) {
+  if (!masterId || !serverId || !tableName) {
+    throw new Error('masterId, serverId, dan tableName wajib diisi.');
+  }
+
+  const master = await dbAsync.get('SELECT * FROM databases_postgres WHERE id = ?', [masterId]);
+  if (!master) throw new Error('Master DB tidak ditemukan.');
+
+  const pod = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
+  if (!pod) throw new Error('Server POD tidak ditemukan.');
+
+  const masterClient = createMasterClient(master);
+  await masterClient.connect();
+
+  let masterColumns = [];
+  let pkColumn = 'id';
+  try {
+    masterColumns = await getTableColumnsFromClient(masterClient, tableName);
+    if (masterColumns.length === 0) {
+      throw new Error(`Tabel '${tableName}' tidak ditemukan pada Master Database '${master.name}'.`);
+    }
+
+    const pkQuery = `
+      SELECT kcu.column_name
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+      WHERE tc.constraint_type = 'PRIMARY KEY'
+        AND tc.table_schema = 'public'
+        AND tc.table_name = $1;
+    `;
+    const pkRes = await masterClient.query(pkQuery, [tableName]);
+    if (pkRes.rows.length > 0) pkColumn = pkRes.rows[0].column_name;
+    else pkColumn = masterColumns[0].column_name;
+  } catch (err) {
+    await masterClient.end().catch(() => {});
+    throw err;
+  }
+
+  const colNames = masterColumns.map(c => c.column_name);
+  const colListStr = colNames.map(c => `"${c}"`).join(', ');
+  const conflictCol = colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : pkColumn);
+  const updateSet = colNames
+    .filter(c => c !== conflictCol && c !== 'id')
+    .map(c => `"${c}" = EXCLUDED."${c}"`)
+    .join(', ');
+
+  // Fetch rows from POD
+  let podRows = [];
+  try {
+    const podClient = new Client({
+      connectionString: getPodDbUrl(pod.host),
+      connectionTimeoutMillis: 4000,
+      statement_timeout: 15000
+    });
+    await podClient.connect();
+    try {
+      let query = `SELECT * FROM public."${tableName}"`;
+      const conditions = [];
+      const params = [];
+
+      if (dateFrom) {
+        params.push(dateFrom);
+        conditions.push(`("created_at" >= $${params.length} OR "created_date" >= $${params.length})`);
+      }
+      if (dateTo) {
+        params.push(dateTo);
+        conditions.push(`("created_at" <= $${params.length} OR "created_date" <= $${params.length})`);
+      }
+
+      if (conditions.length > 0) {
+        query += ` WHERE ${conditions.join(' AND ')}`;
+      }
+      query += ` ORDER BY "${pkColumn}" ASC LIMIT 2000`;
+
+      const res = await podClient.query(query, params);
+      podRows = res.rows;
+    } finally {
+      await podClient.end().catch(() => {});
+    }
+  } catch (directErr) {
+    // SSH Fallback
+    try {
+      let filterClause = '';
+      if (dateFrom && dateTo) {
+        filterClause = ` WHERE created_at BETWEEN '${dateFrom}' AND '${dateTo}'`;
+      }
+      const dataCmd = `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -t -A -c "SELECT json_agg(t) FROM (SELECT * FROM public.\\"${tableName}\\"${filterClause} ORDER BY \\"${pkColumn}\\" ASC LIMIT 2000) t;"`;
+      const dataRaw = await executeSshCommand(pod, dataCmd);
+      try { podRows = JSON.parse(dataRaw || '[]'); } catch (e) { podRows = []; }
+    } catch (sshErr) {
+      await masterClient.end().catch(() => {});
+      throw new Error(`Gagal mengambil data dari POD ${pod.name}: ${sshErr.message}`);
+    }
+  }
+
+  let rowsProcessed = 0;
+  const logs = [];
+
+  try {
+    if (!dryRun && podRows.length > 0) {
+      await masterClient.query('BEGIN');
+      await masterClient.query("SET LOCAL session_replication_role = 'replica';");
+
+      for (const row of podRows) {
+        const values = colNames.map(c => row[c] !== undefined ? row[c] : null);
+        const placeholders = colNames.map((_, i) => `$${i + 1}`).join(', ');
+
+        let upsertSql = `INSERT INTO public."${tableName}" (${colListStr}) VALUES (${placeholders})`;
+        if (updateSet) {
+          upsertSql += ` ON CONFLICT ("${conflictCol}") DO UPDATE SET ${updateSet}`;
+        } else {
+          upsertSql += ` ON CONFLICT ("${conflictCol}") DO NOTHING`;
+        }
+
+        await masterClient.query(upsertSql, values);
+        rowsProcessed++;
+      }
+
+      await masterClient.query('COMMIT');
+    }
+
+    logs.push(`[Selesai] ${dryRun ? 'Simulasi' : 'Tarik data'} berhasil: ${podRows.length} baris dari ${pod.name} disinkronkan ke Master DB.`);
+  } catch (err) {
+    if (!dryRun) {
+      await masterClient.query('ROLLBACK').catch(() => {});
+    }
+    throw err;
+  } finally {
+    await masterClient.end().catch(() => {});
+  }
+
+  return {
+    success: true,
+    masterId,
+    serverId,
+    serverName: pod.name,
+    tableName,
+    dryRun,
+    totalRowsFromPod: podRows.length,
+    rowsProcessed,
+    logs
+  };
+}
+
+/**
+ * 9. Sync Single Row from POD to Master Database (POD ➔ Master)
+ */
+async function syncSinglePodRowToMaster({
+  masterId,
+  serverId,
+  tableName,
+  pkColumn = 'id',
+  pkValue
+}) {
+  if (!masterId || !serverId || !tableName || pkValue === undefined) {
+    throw new Error('masterId, serverId, tableName, dan pkValue wajib diisi.');
+  }
+
+  const master = await dbAsync.get('SELECT * FROM databases_postgres WHERE id = ?', [masterId]);
+  if (!master) throw new Error('Master DB tidak ditemukan.');
+
+  const pod = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
+  if (!pod) throw new Error('Server POD tidak ditemukan.');
+
+  let singleRow = null;
+
+  // 1. Fetch from POD (Direct PG or SSH)
+  try {
+    const podClient = new Client({
+      connectionString: getPodDbUrl(pod.host),
+      connectionTimeoutMillis: 3000,
+      statement_timeout: 6000
+    });
+    await podClient.connect();
+    try {
+      const res = await podClient.query(`SELECT * FROM public."${tableName}" WHERE "${pkColumn}" = $1 LIMIT 1;`, [pkValue]);
+      if (res.rows.length > 0) singleRow = res.rows[0];
+    } finally {
+      await podClient.end().catch(() => {});
+    }
+  } catch (directErr) {
+    // SSH Fallback
+    const sshCmd = `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -t -A -c "SELECT json_agg(t) FROM (SELECT * FROM public.\\"${tableName}\\" WHERE \\"${pkColumn}\\"='${pkValue}' LIMIT 1) t;"`;
+    const raw = await executeSshCommand(pod, sshCmd);
+    try {
+      const parsed = JSON.parse(raw || '[]');
+      if (parsed.length > 0) singleRow = parsed[0];
+    } catch (err) {}
+  }
+
+  if (!singleRow) {
+    throw new Error(`Baris dengan ${pkColumn} = '${pkValue}' tidak ditemukan pada POD '${pod.name}'.`);
+  }
+
+  // 2. Upsert into Master DB
+  const masterClient = createMasterClient(master);
+  await masterClient.connect();
+  try {
+    const masterColumns = await getTableColumnsFromClient(masterClient, tableName);
+    const colNames = masterColumns.map(c => c.column_name);
+    const colListStr = colNames.map(c => `"${c}"`).join(', ');
+    const conflictCol = colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : pkColumn);
+    const updateSet = colNames
+      .filter(c => c !== conflictCol && c !== 'id')
+      .map(c => `"${c}" = EXCLUDED."${c}"`)
+      .join(', ');
+
+    const values = colNames.map(c => singleRow[c] !== undefined ? singleRow[c] : null);
+    const placeholders = colNames.map((_, i) => `$${i + 1}`).join(', ');
+
+    let upsertSql = `INSERT INTO public."${tableName}" (${colListStr}) VALUES (${placeholders})`;
+    if (updateSet) {
+      upsertSql += ` ON CONFLICT ("${conflictCol}") DO UPDATE SET ${updateSet}`;
+    } else {
+      upsertSql += ` ON CONFLICT ("${conflictCol}") DO NOTHING`;
+    }
+
+    await masterClient.query("SET LOCAL session_replication_role = 'replica';");
+    await masterClient.query(upsertSql, values);
+
+    return {
+      success: true,
+      masterId,
+      serverId,
+      serverName: pod.name,
+      tableName,
+      pkColumn,
+      pkValue,
+      syncedRow: singleRow
+    };
+  } finally {
+    await masterClient.end().catch(() => {});
+  }
+}
+
 module.exports = {
   getMasterDatabases,
   getMasterTables,
@@ -927,5 +1331,8 @@ module.exports = {
   syncMasterTableToPods,
   deleteMasterTableRow,
   deletePodTableRow,
-  syncSingleMasterRowToPods
+  syncSingleMasterRowToPods,
+  syncPodTableToMaster,
+  syncSinglePodRowToMaster
 };
+

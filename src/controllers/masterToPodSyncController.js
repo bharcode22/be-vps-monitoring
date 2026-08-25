@@ -77,11 +77,12 @@ const performSync = async (req, res) => {
  */
 const deleteMasterRow = async (req, res) => {
   try {
-    const { masterId, tableName, pkColumn, pkValue } = req.body;
-    if (!masterId || !tableName || pkValue === undefined) {
+    const { masterId, tableName, pkColumn, pkValue, pkValues, cascade } = req.body;
+    const values = Array.isArray(pkValues) && pkValues.length > 0 ? pkValues : (pkValue !== undefined ? [pkValue] : []);
+    if (!masterId || !tableName || values.length === 0) {
       return res.status(400).json({
         success: false,
-        error: 'masterId, tableName, dan pkValue wajib disertakan.'
+        error: 'masterId, tableName, dan pkValue/pkValues wajib disertakan.'
       });
     }
 
@@ -89,7 +90,9 @@ const deleteMasterRow = async (req, res) => {
       masterId: Number(masterId),
       tableName,
       pkColumn: pkColumn || 'id',
-      pkValue
+      pkValue,
+      pkValues: values,
+      cascade: cascade !== false
     });
 
     res.json({ success: true, data: result });
@@ -103,11 +106,12 @@ const deleteMasterRow = async (req, res) => {
  */
 const deletePodRow = async (req, res) => {
   try {
-    const { serverId, tableName, pkColumn, pkValue } = req.body;
-    if (!serverId || !tableName || pkValue === undefined) {
+    const { serverId, tableName, pkColumn, pkValue, pkValues, cascade } = req.body;
+    const values = Array.isArray(pkValues) && pkValues.length > 0 ? pkValues : (pkValue !== undefined ? [pkValue] : []);
+    if (!serverId || !tableName || values.length === 0) {
       return res.status(400).json({
         success: false,
-        error: 'serverId, tableName, dan pkValue wajib disertakan.'
+        error: 'serverId, tableName, dan pkValue/pkValues wajib disertakan.'
       });
     }
 
@@ -115,7 +119,9 @@ const deletePodRow = async (req, res) => {
       serverId: Number(serverId),
       tableName,
       pkColumn: pkColumn || 'id',
-      pkValue
+      pkValue,
+      pkValues: values,
+      cascade: cascade !== false
     });
 
     res.json({ success: true, data: result });
@@ -151,6 +157,61 @@ const syncSingleMasterRow = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/master-pod-sync/pod-to-master
+ */
+const syncPodToMaster = async (req, res) => {
+  try {
+    const { masterId, serverId, tableName, dryRun, dateFrom, dateTo } = req.body;
+    if (!masterId || !serverId || !tableName) {
+      return res.status(400).json({
+        success: false,
+        error: 'masterId, serverId, dan tableName wajib disertakan.'
+      });
+    }
+
+    const result = await masterToPodSyncService.syncPodTableToMaster({
+      masterId: Number(masterId),
+      serverId: Number(serverId),
+      tableName,
+      dryRun: Boolean(dryRun),
+      dateFrom,
+      dateTo
+    });
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * POST /api/master-pod-sync/sync-single-pod-row
+ */
+const syncSinglePodRow = async (req, res) => {
+  try {
+    const { masterId, serverId, tableName, pkColumn, pkValue } = req.body;
+    if (!masterId || !serverId || !tableName || pkValue === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: 'masterId, serverId, tableName, dan pkValue wajib disertakan.'
+      });
+    }
+
+    const result = await masterToPodSyncService.syncSinglePodRowToMaster({
+      masterId: Number(masterId),
+      serverId: Number(serverId),
+      tableName,
+      pkColumn: pkColumn || 'id',
+      pkValue
+    });
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 module.exports = {
   getMasterDatabases,
   getMasterTables,
@@ -158,5 +219,7 @@ module.exports = {
   performSync,
   deleteMasterRow,
   deletePodRow,
-  syncSingleMasterRow
+  syncSingleMasterRow,
+  syncPodToMaster,
+  syncSinglePodRow
 };

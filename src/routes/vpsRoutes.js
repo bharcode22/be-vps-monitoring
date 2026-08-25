@@ -146,6 +146,8 @@ router.get('/master-pod-sync/tables', requireAuth, masterToPodSyncController.get
 router.get('/master-pod-sync/matrix', requireAuth, masterToPodSyncController.getTableComparisonMatrix);
 router.post('/master-pod-sync/sync', requireAuth, masterToPodSyncController.performSync);
 router.post('/master-pod-sync/sync-single-row', requireAuth, masterToPodSyncController.syncSingleMasterRow);
+router.post('/master-pod-sync/pod-to-master', requireAuth, masterToPodSyncController.syncPodToMaster);
+router.post('/master-pod-sync/sync-single-pod-row', requireAuth, masterToPodSyncController.syncSinglePodRow);
 router.delete('/master-pod-sync/master-row', requireAuth, masterToPodSyncController.deleteMasterRow);
 router.delete('/master-pod-sync/pod-row', requireAuth, masterToPodSyncController.deletePodRow);
 
