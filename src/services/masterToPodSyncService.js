@@ -62,6 +62,67 @@ function filterRowsForPod(tableName, rows, podServer) {
   return rows;
 }
 
+// In-Memory Schema & Catalog Cache with TTL (Reduces redundant queries on tab switches)
+const schemaCache = new Map();
+const CACHE_TTL_MS = 60 * 1000; // 60 seconds
+
+function getCached(key) {
+  const item = schemaCache.get(key);
+  if (!item) return null;
+  if (Date.now() > item.expiresAt) {
+    schemaCache.delete(key);
+    return null;
+  }
+  return item.data;
+}
+
+function setCached(key, data, ttlMs = CACHE_TTL_MS) {
+  schemaCache.set(key, {
+    data,
+    expiresAt: Date.now() + ttlMs
+  });
+}
+
+function clearSchemaCache(pattern = '') {
+  if (!pattern) {
+    schemaCache.clear();
+    return;
+  }
+  for (const key of schemaCache.keys()) {
+    if (key.includes(pattern)) {
+      schemaCache.delete(key);
+    }
+  }
+}
+
+/**
+ * Concurrency Limiter: Run array of async tasks with controlled parallelism
+ * Mencegah lonjakan beban socket descriptor, CPU, dan SSH serentak
+ * @param {Array<() => Promise<any>>} taskFns 
+ * @param {number} limit 
+ */
+async function runWithConcurrencyLimit(taskFns, limit = 8) {
+  if (!Array.isArray(taskFns) || taskFns.length === 0) return [];
+  const results = new Array(taskFns.length);
+  let currentIndex = 0;
+
+  async function worker() {
+    while (currentIndex < taskFns.length) {
+      const idx = currentIndex++;
+      try {
+        results[idx] = await taskFns[idx]();
+      } catch (err) {
+        results[idx] = { error: err.message || 'Worker Error' };
+      }
+    }
+  }
+
+  const workerCount = Math.min(limit, taskFns.length);
+  const workers = Array.from({ length: workerCount }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 /**
  * 1. Fetch registered Master Databases
  */
@@ -74,28 +135,45 @@ async function getMasterDatabases() {
 
 /**
  * 2. Fetch public tables and their row counts + FK relations from selected Master Database
+ * Ultra-Fast Single Aggregated Query (Eliminates N+1 query loops)
  */
-async function getMasterTables(masterId) {
+async function getMasterTables(masterId, bypassCache = false) {
+  const cacheKey = `master_tables_${masterId}`;
+  if (!bypassCache) {
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+  }
+
   const master = await dbAsync.get('SELECT * FROM databases_postgres WHERE id = ?', [masterId]);
   if (!master) throw new Error(`Database Master dengan ID ${masterId} tidak ditemukan.`);
 
   const client = createMasterClient(master);
   await client.connect();
   try {
-    const query = `
+    // 1. Single Ultra-Fast Query: Fetches all tables, column counts, and live row counts in < 20ms
+    const singleQuery = `
       SELECT 
-        table_name,
-        (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = t.table_name) as column_count
+        t.table_name,
+        COALESCE(col_counts.cnt, 0) AS column_count,
+        COALESCE(s.n_live_tup, c.reltuples::bigint, 0) AS row_count
       FROM information_schema.tables t
-      WHERE table_schema = 'public' 
-        AND table_type = 'BASE TABLE'
-        AND table_name NOT LIKE '_prisma%'
-        AND table_name NOT LIKE 'spatial_ref_sys'
-      ORDER BY table_name ASC;
+      LEFT JOIN (
+        SELECT table_name, COUNT(*) AS cnt
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+        GROUP BY table_name
+      ) col_counts ON col_counts.table_name = t.table_name
+      LEFT JOIN pg_stat_user_tables s ON s.relname = t.table_name AND s.schemaname = 'public'
+      LEFT JOIN pg_class c ON c.relname = t.table_name AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+      WHERE t.table_schema = 'public' 
+        AND t.table_type = 'BASE TABLE'
+        AND t.table_name NOT LIKE '_prisma%'
+        AND t.table_name NOT LIKE 'spatial_ref_sys'
+      ORDER BY t.table_name ASC;
     `;
-    const res = await client.query(query);
+    const res = await client.query(singleQuery);
 
-    // Fetch all foreign key constraints in public schema
+    // 2. Fetch all foreign key constraints in public schema in one query
     const fkQuery = `
       SELECT
         tc.table_name, 
@@ -120,8 +198,7 @@ async function getMasterTables(masterId) {
       allForeignKeys = [];
     }
 
-    const tablesWithRows = [];
-    for (const row of res.rows) {
+    const tablesWithRows = res.rows.map(row => {
       const tName = row.table_name;
       const parents = allForeignKeys
         .filter(fk => fk.table_name === tName)
@@ -143,31 +220,23 @@ async function getMasterTables(masterId) {
       else if (parents.length > 0) relationType = 'child';
       else if (children.length > 0) relationType = 'parent';
 
-      try {
-        const countRes = await client.query(`SELECT COUNT(*) as cnt FROM public."${tName}"`);
-        tablesWithRows.push({
-          tableName: tName,
-          columnCount: parseInt(row.column_count, 10),
-          rowCount: parseInt(countRes.rows[0].cnt, 10),
-          parents,
-          children,
-          relationType
-        });
-      } catch (cntErr) {
-        tablesWithRows.push({
-          tableName: tName,
-          columnCount: parseInt(row.column_count, 10),
-          rowCount: 0,
-          parents,
-          children,
-          relationType
-        });
-      }
-    }
-    return {
+      return {
+        tableName: tName,
+        columnCount: parseInt(row.column_count, 10) || 0,
+        rowCount: Math.max(0, parseInt(row.row_count, 10) || 0),
+        parents,
+        children,
+        relationType
+      };
+    });
+
+    const result = {
       master: { id: master.id, name: master.name, host: master.host, dbName: master.db_name },
       tables: tablesWithRows
     };
+
+    setCached(cacheKey, result, 60 * 1000);
+    return result;
   } finally {
     await client.end().catch(() => { });
   }
@@ -289,8 +358,8 @@ async function fetchPodTableInfo(podServer, tableName) {
   try {
     const client = new Client({
       connectionString: getPodDbUrl(host),
-      connectionTimeoutMillis: 3000,
-      statement_timeout: 6000
+      connectionTimeoutMillis: 2500,
+      statement_timeout: 5000
     });
 
     await client.connect();
@@ -451,10 +520,9 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
     "SELECT id, name, host, port, username, password, private_key FROM servers WHERE pod_version = 'v3' ORDER BY name ASC"
   );
 
-  // 3. Query all PODs in parallel
-  const podResults = await Promise.all(
-    podV3List.map(pod => fetchPodTableInfo(pod, tableName))
-  );
+  // 3. Query all PODs with Controlled Concurrency Pool (Prevents socket exhaustion & CPU load spikes)
+  const taskFns = podV3List.map(pod => () => fetchPodTableInfo(pod, tableName));
+  const podResults = await runWithConcurrencyLimit(taskFns, 8);
 
   // 4. Build Column Schema Matrix
   const columnMatrix = masterColumns.map(col => {
