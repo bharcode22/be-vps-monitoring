@@ -1749,6 +1749,8 @@ async function auditFleetDiscrepancies(masterId) {
       columnCount: mTable.columnCount || 0,
       masterRowCount: masterRows,
       relationType: mTable.relationType || 'standalone',
+      parents: mTable.parents || [],
+      children: mTable.children || [],
       isPartitioned,
       isAllSynced,
       hasMissingTables,
@@ -1779,11 +1781,172 @@ async function auditFleetDiscrepancies(masterId) {
   };
 }
 
+/**
+ * 2B. Fetch Dynamic Relational FK Tree for a selected table
+ * Returns parents (dependencies) and children (dependents) with their live row counts
+ */
+async function getTableRelations(masterId, tableName) {
+  if (!masterId || !tableName) throw new Error('Master ID dan Nama Tabel wajib diisi.');
+
+  const masterTablesRes = await getMasterTables(masterId);
+  const allTables = masterTablesRes.tables || [];
+
+  const mainTable = allTables.find(t => t.tableName === tableName);
+  if (!mainTable) throw new Error(`Tabel '${tableName}' tidak ditemukan pada Master Database.`);
+
+  // 1. Map Parent tables (Dependencies that must exist first)
+  const parents = (mainTable.parents || []).map(p => {
+    const parentTableInfo = allTables.find(t => t.tableName === p.foreignTableName);
+    return {
+      tableName: p.foreignTableName,
+      role: 'parent',
+      foreignKeyCol: p.columnName,
+      referencedCol: p.foreignColumnName,
+      columnCount: parentTableInfo?.columnCount || 0,
+      rowCount: parentTableInfo?.rowCount || 0,
+      relationType: parentTableInfo?.relationType || 'standalone'
+    };
+  });
+
+  // 2. Map Child tables (Dependents that reference mainTable)
+  const children = (mainTable.children || []).map(c => {
+    const childTableInfo = allTables.find(t => t.tableName === c.tableName);
+    return {
+      tableName: c.tableName,
+      role: 'child',
+      foreignKeyCol: c.columnName,
+      referencedCol: c.foreignColumnName,
+      columnCount: childTableInfo?.columnCount || 0,
+      rowCount: childTableInfo?.rowCount || 0,
+      relationType: childTableInfo?.relationType || 'standalone'
+    };
+  });
+
+  // Deduplicate parents and children by tableName
+  const uniqueParents = [];
+  const parentMap = new Set();
+  parents.forEach(p => {
+    if (!parentMap.has(p.tableName)) {
+      parentMap.add(p.tableName);
+      uniqueParents.push(p);
+    }
+  });
+
+  const uniqueChildren = [];
+  const childMap = new Set();
+  children.forEach(c => {
+    if (!childMap.has(c.tableName)) {
+      childMap.add(c.tableName);
+      uniqueChildren.push(c);
+    }
+  });
+
+  return {
+    master: masterTablesRes.master,
+    primaryTable: {
+      tableName: mainTable.tableName,
+      role: 'primary',
+      columnCount: mainTable.columnCount,
+      rowCount: mainTable.rowCount,
+      relationType: mainTable.relationType
+    },
+    parents: uniqueParents,
+    children: uniqueChildren,
+    suggestedExecutionOrder: [
+      ...uniqueParents.map(p => p.tableName),
+      mainTable.tableName,
+      ...uniqueChildren.map(c => c.tableName)
+    ]
+  };
+}
+
+/**
+ * 4B. Dynamic Relational Sync: Syncs an ordered set of related tables (Parents -> Primary -> Children)
+ * to target PODs in safe topological sequence.
+ */
+async function syncRelationalTablesToPods({
+  masterId,
+  primaryTable,
+  tablesToSync = [],
+  targetPodIds = [],
+  dryRun = false,
+  syncColumns = true,
+  syncData = true
+}) {
+  if (!masterId || !tablesToSync || tablesToSync.length === 0 || targetPodIds.length === 0) {
+    throw new Error('Master DB, Daftar Tabel Berelasi, dan Target POD wajib ditentukan.');
+  }
+
+  // Normalize tablesToSync to list of { tableName, role }
+  const normalizedTables = tablesToSync.map(item => {
+    if (typeof item === 'string') {
+      const isPrimary = item === primaryTable;
+      return { tableName: item, role: isPrimary ? 'primary' : 'related' };
+    }
+    return item;
+  });
+
+  const tableReports = [];
+  let totalRowsSynced = 0;
+
+  for (const t of normalizedTables) {
+    try {
+      const singleTableResult = await syncMasterTableToPods({
+        masterId,
+        tableName: t.tableName,
+        targetPodIds,
+        dryRun,
+        syncColumns,
+        syncData
+      });
+
+      const rowsCount = singleTableResult.results?.reduce((acc, r) => acc + (r.rowsSynced || 0), 0) || 0;
+      totalRowsSynced += rowsCount;
+
+      tableReports.push({
+        tableName: t.tableName,
+        role: t.role || (t.tableName === primaryTable ? 'primary' : 'related'),
+        success: singleTableResult.success !== false,
+        successfulTargets: singleTableResult.successfulTargets || 0,
+        failedTargets: singleTableResult.failedTargets || 0,
+        totalRowsSynced: rowsCount,
+        results: singleTableResult.results || []
+      });
+    } catch (err) {
+      tableReports.push({
+        tableName: t.tableName,
+        role: t.role || 'related',
+        success: false,
+        successfulTargets: 0,
+        failedTargets: targetPodIds.length,
+        totalRowsSynced: 0,
+        error: err.message
+      });
+    }
+  }
+
+  // Clear cache for updated master
+  clearSchemaCache(masterId);
+
+  return {
+    success: tableReports.every(r => r.success),
+    dryRun,
+    masterId,
+    primaryTable: primaryTable || normalizedTables[0]?.tableName,
+    syncedTablesCount: tableReports.filter(r => r.success).length,
+    totalTablesCount: normalizedTables.length,
+    tableReports,
+    totalRowsSynced
+  };
+}
+
 module.exports = {
   getMasterDatabases,
   getMasterTables,
+  getTableRelations,
   compareMasterTableAcrossPods,
   syncMasterTableToPods,
+  syncRelationalTablesToPods,
   deleteMasterTableRow,
   deletePodTableRow,
   syncSingleMasterRowToPods,

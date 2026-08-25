@@ -223,6 +223,51 @@ const syncSinglePodRow = async (req, res) => {
 };
 
 /**
+ * GET /api/master-pod-sync/relations?masterId=X&table=Y
+ */
+const getTableRelations = async (req, res) => {
+  try {
+    const { masterId, table } = req.query;
+    if (!masterId || !table) {
+      return res.status(400).json({ success: false, error: 'Parameter masterId dan table wajib diisi.' });
+    }
+    const relations = await masterToPodSyncService.getTableRelations(Number(masterId), table);
+    res.json({ success: true, data: relations });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * POST /api/master-pod-sync/sync-relational
+ */
+const syncRelationalTables = async (req, res) => {
+  try {
+    const { masterId, primaryTable, tablesToSync, targetPodIds, dryRun, syncColumns, syncData } = req.body;
+    if (!masterId || !tablesToSync || tablesToSync.length === 0 || !targetPodIds || targetPodIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'masterId, tablesToSync, dan targetPodIds wajib disertakan.'
+      });
+    }
+
+    const result = await masterToPodSyncService.syncRelationalTablesToPods({
+      masterId: Number(masterId),
+      primaryTable,
+      tablesToSync,
+      targetPodIds,
+      dryRun: Boolean(dryRun),
+      syncColumns: syncColumns !== false,
+      syncData: syncData !== false
+    });
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
  * GET /api/master-pod-sync/fleet-audit?masterId=X
  */
 const getFleetAudit = async (req, res) => {
@@ -242,7 +287,9 @@ module.exports = {
   getMasterDatabases,
   getMasterTables,
   getTableComparisonMatrix,
+  getTableRelations,
   performSync,
+  syncRelationalTables,
   deleteMasterRow,
   deletePodRow,
   syncSingleMasterRow,
