@@ -175,6 +175,7 @@ async function getMasterTables(masterId) {
 
 /**
  * Fetch table columns info from a PG connection (including FK relations)
+ * Deduplicates multiple constraint joins so each column is unique.
  */
 async function getTableColumnsFromClient(client, tableName) {
   const query = `
@@ -184,6 +185,7 @@ async function getTableColumnsFromClient(client, tableName) {
       c.is_nullable,
       c.column_default,
       c.character_maximum_length,
+      c.ordinal_position,
       ccu.table_name AS foreign_table_name,
       ccu.column_name AS foreign_column_name
     FROM information_schema.columns c
@@ -202,15 +204,30 @@ async function getTableColumnsFromClient(client, tableName) {
     ORDER BY c.ordinal_position ASC;
   `;
   const res = await client.query(query, [tableName]);
-  return res.rows.map(r => ({
-    column_name: r.column_name,
-    data_type: r.data_type,
-    is_nullable: r.is_nullable,
-    column_default: r.column_default,
-    character_maximum_length: r.character_maximum_length,
-    foreignTable: r.foreign_table_name || null,
-    foreignColumn: r.foreign_column_name || null
-  }));
+  const colMap = new Map();
+
+  for (const r of res.rows) {
+    if (!colMap.has(r.column_name)) {
+      colMap.set(r.column_name, {
+        column_name: r.column_name,
+        data_type: r.data_type,
+        is_nullable: r.is_nullable,
+        column_default: r.column_default,
+        character_maximum_length: r.character_maximum_length,
+        foreignTable: r.foreign_table_name || null,
+        foreignColumn: r.foreign_column_name || null
+      });
+    } else {
+      // If column already seen, enrich with foreign table info if not set yet
+      const existing = colMap.get(r.column_name);
+      if (!existing.foreignTable && r.foreign_table_name) {
+        existing.foreignTable = r.foreign_table_name;
+        existing.foreignColumn = r.foreign_column_name;
+      }
+    }
+  }
+
+  return Array.from(colMap.values());
 }
 
 /**
@@ -1373,7 +1390,7 @@ async function syncSinglePodRowToMaster({
   await masterClient.connect();
   try {
     const masterColumns = await getTableColumnsFromClient(masterClient, tableName);
-    const colNames = masterColumns.map(c => c.column_name);
+    const colNames = Array.from(new Set(masterColumns.map(c => c.column_name)));
     const colListStr = colNames.map(c => `"${c}"`).join(', ');
     const conflictCol = colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : pkColumn);
     const updateSet = colNames
