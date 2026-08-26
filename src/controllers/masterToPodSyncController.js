@@ -284,6 +284,38 @@ const getFleetAudit = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/master-pod-sync/clean-master-duplicates
+ */
+const cleanMasterDuplicates = async (req, res) => {
+  try {
+    const { masterId, tableName, conflictCols } = req.body;
+    if (!masterId || !tableName || !conflictCols) {
+      return res.status(400).json({ success: false, error: 'masterId, tableName, dan conflictCols wajib diisi.' });
+    }
+    const result = await masterToPodSyncService.cleanMasterDuplicates(Number(masterId), tableName, conflictCols);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * POST /api/master-pod-sync/check-master-duplicates
+ */
+const checkMasterDuplicates = async (req, res) => {
+  try {
+    const { masterId, tableName, conflictCols } = req.body;
+    if (!masterId || !tableName || !conflictCols) {
+      return res.status(400).json({ success: false, error: 'masterId, tableName, dan conflictCols wajib diisi.' });
+    }
+    const result = await masterToPodSyncService.checkMasterDuplicates(Number(masterId), tableName, conflictCols);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 module.exports = {
   getMasterDatabases,
   getMasterTables,
@@ -296,5 +328,7 @@ module.exports = {
   syncSingleMasterRow,
   syncPodToMaster,
   syncSinglePodRow,
-  getFleetAudit
+  getFleetAudit,
+  checkMasterDuplicates,
+  cleanMasterDuplicates
 };

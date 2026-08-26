@@ -17,6 +17,8 @@ const heartbeatController = require('../controllers/heartbeatController');
 const contentController = require('../controllers/contentController');
 const podTopicController = require('../controllers/podTopicController');
 const masterToPodSyncController = require('../controllers/masterToPodSyncController');
+const tncSyncController = require('../controllers/tncSyncController');
+const masterCrudController = require('../controllers/masterCrudController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // 1. Health check & Settings
@@ -84,7 +86,16 @@ router.post('/vps/storage/docker/inspect-all', requireAuth, contentController.in
 router.post('/vps/storage/docker/cleanup', requireAuth, contentController.cleanupSinglePodDocker);
 router.post('/vps/storage/docker/cleanup-batch', requireAuth, contentController.cleanupBatchPodsDocker);
 
-// Rogue Media Scanner
+// --- T&C / User Sync (Batch Ops) ---
+router.post('/tnc-sync/publish-definitions', requireAuth, tncSyncController.publishDefinitions);
+router.post('/tnc-sync/pull-consents', requireAuth, tncSyncController.pullConsentsAndDistribute);
+
+// --- Master Data CRUD ---
+router.get('/master-crud/:masterId/:tableName', requireAuth, masterCrudController.getMasterTableData);
+router.post('/master-crud/:masterId/:tableName', requireAuth, masterCrudController.createMasterRow);
+router.put('/master-crud/:masterId/:tableName', requireAuth, masterCrudController.updateMasterRow);
+
+// --- Media Scanner ---
 router.get('/vps/content/pod-rogue-files', requireAuth, contentController.scanAllPodsRogueFiles);
 router.post('/vps/content/pod-rogue-files/cleanup', requireAuth, contentController.cleanupRogueFiles);
 
@@ -153,6 +164,8 @@ router.post('/master-pod-sync/sync-relational', requireAuth, masterToPodSyncCont
 router.post('/master-pod-sync/sync-single-row', requireAuth, masterToPodSyncController.syncSingleMasterRow);
 router.post('/master-pod-sync/pod-to-master', requireAuth, masterToPodSyncController.syncPodToMaster);
 router.post('/master-pod-sync/sync-single-pod-row', requireAuth, masterToPodSyncController.syncSinglePodRow);
+router.post('/master-pod-sync/check-master-duplicates', requireAuth, masterToPodSyncController.checkMasterDuplicates);
+router.post('/master-pod-sync/clean-master-duplicates', requireAuth, masterToPodSyncController.cleanMasterDuplicates);
 router.delete('/master-pod-sync/master-row', requireAuth, masterToPodSyncController.deleteMasterRow);
 router.delete('/master-pod-sync/pod-row', requireAuth, masterToPodSyncController.deletePodRow);
 

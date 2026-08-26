@@ -318,10 +318,22 @@ async function executeBatchUpsert({
   const uniqueCols = Array.from(new Set(colNames));
   const colListStr = uniqueCols.map(c => `"${c}"`).join(', ');
 
+  const conflictColsArray = Array.isArray(conflictCol) ? conflictCol : [conflictCol];
+  const conflictStr = conflictColsArray.map(c => `"${c.trim()}"`).join(', ');
+
+  // PostgreSQL 'ON CONFLICT DO UPDATE' fails if the same batch contains duplicate conflict keys.
+  // We must deduplicate the rows based on the conflict columns, keeping the last occurrence.
+  const deduplicatedMap = new Map();
+  for (const row of rows) {
+    const key = conflictColsArray.map(c => row[c]).join('_|||_');
+    deduplicatedMap.set(key, row);
+  }
+  const uniqueRows = Array.from(deduplicatedMap.values());
+
   let processedCount = 0;
 
-  for (let i = 0; i < rows.length; i += batchSize) {
-    const chunk = rows.slice(i, i + batchSize);
+  for (let i = 0; i < uniqueRows.length; i += batchSize) {
+    const chunk = uniqueRows.slice(i, i + batchSize);
     const valuePlaceholders = [];
     const values = [];
 
@@ -334,11 +346,13 @@ async function executeBatchUpsert({
       valuePlaceholders.push(`(${rowPlaceholders.join(', ')})`);
     });
 
+
+
     let upsertSql = `INSERT INTO public."${tableName}" (${colListStr}) VALUES ${valuePlaceholders.join(', ')}`;
     if (updateSet) {
-      upsertSql += ` ON CONFLICT ("${conflictCol}") DO UPDATE SET ${updateSet}`;
+      upsertSql += ` ON CONFLICT (${conflictStr}) DO UPDATE SET ${updateSet}`;
     } else {
-      upsertSql += ` ON CONFLICT ("${conflictCol}") DO NOTHING`;
+      upsertSql += ` ON CONFLICT (${conflictStr}) DO NOTHING`;
     }
 
     await client.query(upsertSql, values);
@@ -910,9 +924,15 @@ async function syncMasterTableToPods({ masterId, tableName, targetPodIds = [], d
 
         if (syncData && rowsToSync.length > 0) {
           const colNames = Array.from(new Set(masterColumns.map(c => c.column_name)));
-          const conflictCol = colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : pkColumn);
+          let conflictCol = colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : pkColumn);
+          
+          if (tableName === 'terms_and_conditions_answers') {
+            conflictCol = ['fk_user_id', 'fk_question_id'];
+          }
+
+          const conflictColsArray = Array.isArray(conflictCol) ? conflictCol : [conflictCol];
           const updateSet = colNames
-            .filter(c => c !== conflictCol && c !== 'id')
+            .filter(c => !conflictColsArray.includes(c) && c !== 'id')
             .map(c => `"${c}" = EXCLUDED."${c}"`)
             .join(', ');
 
@@ -2012,6 +2032,106 @@ async function syncRelationalTablesToPods({
   };
 }
 
+/**
+ * Clean Duplicate Data from Master Database
+ */
+async function cleanMasterDuplicates(masterId, tableName, conflictColsArray) {
+  if (!masterId || !tableName || !conflictColsArray || conflictColsArray.length === 0) {
+    throw new Error('Master DB, Nama Tabel, dan Kolom Unik wajib diisi.');
+  }
+
+  const master = await dbAsync.get('SELECT * FROM databases_postgres WHERE id = ?', [masterId]);
+  if (!master) throw new Error('Master DB tidak ditemukan.');
+
+  const client = createMasterClient(master);
+  await client.connect();
+
+  let deletedCount = 0;
+  try {
+    const colsStr = conflictColsArray.map(c => `"${c.trim()}"`).join(', ');
+    
+    // We keep the row with the maximum ctid (latest inserted version) and delete the rest
+    const deleteSql = `
+      DELETE FROM public."${tableName}"
+      WHERE ctid NOT IN (
+        SELECT max(ctid)
+        FROM public."${tableName}"
+        GROUP BY ${colsStr}
+      );
+    `;
+
+    await client.query('BEGIN');
+    const res = await client.query(deleteSql);
+    deletedCount = res.rowCount;
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    await client.end().catch(() => {});
+  }
+
+  return { success: true, deletedCount };
+}
+
+/**
+ * Check Duplicate Data from Master Database
+ */
+async function checkMasterDuplicates(masterId, tableName, conflictColsArray) {
+  if (!masterId || !tableName || !conflictColsArray || conflictColsArray.length === 0) {
+    throw new Error('Master DB, Nama Tabel, dan Kolom Unik wajib diisi.');
+  }
+
+  const master = await dbAsync.get('SELECT * FROM databases_postgres WHERE id = ?', [masterId]);
+  if (!master) throw new Error('Master DB tidak ditemukan.');
+
+  const client = createMasterClient(master);
+  await client.connect();
+
+  try {
+    const colsStr = conflictColsArray.map(c => `"${c.trim()}"`).join(', ');
+    
+    const sampleQuery = `
+      SELECT ${colsStr}, COUNT(*) as duplicate_count
+      FROM public."${tableName}"
+      GROUP BY ${colsStr}
+      HAVING COUNT(*) > 1
+      ORDER BY duplicate_count DESC
+      LIMIT 5
+    `;
+    
+    const totalsQuery = `
+      WITH DuplicateGroups AS (
+        SELECT COUNT(*) as cnt
+        FROM public."${tableName}"
+        GROUP BY ${colsStr}
+        HAVING COUNT(*) > 1
+      )
+      SELECT 
+        COALESCE(SUM(cnt), 0) as total_duplicate_rows, 
+        COALESCE(SUM(cnt - 1), 0) as rows_to_delete
+      FROM DuplicateGroups
+    `;
+
+    const [sampleRes, totalsRes] = await Promise.all([
+      client.query(sampleQuery),
+      client.query(totalsQuery)
+    ]);
+
+    const totals = totalsRes.rows[0] || { total_duplicate_rows: 0, rows_to_delete: 0 };
+    
+    return {
+      success: true,
+      hasDuplicates: parseInt(totals.rows_to_delete, 10) > 0,
+      totalDuplicateRows: parseInt(totals.total_duplicate_rows, 10),
+      rowsToDelete: parseInt(totals.rows_to_delete, 10),
+      sampleRows: sampleRes.rows
+    };
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
 module.exports = {
   getMasterDatabases,
   getMasterTables,
@@ -2025,6 +2145,8 @@ module.exports = {
   syncPodTableToMaster,
   syncSinglePodRowToMaster,
   auditFleetDiscrepancies,
+  checkMasterDuplicates,
+  cleanMasterDuplicates,
   clearSchemaCache
 };
 
