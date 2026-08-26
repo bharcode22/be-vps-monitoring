@@ -39,6 +39,37 @@ function createMasterClient(masterRecord) {
 }
 
 /**
+ * Helper to determine unique conflict key columns for tables.
+ * For example, tables with compound FK unique constraints like terms_and_conditions_answers
+ * must conflict on (fk_user_id, fk_question_id) to match POD DB unique index.
+ */
+function getTableConflictColumns(tableName, colNames = [], pkColumn = 'id') {
+  if (tableName === 'terms_and_conditions_answers') {
+    if (colNames.includes('fk_user_id') && colNames.includes('fk_question_id')) {
+      return ['fk_user_id', 'fk_question_id'];
+    }
+  }
+  if (tableName === 'terms_and_conditions_accepted') {
+    if (colNames.includes('fk_user_id') && colNames.includes('fk_terms_and_conditions_version_id')) {
+      return ['fk_user_id', 'fk_terms_and_conditions_version_id'];
+    }
+  }
+  if (tableName === 'terms_and_conditions_version_question') {
+    if (colNames.includes('fk_terms_and_conditions_version_id') && colNames.includes('fk_question_id')) {
+      return ['fk_terms_and_conditions_version_id', 'fk_question_id'];
+    }
+  }
+  if (tableName === 'terms_and_conditions_question_bundle') {
+    if (colNames.includes('fk_question_id') && colNames.includes('fk_terms_and_conditions_version_id')) {
+      return ['fk_question_id', 'fk_terms_and_conditions_version_id'];
+    }
+  }
+  if (colNames.includes('key')) return ['key'];
+  if (colNames.includes('topic')) return ['topic'];
+  return [pkColumn || 'id'];
+}
+
+/**
  * Helper to filter rows for partitioned tables like 'pod'
  */
 function filterRowsForPod(tableName, rows, podServer) {
@@ -321,10 +352,18 @@ async function executeBatchUpsert({
   const conflictColsArray = Array.isArray(conflictCol) ? conflictCol : [conflictCol];
   const conflictStr = conflictColsArray.map(c => `"${c.trim()}"`).join(', ');
 
-  // PostgreSQL 'ON CONFLICT DO UPDATE' fails if the same batch contains duplicate conflict keys.
-  // We must deduplicate the rows based on the conflict columns, keeping the last occurrence.
+  // Sort rows to prioritize latest answer_date / updated_at / created_at / id before deduplication
+  const sortedRows = [...rows].sort((a, b) => {
+    if (a.answer_date && b.answer_date) return new Date(a.answer_date) - new Date(b.answer_date);
+    if (a.accepted_date && b.accepted_date) return new Date(a.accepted_date) - new Date(b.accepted_date);
+    if (a.updated_at && b.updated_at) return new Date(a.updated_at) - new Date(b.updated_at);
+    if (a.created_at && b.created_at) return new Date(a.created_at) - new Date(b.created_at);
+    if (a.id && b.id) return a.id - b.id;
+    return 0;
+  });
+
   const deduplicatedMap = new Map();
-  for (const row of rows) {
+  for (const row of sortedRows) {
     const key = conflictColsArray.map(c => row[c]).join('_|||_');
     deduplicatedMap.set(key, row);
   }
@@ -676,7 +715,7 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
     } catch (err) {
       console.error(`[Matrix Sync] Error verifying missing master rows for ${tableName}:`, err.message);
     } finally {
-      await masterClientVerification.end().catch(() => {});
+      await masterClientVerification.end().catch(() => { });
     }
   }
 
@@ -924,13 +963,8 @@ async function syncMasterTableToPods({ masterId, tableName, targetPodIds = [], d
 
         if (syncData && rowsToSync.length > 0) {
           const colNames = Array.from(new Set(masterColumns.map(c => c.column_name)));
-          let conflictCol = colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : pkColumn);
-          
-          if (tableName === 'terms_and_conditions_answers') {
-            conflictCol = ['fk_user_id', 'fk_question_id'];
-          }
-
-          const conflictColsArray = Array.isArray(conflictCol) ? conflictCol : [conflictCol];
+          const conflictCols = getTableConflictColumns(tableName, colNames, pkColumn);
+          const conflictColsArray = Array.isArray(conflictCols) ? conflictCols : [conflictCols];
           const updateSet = colNames
             .filter(c => !conflictColsArray.includes(c) && c !== 'id')
             .map(c => `"${c}" = EXCLUDED."${c}"`)
@@ -942,7 +976,7 @@ async function syncMasterTableToPods({ masterId, tableName, targetPodIds = [], d
               tableName,
               colNames,
               rows: rowsToSync,
-              conflictCol,
+              conflictCol: conflictColsArray,
               updateSet,
               batchSize: 150
             });
@@ -1236,9 +1270,10 @@ async function syncSingleMasterRowToPods({ masterId, tableName, pkColumn = 'id',
 
   const colNames = masterColumns.map(c => c.column_name);
   const colListStr = colNames.map(c => `"${c}"`).join(', ');
-  const conflictCol = colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : pkColumn);
+  const conflictCols = getTableConflictColumns(tableName, colNames, pkColumn);
+  const conflictStr = conflictCols.map(c => `"${c.trim()}"`).join(', ');
   const updateSet = colNames
-    .filter(c => c !== conflictCol && c !== 'id')
+    .filter(c => !conflictCols.includes(c) && c !== 'id')
     .map(c => `"${c}" = EXCLUDED."${c}"`)
     .join(', ');
 
@@ -1247,9 +1282,9 @@ async function syncSingleMasterRowToPods({ masterId, tableName, pkColumn = 'id',
 
   let upsertSql = `INSERT INTO public."${tableName}" (${colListStr}) VALUES (${placeholders})`;
   if (updateSet) {
-    upsertSql += ` ON CONFLICT ("${conflictCol}") DO UPDATE SET ${updateSet}`;
+    upsertSql += ` ON CONFLICT (${conflictStr}) DO UPDATE SET ${updateSet}`;
   } else {
-    upsertSql += ` ON CONFLICT ("${conflictCol}") DO NOTHING`;
+    upsertSql += ` ON CONFLICT (${conflictStr}) DO NOTHING`;
   }
 
   const results = [];
@@ -1298,15 +1333,16 @@ async function syncSingleMasterRowToPods({ masterId, tableName, pkColumn = 'id',
           return `'${String(val).replace(/'/g, "''")}'`;
         }).join(', ');
 
+        const sshConflictStr = conflictCols.map(c => `\\\\"${c.trim()}\\\\"`).join(', ');
         let sshUpsert = `INSERT INTO public.\\"${tableName}\\" (${colNames.map(c => `\\"${c}\\"`).join(', ')}) VALUES (${escapedValues})`;
         if (updateSet) {
           const sshUpdateSet = colNames
-            .filter(c => c !== conflictCol && c !== 'id')
+            .filter(c => !conflictCols.includes(c) && c !== 'id')
             .map(c => `\\"${c}\\" = EXCLUDED.\\"${c}\\"`)
             .join(', ');
-          sshUpsert += ` ON CONFLICT (\\"${conflictCol}\\") DO UPDATE SET ${sshUpdateSet};`;
+          sshUpsert += ` ON CONFLICT (${sshConflictStr}) DO UPDATE SET ${sshUpdateSet};`;
         } else {
-          sshUpsert += ` ON CONFLICT (\\"${conflictCol}\\") DO NOTHING;`;
+          sshUpsert += ` ON CONFLICT (${sshConflictStr}) DO NOTHING;`;
         }
 
         await executeSshCommand(pod, `psql -U ${POD_DB_USER} -d ${POD_DB_NAME} -c "${sshUpsert}"`);
@@ -1383,9 +1419,10 @@ async function syncPodTableToMaster({
   }
 
   const colNames = Array.from(new Set(masterColumns.map(c => c.column_name)));
-  const conflictCol = colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : pkColumn);
+  const conflictCols = getTableConflictColumns(tableName, colNames, pkColumn);
+  const conflictColsArray = Array.isArray(conflictCols) ? conflictCols : [conflictCols];
   const updateSet = colNames
-    .filter(c => c !== conflictCol && c !== 'id')
+    .filter(c => !conflictColsArray.includes(c) && c !== 'id')
     .map(c => `"${c}" = EXCLUDED."${c}"`)
     .join(', ');
 
@@ -1451,7 +1488,7 @@ async function syncPodTableToMaster({
         tableName,
         colNames,
         rows: podRows,
-        conflictCol,
+        conflictCol: conflictColsArray,
         updateSet,
         batchSize: 150
       });
@@ -1572,12 +1609,11 @@ async function syncSinglePodRowToMaster({
     const colNames = Array.from(new Set(masterColumns.map(c => c.column_name)));
     const colListStr = colNames.map(c => `"${c}"`).join(', ');
 
-    const conflictCol = pkColumn && colNames.includes(pkColumn)
-      ? pkColumn
-      : (colNames.includes('id') ? 'id' : (colNames.includes('key') ? 'key' : (colNames.includes('topic') ? 'topic' : colNames[0])));
+    const conflictCols = getTableConflictColumns(tableName, colNames, pkColumn);
+    const conflictStr = conflictCols.map(c => `"${c.trim()}"`).join(', ');
 
     const updateSet = colNames
-      .filter(c => c !== conflictCol && c !== 'id')
+      .filter(c => !conflictCols.includes(c) && c !== 'id')
       .map(c => `"${c}" = EXCLUDED."${c}"`)
       .join(', ');
 
@@ -1586,9 +1622,9 @@ async function syncSinglePodRowToMaster({
 
     let upsertSql = `INSERT INTO public."${tableName}" (${colListStr}) VALUES (${placeholders})`;
     if (updateSet) {
-      upsertSql += ` ON CONFLICT ("${conflictCol}") DO UPDATE SET ${updateSet}`;
+      upsertSql += ` ON CONFLICT (${conflictStr}) DO UPDATE SET ${updateSet}`;
     } else {
-      upsertSql += ` ON CONFLICT ("${conflictCol}") DO NOTHING`;
+      upsertSql += ` ON CONFLICT (${conflictStr}) DO NOTHING`;
     }
 
     await masterClient.query('BEGIN');
@@ -1684,7 +1720,7 @@ async function fetchPodFleetTableCounts(podServer) {
         tablesMap
       };
     } finally {
-      await client.end().catch(() => {});
+      await client.end().catch(() => { });
     }
   } catch (directErr) {
     // 2. SSH Fallback
@@ -2049,7 +2085,7 @@ async function cleanMasterDuplicates(masterId, tableName, conflictColsArray) {
   let deletedCount = 0;
   try {
     const colsStr = conflictColsArray.map(c => `"${c.trim()}"`).join(', ');
-    
+
     // We keep the row with the maximum ctid (latest inserted version) and delete the rest
     const deleteSql = `
       DELETE FROM public."${tableName}"
@@ -2065,10 +2101,10 @@ async function cleanMasterDuplicates(masterId, tableName, conflictColsArray) {
     deletedCount = res.rowCount;
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => { });
     throw err;
   } finally {
-    await client.end().catch(() => {});
+    await client.end().catch(() => { });
   }
 
   return { success: true, deletedCount };
@@ -2090,7 +2126,7 @@ async function checkMasterDuplicates(masterId, tableName, conflictColsArray) {
 
   try {
     const colsStr = conflictColsArray.map(c => `"${c.trim()}"`).join(', ');
-    
+
     const sampleQuery = `
       SELECT ${colsStr}, COUNT(*) as duplicate_count
       FROM public."${tableName}"
@@ -2099,7 +2135,7 @@ async function checkMasterDuplicates(masterId, tableName, conflictColsArray) {
       ORDER BY duplicate_count DESC
       LIMIT 5
     `;
-    
+
     const totalsQuery = `
       WITH DuplicateGroups AS (
         SELECT COUNT(*) as cnt
@@ -2119,7 +2155,7 @@ async function checkMasterDuplicates(masterId, tableName, conflictColsArray) {
     ]);
 
     const totals = totalsRes.rows[0] || { total_duplicate_rows: 0, rows_to_delete: 0 };
-    
+
     return {
       success: true,
       hasDuplicates: parseInt(totals.rows_to_delete, 10) > 0,
@@ -2128,7 +2164,7 @@ async function checkMasterDuplicates(masterId, tableName, conflictColsArray) {
       sampleRows: sampleRes.rows
     };
   } finally {
-    await client.end().catch(() => {});
+    await client.end().catch(() => { });
   }
 }
 
