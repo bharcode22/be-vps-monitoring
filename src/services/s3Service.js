@@ -306,6 +306,45 @@ async function deleteS3CodeFolder(code) {
   };
 }
 
+/**
+ * Recursively list all filenames in the S3 media bucket
+ */
+async function listAllS3Filenames() {
+  const client = getS3Client();
+  const bucket = getBucketName();
+  const prefix = getBasePath();
+
+  const filenames = new Set();
+  let continuationToken = undefined;
+
+  try {
+    do {
+      const command = new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix,
+        ContinuationToken: continuationToken
+      });
+      const response = await client.send(command);
+      
+      if (response.Contents) {
+        for (const item of response.Contents) {
+          if (item.Key && !item.Key.endsWith('/')) {
+            const basename = path.basename(item.Key).toLowerCase();
+            filenames.add(basename);
+          }
+        }
+      }
+      
+      continuationToken = response.NextContinuationToken;
+    } while (continuationToken);
+
+    return Array.from(filenames);
+  } catch (error) {
+    console.error('Error fetching all S3 filenames:', error.message);
+    throw error;
+  }
+}
+
 module.exports = {
   getS3Client,
   getBucketName,
@@ -314,6 +353,6 @@ module.exports = {
   formatBytes,
   listS3MediaFolders,
   listS3FolderFiles,
-  deleteS3CodeFolder
+  deleteS3CodeFolder,
+  listAllS3Filenames
 };
-

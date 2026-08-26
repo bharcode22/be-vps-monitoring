@@ -935,6 +935,76 @@ async function cleanPodDockerStorage(server, cleanType = 'safe') {
   };
 }
 
+/**
+ * Detect rogue physical files on POD that are not in S3 nor in master database
+ */
+async function detectPodRogueFiles(server, validFilenamesSet) {
+  const physicalFiles = await scanPodPhysicalFiles(server);
+
+  const whitelist = new Set([
+    'metadata.json',
+    'metadata.json.bak',
+    '.env',
+    '.gitignore',
+    'readme.md'
+  ]);
+
+  let totalRogueBytes = 0;
+  const categorized = physicalFiles.map(file => {
+    const fnLower = file.filename.toLowerCase();
+
+    if (whitelist.has(fnLower)) {
+      return { ...file, isRogue: false, isProtected: true, status: 'protected' };
+    }
+
+    if (validFilenamesSet.size > 0) {
+      const isMatched = validFilenamesSet.has(fnLower);
+      if (!isMatched) {
+        totalRogueBytes += file.sizeBytes;
+        return {
+          ...file,
+          isRogue: true,
+          isProtected: false,
+          status: 'rogue',
+          reason: 'Tidak terdaftar di AWS S3 maupun tabel multimedia Master'
+        };
+      }
+      return {
+        ...file,
+        isRogue: false,
+        isProtected: false,
+        status: 'active',
+        reason: 'Terdaftar sebagai media valid'
+      };
+    }
+
+    return {
+      ...file,
+      isRogue: false,
+      isProtected: false,
+      status: 'unverified',
+      reason: 'Belum diverifikasi'
+    };
+  });
+
+  const rogueFiles = categorized.filter(f => f.isRogue);
+  const activeFiles = categorized.filter(f => !f.isRogue);
+
+  // We need formatBytes which is at the top of the file
+  return {
+    serverId: server.id,
+    serverName: server.name,
+    totalFiles: categorized.length,
+    totalSizeBytes: categorized.reduce((acc, f) => acc + f.sizeBytes, 0),
+    totalSizeFormatted: formatBytes(categorized.reduce((acc, f) => acc + f.sizeBytes, 0)),
+    rogueFilesCount: rogueFiles.length,
+    rogueTotalBytes: totalRogueBytes,
+    rogueTotalFormatted: formatBytes(totalRogueBytes),
+    activeFilesCount: activeFiles.length,
+    files: categorized
+  };
+}
+
 module.exports = {
   executeCommand,
   getPodStorageSummary,
@@ -946,6 +1016,7 @@ module.exports = {
   getMimeType,
   streamPodPhysicalFile,
   inspectPodDockerStorage,
-  cleanPodDockerStorage
+  cleanPodDockerStorage,
+  detectPodRogueFiles
 };
 

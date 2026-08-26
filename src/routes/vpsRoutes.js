@@ -84,7 +84,9 @@ router.post('/vps/storage/docker/inspect-all', requireAuth, contentController.in
 router.post('/vps/storage/docker/cleanup', requireAuth, contentController.cleanupSinglePodDocker);
 router.post('/vps/storage/docker/cleanup-batch', requireAuth, contentController.cleanupBatchPodsDocker);
 
-
+// Rogue Media Scanner
+router.get('/vps/content/pod-rogue-files', requireAuth, contentController.scanAllPodsRogueFiles);
+router.post('/vps/content/pod-rogue-files/cleanup', requireAuth, contentController.cleanupRogueFiles);
 
 // 7. Category-specific Static CRUD routes
 router.get('/vps/vps', optionalAuth, vpsController.getVpsServers);

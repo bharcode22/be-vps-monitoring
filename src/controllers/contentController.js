@@ -1,5 +1,5 @@
 const dbAsync = require('../services/db');
-const { listS3MediaFolders, listS3FolderFiles, deleteS3CodeFolder, formatBytes } = require('../services/s3Service');
+const { listS3MediaFolders, listS3FolderFiles, deleteS3CodeFolder, formatBytes, listAllS3Filenames } = require('../services/s3Service');
 const {
   getPodStorageSummary,
   scanPodPhysicalFiles,
@@ -10,8 +10,11 @@ const {
   streamPodPhysicalFile,
   inspectPodDockerStorage,
   cleanPodDockerStorage,
-  executeCommand
+  executeCommand,
+  detectPodRogueFiles
 } = require('../services/podStorageService');
+
+const { getMultimediaSoundScapes, getValidMultimediaFilenames } = require('../services/masterDbService');
 
 /**
  * 1. Get list of all code folders in AWS S3 media/
@@ -19,6 +22,21 @@ const {
 const getS3Folders = async (req, res) => {
   try {
     const data = await listS3MediaFolders();
+
+    try {
+      const soundScapes = await getMultimediaSoundScapes();
+      const soundScapeSet = new Set(soundScapes);
+
+      if (data && Array.isArray(data.folders)) {
+        data.folders = data.folders.map(folder => ({
+          ...folder,
+          isOrphan: !soundScapeSet.has(folder.code)
+        }));
+      }
+    } catch (dbErr) {
+      console.error('Failed to cross-reference orphans with master DB:', dbErr.message);
+    }
+
     res.json({ success: true, data });
   } catch (err) {
     console.error('Error fetching S3 folders:', err.message);
@@ -582,6 +600,60 @@ const cleanupBatchPodsDocker = async (req, res) => {
   }
 };
 
+/**
+ * 12. Scan ALL Pods for Rogue Files
+ */
+const scanAllPodsRogueFiles = async (req, res) => {
+  try {
+    const servers = await dbAsync.all("SELECT * FROM servers WHERE type='pod' AND pod_version='v3'");
+    
+    // Fetch whitelist once
+    const [s3Filenames, dbFilenames] = await Promise.all([
+      listAllS3Filenames(),
+      getValidMultimediaFilenames()
+    ]);
+    
+    const validFilenamesSet = new Set([...s3Filenames, ...dbFilenames]);
+    
+    // Scan all pods concurrently
+    const results = await Promise.all(
+      servers.map(async server => {
+        try {
+          return await detectPodRogueFiles(server, validFilenamesSet);
+        } catch (e) {
+          console.error(`Error scanning rogue files on server ${server.id}:`, e.message);
+          return { serverId: server.id, serverName: server.name, error: e.message };
+        }
+      })
+    );
+    
+    res.json({ success: true, data: results });
+  } catch (err) {
+    console.error('Error scanning rogue files:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * 13. Cleanup Rogue Files on a specific POD
+ */
+const cleanupRogueFiles = async (req, res) => {
+  try {
+    const { serverId, filePaths, isDryRun } = req.body;
+    if (!serverId) return res.status(400).json({ success: false, error: 'serverId is required' });
+    
+    const server = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
+    if (!server) return res.status(404).json({ success: false, error: 'Server not found' });
+    
+    // Re-use cleanupPodJunkFiles as it safely deletes files via SSH
+    const result = await cleanupPodJunkFiles(server, filePaths, isDryRun !== false);
+    res.json(result);
+  } catch (err) {
+    console.error('Error cleaning rogue files:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 module.exports = {
   getS3Folders,
   getS3FolderFiles,
@@ -597,7 +669,9 @@ module.exports = {
   inspectSinglePodDocker,
   inspectAllPodsDocker,
   cleanupSinglePodDocker,
-  cleanupBatchPodsDocker
+  cleanupBatchPodsDocker,
+  scanAllPodsRogueFiles,
+  cleanupRogueFiles
 };
 
 
