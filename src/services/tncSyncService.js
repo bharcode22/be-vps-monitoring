@@ -8,13 +8,13 @@ const TOP_DOWN_TABLES = [
   'terms_and_conditions_question_bundle',
   'terms_and_conditions_question_history',
   'terms_and_conditions_version_question',
-  'terms_and_conditions'
+  'terms_and_conditions',
+  'matrix_user',
+  'matrix_user_history'
 ];
 
 const BOTTOM_UP_TABLES = [
   'user',
-  'matrix_user',
-  'matrix_user_history',
   'terms_and_conditions_accepted',
   'terms_and_conditions_accepted_history',
   'terms_and_conditions_answers',
@@ -25,11 +25,10 @@ const BOTTOM_UP_TABLES = [
  * Publishes T&C Definitions from Master down to all (or specific) PODs.
  */
 async function publishDefinitions(masterId, targetPodIds) {
-  let allPods = targetPodIds;
+  let allPods = Array.isArray(targetPodIds) && targetPodIds.length > 0 ? targetPodIds : [];
   
-  if (!allPods || allPods.length === 0) {
-    // If no target pods provided, default to ALL pods connected to this master
-    const podsData = await dbAsync.all('SELECT id FROM databases_postgres WHERE master_id = ?', [masterId]);
+  if (allPods.length === 0) {
+    const podsData = await dbAsync.all("SELECT id FROM servers WHERE pod_version = 'v3' ORDER BY name ASC");
     allPods = podsData.map(p => p.id);
   }
 
@@ -37,17 +36,19 @@ async function publishDefinitions(masterId, targetPodIds) {
 
   for (const tableName of TOP_DOWN_TABLES) {
     try {
-      const syncResult = await masterToPodSyncService.syncMasterTableToPods(
-        masterId,
+      const syncResult = await masterToPodSyncService.syncMasterTableToPods({
+        masterId: Number(masterId),
         tableName,
-        allPods,
-        false // Dry run = false
-      );
+        targetPodIds: allPods,
+        dryRun: false,
+        syncColumns: true,
+        syncData: true
+      });
       results.push({ tableName, success: true, ...syncResult });
     } catch (err) {
       results.push({ tableName, success: false, error: err.message });
-      // If a foundational table fails, we should probably stop the pipeline to avoid FK cascade errors
-      break; 
+      // Stop to prevent broken foreign key cascades
+      break;
     }
   }
 
@@ -56,13 +57,13 @@ async function publishDefinitions(masterId, targetPodIds) {
 
 /**
  * Pulls user and consent data from all PODs up to Master, 
- * and then optionally distributes the consolidated data back to all PODs.
+ * and then distributes the consolidated data back to all PODs.
  */
 async function pullConsentsAndDistribute(masterId, sourcePodIds) {
-  let allPods = sourcePodIds;
+  let allPods = Array.isArray(sourcePodIds) && sourcePodIds.length > 0 ? sourcePodIds : [];
   
-  if (!allPods || allPods.length === 0) {
-    const podsData = await dbAsync.all('SELECT id FROM databases_postgres WHERE master_id = ?', [masterId]);
+  if (allPods.length === 0) {
+    const podsData = await dbAsync.all("SELECT id FROM servers WHERE pod_version = 'v3' ORDER BY name ASC");
     allPods = podsData.map(p => p.id);
   }
 
@@ -70,37 +71,39 @@ async function pullConsentsAndDistribute(masterId, sourcePodIds) {
 
   // Phase 1: PULL (POD -> Master)
   for (const tableName of BOTTOM_UP_TABLES) {
-    try {
-      const pullResult = await masterToPodSyncService.syncPodTableToMaster(
-        masterId,
-        tableName,
-        allPods,
-        false // dryRun
-      );
-      results.push({ tableName, stage: 'PULL', success: true, ...pullResult });
-    } catch (err) {
-      results.push({ tableName, stage: 'PULL', success: false, error: err.message });
-      break; // Stop if parent table fails
+    for (const podId of allPods) {
+      try {
+        const pullResult = await masterToPodSyncService.syncPodTableToMaster({
+          masterId: Number(masterId),
+          serverId: podId,
+          tableName,
+          dryRun: false
+        });
+        results.push({ tableName, serverId: podId, stage: 'PULL', success: true, ...pullResult });
+      } catch (err) {
+        results.push({ tableName, serverId: podId, stage: 'PULL', success: false, error: err.message });
+      }
     }
   }
 
-  const hasPullErrors = results.some(r => !r.success);
+  const hasPullErrors = results.some(r => r.stage === 'PULL' && !r.success);
 
-  // Phase 2: DISTRIBUTE (Master -> POD) 
-  // Only if pull was entirely successful to avoid distributing incomplete data
-  if (!hasPullErrors) {
+  // Phase 2: DISTRIBUTE (Master -> POD)
+  if (!hasPullErrors && allPods.length > 0) {
     for (const tableName of BOTTOM_UP_TABLES) {
       try {
-        const distributeResult = await masterToPodSyncService.syncMasterTableToPods(
-          masterId,
+        const distributeResult = await masterToPodSyncService.syncMasterTableToPods({
+          masterId: Number(masterId),
           tableName,
-          allPods,
-          false // dryRun
-        );
+          targetPodIds: allPods,
+          dryRun: false,
+          syncColumns: true,
+          syncData: true
+        });
         results.push({ tableName, stage: 'DISTRIBUTE', success: true, ...distributeResult });
       } catch (err) {
         results.push({ tableName, stage: 'DISTRIBUTE', success: false, error: err.message });
-        break; 
+        break;
       }
     }
   }
