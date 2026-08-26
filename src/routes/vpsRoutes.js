@@ -91,9 +91,13 @@ router.post('/tnc-sync/publish-definitions', requireAuth, tncSyncController.publ
 router.post('/tnc-sync/pull-consents', requireAuth, tncSyncController.pullConsentsAndDistribute);
 
 // --- Master Data CRUD ---
+router.post('/master-crud/:masterId/unified-question-matrix', requireAuth, masterCrudController.saveUnifiedQuestionMatrix);
+router.get('/master-crud/:masterId/matrix-by-question/:questionId', requireAuth, masterCrudController.getMatrixByQuestionId);
+router.get('/master-crud/:masterId/validate-matrix-questions', requireAuth, masterCrudController.validateMatrixQuestions);
 router.get('/master-crud/:masterId/:tableName', requireAuth, masterCrudController.getMasterTableData);
 router.post('/master-crud/:masterId/:tableName', requireAuth, masterCrudController.createMasterRow);
 router.put('/master-crud/:masterId/:tableName', requireAuth, masterCrudController.updateMasterRow);
+router.delete('/master-crud/:masterId/:tableName', requireAuth, masterCrudController.deleteMasterRow);
 
 // --- Media Scanner ---
 router.get('/vps/content/pod-rogue-files', requireAuth, contentController.scanAllPodsRogueFiles);

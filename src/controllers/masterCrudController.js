@@ -41,8 +41,68 @@ const updateMasterRow = async (req, res) => {
   }
 };
 
+const deleteMasterRow = async (req, res) => {
+  try {
+    const { masterId, tableName } = req.params;
+    const { pkColumn, pkValue } = req.body;
+    if (!masterId || !tableName || !pkColumn || pkValue === undefined) {
+      return res.status(400).json({ success: false, error: 'Parameter tidak lengkap.' });
+    }
+    const result = await masterCrudService.deleteMasterRow(Number(masterId), tableName, pkColumn, pkValue);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+const validateMatrixQuestions = async (req, res) => {
+  try {
+    const { masterId } = req.params;
+    if (!masterId) {
+      return res.status(400).json({ success: false, error: 'masterId wajib diisi.' });
+    }
+    const result = await masterCrudService.validateMatrixQuestions(Number(masterId));
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+const saveUnifiedQuestionMatrix = async (req, res) => {
+  try {
+    const { masterId } = req.params;
+    const { questionData, matrixData, isEdit, questionId } = req.body;
+    if (!masterId || !questionData || !matrixData) {
+      return res.status(400).json({ success: false, error: 'Parameter tidak lengkap.' });
+    }
+    const result = await masterCrudService.saveUnifiedQuestionMatrix(
+      Number(masterId), questionData, matrixData, isEdit, questionId
+    );
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+const getMatrixByQuestionId = async (req, res) => {
+  try {
+    const { masterId, questionId } = req.params;
+    if (!masterId || !questionId) {
+      return res.status(400).json({ success: false, error: 'Parameter tidak lengkap.' });
+    }
+    const result = await masterCrudService.getMatrixByQuestionId(Number(masterId), questionId);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 module.exports = {
   getMasterTableData,
   createMasterRow,
-  updateMasterRow
+  updateMasterRow,
+  deleteMasterRow,
+  validateMatrixQuestions,
+  saveUnifiedQuestionMatrix,
+  getMatrixByQuestionId
 };
