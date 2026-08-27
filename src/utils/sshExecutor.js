@@ -27,12 +27,15 @@ function executeSshCommand(server, command, options = {}) {
 
     // 1. Local execution
     if (server.is_local === 1) {
-      exec(fullCommand, { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+      const child = exec(fullCommand, { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
         if (error && !stdout) {
           return reject(new Error(stderr.trim() || error.message));
         }
         resolve(stdout || '');
       });
+      if (options.onStdout && child.stdout) {
+        child.stdout.on('data', (d) => options.onStdout(d.toString()));
+      }
       return;
     }
 
@@ -112,7 +115,11 @@ function executeSshCommand(server, command, options = {}) {
         });
 
         stream.on('data', (data) => {
-          stdout += data.toString();
+          const str = data.toString();
+          stdout += str;
+          if (options.onStdout) {
+            options.onStdout(str);
+          }
         });
 
         stream.stderr.on('data', (data) => {

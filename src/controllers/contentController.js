@@ -1,5 +1,5 @@
 const dbAsync = require('../services/db');
-const { listS3MediaFolders, listS3FolderFiles, deleteS3CodeFolder, formatBytes, listAllS3Filenames } = require('../services/s3Service');
+const { listS3MediaFolders, listS3FolderFiles, deleteS3CodeFolder, deleteS3File, formatBytes, listAllS3Filenames } = require('../services/s3Service');
 const {
   getPodStorageSummary,
   scanPodPhysicalFiles,
@@ -11,7 +11,8 @@ const {
   inspectPodDockerStorage,
   cleanPodDockerStorage,
   executeCommand,
-  detectPodRogueFiles
+  detectPodRogueFiles,
+  downloadS3FilesToPod
 } = require('../services/podStorageService');
 
 const { getMultimediaSoundScapes, getValidMultimediaFilenames } = require('../services/masterDbService');
@@ -67,16 +68,19 @@ const getS3FolderFiles = async (req, res) => {
  */
 const getPodsStorage = async (req, res) => {
   try {
-    const { version } = req.query;
+    const { version, serverId } = req.query;
     let query = "SELECT * FROM servers WHERE type = 'pod'";
     const params = [];
 
-    if (version && version !== 'all') {
+    if (serverId) {
+      query += " AND id = ?";
+      params.push(serverId);
+    } else if (version && version !== 'all') {
       query += " AND pod_version = ?";
       params.push(version);
     } else {
-      // Default to v3 if not specified
-      query += " AND (pod_version = 'v3' OR pod_version IS NULL OR pod_version = '')";
+      // Default strictly to v3 as only POD v3 is managed
+      query += " AND pod_version = 'v3'";
     }
 
     const pods = await dbAsync.all(query, params);
@@ -259,6 +263,180 @@ const syncS3ToPod = async (req, res) => {
 };
 
 /**
+ * 6a. Download specific files (or all missing files) of S3 code to a single POD
+ */
+const downloadCodeFilesToPod = async (req, res) => {
+  try {
+    const { serverId, s3Code, filenames } = req.body;
+
+    if (!serverId) {
+      return res.status(400).json({ success: false, error: 'Target server ID wajib ditentukan.' });
+    }
+    if (!s3Code) {
+      return res.status(400).json({ success: false, error: 'Kode folder S3 wajib ditentukan.' });
+    }
+
+    const server = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
+    if (!server) {
+      return res.status(404).json({ success: false, error: 'Server POD tidak ditemukan.' });
+    }
+
+    let targetFilenames = filenames;
+
+    // If filenames not specified or empty, automatically detect missing files for this S3 code on the POD
+    if (!targetFilenames || !Array.isArray(targetFilenames) || targetFilenames.length === 0) {
+      const s3Data = await listS3FolderFiles(s3Code);
+      const allS3Filenames = s3Data.files.map(f => f.filename);
+      const podCheck = await checkCodeFilesOnSinglePod(server, s3Code, allS3Filenames);
+      targetFilenames = (podCheck.missingFiles || []).map(f => typeof f === 'string' ? f : f.filename);
+    }
+
+    if (targetFilenames.length === 0) {
+      return res.json({
+        success: true,
+        message: `Semua file untuk kode #${s3Code} sudah lengkap di ${server.name}. Tidak ada file yang perlu didownload.`,
+        data: {
+          serverId: server.id,
+          serverName: server.name,
+          s3Code,
+          totalRequested: 0,
+          successCount: 0,
+          downloads: []
+        }
+      });
+    }
+
+    const io = req.app.get('io');
+    const onProgress = (prog) => {
+      if (io) {
+        io.emit('s3_pod_download_progress', {
+          serverId: server.id,
+          serverName: server.name,
+          s3Code,
+          ...prog
+        });
+      }
+    };
+
+    const result = await downloadS3FilesToPod(server, s3Code, targetFilenames, onProgress);
+
+    if (io) {
+      io.emit('s3_pod_download_complete', {
+        serverId: server.id,
+        serverName: server.name,
+        s3Code,
+        successCount: result.successCount,
+        totalRequested: result.totalRequested
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Berhasil mendownload ${result.successCount} dari ${result.totalRequested} file ke ${server.name} (${result.totalDownloadedFormatted}).`,
+      data: result
+    });
+  } catch (err) {
+    console.error('Error downloading files to POD:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * 6b. Download missing files of S3 code to multiple PODs in batch
+ */
+const downloadCodeFilesToBatchPods = async (req, res) => {
+  try {
+    const { serverIds, s3Code, filenames } = req.body;
+    const io = req.app.get('io');
+
+    if (!serverIds || !Array.isArray(serverIds) || serverIds.length === 0) {
+      return res.status(400).json({ success: false, error: 'Pilih minimal satu server POD target.' });
+    }
+    if (!s3Code) {
+      return res.status(400).json({ success: false, error: 'Kode folder S3 wajib ditentukan.' });
+    }
+
+    const placeholders = serverIds.map(() => '?').join(',');
+    const servers = await dbAsync.all(`SELECT * FROM servers WHERE id IN (${placeholders})`, serverIds);
+
+    if (servers.length === 0) {
+      return res.status(404).json({ success: false, error: 'Tidak ada server valid yang ditemukan.' });
+    }
+
+    const s3Data = await listS3FolderFiles(s3Code);
+    const allS3Filenames = s3Data.files.map(f => f.filename);
+
+    const batchResults = await Promise.allSettled(
+      servers.map(async (server) => {
+        let filesToDownload = filenames;
+        if (!filesToDownload || !Array.isArray(filesToDownload) || filesToDownload.length === 0) {
+          const check = await checkCodeFilesOnSinglePod(server, s3Code, allS3Filenames);
+          filesToDownload = (check.missingFiles || []).map(f => typeof f === 'string' ? f : f.filename);
+        }
+
+        if (filesToDownload.length === 0) {
+          return {
+            serverId: server.id,
+            serverName: server.name,
+            status: 'skipped',
+            message: 'Semua file sudah ada di POD ini.'
+          };
+        }
+
+        const onProgress = (prog) => {
+          if (io) {
+            io.emit('s3_pod_download_progress', {
+              serverId: server.id,
+              serverName: server.name,
+              s3Code,
+              ...prog
+            });
+          }
+        };
+
+        const dlResult = await downloadS3FilesToPod(server, s3Code, filesToDownload, onProgress);
+
+        if (io) {
+          io.emit('s3_pod_download_complete', {
+            serverId: server.id,
+            serverName: server.name,
+            s3Code,
+            successCount: dlResult.successCount,
+            totalRequested: dlResult.totalRequested
+          });
+        }
+
+        return {
+          serverId: server.id,
+          serverName: server.name,
+          status: 'success',
+          ...dlResult
+        };
+      })
+    );
+
+    const summary = batchResults.map((r, i) => {
+      if (r.status === 'fulfilled') return r.value;
+      return {
+        serverId: servers[i].id,
+        serverName: servers[i].name,
+        status: 'error',
+        error: r.reason?.message || 'Gagal download'
+      };
+    });
+
+    res.json({
+      success: true,
+      message: `Proses download ke ${servers.length} POD selesai diproses.`,
+      data: summary
+    });
+  } catch (err) {
+    console.error('Error in batch download to PODs:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
  * 7. Hard delete entire code folder from AWS S3
  */
 const deleteS3Folder = async (req, res) => {
@@ -271,6 +449,23 @@ const deleteS3Folder = async (req, res) => {
     res.json({ success: true, data: result });
   } catch (err) {
     console.error(`Error deleting S3 folder ${req.params.code}:`, err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * 7b. Hard delete a single file from AWS S3
+ */
+const deleteS3SingleFile = async (req, res) => {
+  try {
+    const { key } = req.body;
+    if (!key) {
+      return res.status(400).json({ success: false, error: 'Key file S3 harus diisi' });
+    }
+    const result = await deleteS3File(key);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    console.error(`Error deleting S3 file ${req.body.key}:`, err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 };
@@ -297,7 +492,7 @@ const checkCodeOnPods = async (req, res) => {
       }
     }
 
-    let query = "SELECT * FROM servers WHERE type = 'pod' AND (pod_version = 'v3' OR pod_version IS NULL OR pod_version = '')";
+    let query = "SELECT * FROM servers WHERE type = 'pod' AND pod_version = 'v3'";
     let params = [];
     if (serverIds && Array.isArray(serverIds) && serverIds.length > 0) {
       const ph = serverIds.map(() => '?').join(',');
@@ -493,7 +688,7 @@ const inspectSinglePodDocker = async (req, res) => {
 const inspectAllPodsDocker = async (req, res) => {
   try {
     const servers = await dbAsync.all(
-      "SELECT * FROM servers WHERE type = 'pod' OR LOWER(name) LIKE '%pod%' ORDER BY name ASC"
+      "SELECT * FROM servers WHERE type = 'pod' AND pod_version = 'v3' ORDER BY name ASC"
     );
 
     const results = await Promise.allSettled(
@@ -563,7 +758,7 @@ const cleanupBatchPodsDocker = async (req, res) => {
       servers = await dbAsync.all(`SELECT * FROM servers WHERE id IN (${placeholders})`, serverIds);
     } else {
       servers = await dbAsync.all(
-        "SELECT * FROM servers WHERE type = 'pod' OR LOWER(name) LIKE '%pod%' ORDER BY name ASC"
+        "SELECT * FROM servers WHERE type = 'pod' AND pod_version = 'v3' ORDER BY name ASC"
       );
     }
 
@@ -662,6 +857,7 @@ module.exports = {
   cleanupPodJunk,
   syncS3ToPod,
   deleteS3Folder,
+  deleteS3SingleFile,
   checkCodeOnPods,
   deleteCodeOnPod,
   batchDeleteCode,
@@ -671,7 +867,9 @@ module.exports = {
   cleanupSinglePodDocker,
   cleanupBatchPodsDocker,
   scanAllPodsRogueFiles,
-  cleanupRogueFiles
+  cleanupRogueFiles,
+  downloadCodeFilesToPod,
+  downloadCodeFilesToBatchPods
 };
 
 

@@ -70,11 +70,14 @@ router.post('/vps/env-manager/compare', requireAuth, envController.handleCompare
 // 6. AWS S3 Content Management & POD v3 Storage Cleanup routes
 router.get('/vps/content/s3/folders', requireAuth, contentController.getS3Folders);
 router.get('/vps/content/s3/files', requireAuth, contentController.getS3FolderFiles);
+router.delete('/vps/content/s3/file', requireAuth, contentController.deleteS3SingleFile);
 router.delete('/vps/content/s3/folder/:code', requireAuth, contentController.deleteS3Folder);
 router.get('/vps/content/pods/storage', requireAuth, contentController.getPodsStorage);
 router.get('/vps/content/pods/:id/scan', requireAuth, contentController.scanPodJunk);
 router.post('/vps/content/pods/cleanup', requireAuth, contentController.cleanupPodJunk);
 router.post('/vps/content/pods/sync', requireAuth, contentController.syncS3ToPod);
+router.post('/vps/content/pods/download-code', requireAuth, contentController.downloadCodeFilesToPod);
+router.post('/vps/content/pods/download-batch', requireAuth, contentController.downloadCodeFilesToBatchPods);
 router.post('/vps/content/matrix/check-pods', requireAuth, contentController.checkCodeOnPods);
 router.post('/vps/content/pods/delete-code', requireAuth, contentController.deleteCodeOnPod);
 router.post('/vps/content/batch-delete', requireAuth, contentController.batchDeleteCode);

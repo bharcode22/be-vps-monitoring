@@ -1,4 +1,4 @@
-const { S3Client, ListObjectsV2Command, HeadObjectCommand, DeleteObjectsCommand } = require('@aws-sdk/client-s3');
+const { S3Client, ListObjectsV2Command, HeadObjectCommand, DeleteObjectsCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const path = require('path');
 
 function getS3Client() {
@@ -169,7 +169,8 @@ async function listS3FolderFiles(code) {
   const client = getS3Client();
   const bucket = getBucketName();
   const basePrefix = getBasePath();
-  const folderPrefix = code.startsWith(basePrefix) ? code : `${basePrefix}${code}/`;
+  const cleanCode = String(code || '').trim().replace(/^\/+/, '').replace(/^media\/?/i, '').replace(/^\/+|\/+$/g, '');
+  const folderPrefix = `${basePrefix}${cleanCode}/`;
 
   let continuationToken = undefined;
   let allObjects = [];
@@ -247,7 +248,14 @@ async function deleteS3CodeFolder(code) {
   const client = getS3Client();
   const bucket = getBucketName();
   const basePrefix = getBasePath();
-  const folderPrefix = code.startsWith(basePrefix) ? code : `${basePrefix}${code}/`;
+
+  // Normalize code: strip any 'media/' prefix, leading and trailing slashes, and trim
+  const cleanCode = String(code || '').trim().replace(/^\/+/, '').replace(/^media\/?/i, '').replace(/^\/+|\/+$/g, '');
+  if (!cleanCode) {
+    throw new Error('Kode folder S3 tidak valid atau kosong.');
+  }
+
+  const folderPrefix = `${basePrefix}${cleanCode}/`;
 
   let continuationToken = undefined;
   let allKeys = [];
@@ -271,10 +279,28 @@ async function deleteS3CodeFolder(code) {
     continuationToken = listRes.NextContinuationToken;
   } while (continuationToken);
 
+  // Fallback: If no files found under media/cleanCode/, check without trailing slash
+  if (allKeys.length === 0) {
+    const altCmd = new ListObjectsV2Command({
+      Bucket: bucket,
+      Prefix: `${basePrefix}${cleanCode}`,
+      MaxKeys: 1000
+    });
+    const altRes = await client.send(altCmd);
+    if (altRes.Contents && altRes.Contents.length > 0) {
+      altRes.Contents.forEach(obj => {
+        if (obj.Key.startsWith(`${basePrefix}${cleanCode}/`) || obj.Key === `${basePrefix}${cleanCode}`) {
+          allKeys.push({ Key: obj.Key });
+          totalBytes += obj.Size || 0;
+        }
+      });
+    }
+  }
+
   if (allKeys.length === 0) {
     return {
       success: true,
-      code,
+      code: cleanCode,
       deletedCount: 0,
       freedBytes: 0,
       freedFormatted: '0 B',
@@ -284,6 +310,8 @@ async function deleteS3CodeFolder(code) {
 
   // Delete objects in batches of up to 1000 keys
   const chunkSize = 1000;
+  let actualDeletedCount = 0;
+
   for (let i = 0; i < allKeys.length; i += chunkSize) {
     const chunk = allKeys.slice(i, i + chunkSize);
     const deleteCmd = new DeleteObjectsCommand({
@@ -293,16 +321,57 @@ async function deleteS3CodeFolder(code) {
         Quiet: false
       }
     });
-    await client.send(deleteCmd);
+    const deleteRes = await client.send(deleteCmd);
+
+    // Verify if S3 reported errors on any keys
+    if (deleteRes.Errors && deleteRes.Errors.length > 0) {
+      const err = deleteRes.Errors[0];
+      throw new Error(`Gagal menghapus file di S3: ${err.Code} - ${err.Message || err.Key}`);
+    }
+
+    actualDeletedCount += deleteRes.Deleted?.length || chunk.length;
   }
 
   return {
     success: true,
-    code,
-    deletedCount: allKeys.length,
+    code: cleanCode,
+    deletedCount: actualDeletedCount,
     freedBytes: totalBytes,
     freedFormatted: formatBytes(totalBytes),
-    message: `Berhasil menghapus folder S3 ${code} (${allKeys.length} file, ${formatBytes(totalBytes)})`
+    message: `Berhasil menghapus folder S3 #${cleanCode} (${actualDeletedCount} file terhapus, ${formatBytes(totalBytes)})`
+  };
+}
+
+/**
+ * Hard delete a single file from AWS S3
+ */
+async function deleteS3File(key) {
+  const client = getS3Client();
+  const bucket = getBucketName();
+  const basePrefix = getBasePath();
+
+  if (!key || typeof key !== 'string') {
+    throw new Error('Key file S3 tidak valid.');
+  }
+
+  let s3Key = key.trim();
+  if (!s3Key.startsWith(basePrefix) && !s3Key.startsWith('/')) {
+    s3Key = `${basePrefix}${s3Key}`;
+  }
+  s3Key = s3Key.replace(/^\/+/, '');
+
+  const deleteCmd = new DeleteObjectCommand({
+    Bucket: bucket,
+    Key: s3Key
+  });
+
+  await client.send(deleteCmd);
+
+  return {
+    success: true,
+    key: s3Key,
+    filename: path.basename(s3Key),
+    message: `Berhasil menghapus file ${path.basename(s3Key)} dari AWS S3`
   };
 }
 
@@ -354,5 +423,6 @@ module.exports = {
   listS3MediaFolders,
   listS3FolderFiles,
   deleteS3CodeFolder,
+  deleteS3File,
   listAllS3Filenames
 };
