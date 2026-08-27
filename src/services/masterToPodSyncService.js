@@ -799,6 +799,21 @@ async function compareMasterTableWithSinglePod(masterId, tableName, podId) {
   const podOnlyRows = [];
 
   if (!podRes.isOnline) {
+    for (const col of masterColumns) {
+      columnPresenceMap[col.column_name] = {
+        isOnline: false,
+        exists: false,
+        typeMatch: false
+      };
+    }
+    for (const mr of masterRows) {
+      const key = getRowKeyHelper(mr);
+      dataPresenceMap[key] = {
+        isOnline: false,
+        present: false
+      };
+    }
+
     podSummary = {
       id: podServer.id,
       name: podServer.name,
@@ -815,6 +830,21 @@ async function compareMasterTableWithSinglePod(masterId, tableName, podId) {
       columns: []
     };
   } else if (!podRes.tableExists) {
+    for (const col of masterColumns) {
+      columnPresenceMap[col.column_name] = {
+        isOnline: true,
+        exists: false,
+        typeMatch: false
+      };
+    }
+    for (const mr of masterRows) {
+      const key = getRowKeyHelper(mr);
+      dataPresenceMap[key] = {
+        isOnline: true,
+        present: false
+      };
+    }
+
     podSummary = {
       id: podServer.id,
       name: podServer.name,
