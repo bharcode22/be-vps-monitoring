@@ -1,4 +1,5 @@
 const { Client } = require('pg');
+const net = require('net');
 const dbAsync = require('./db');
 const { executeSshCommand } = require('../utils/sshExecutor');
 const { decrypt } = require('../utils/crypto');
@@ -7,6 +8,44 @@ const POD_DB_USER = process.env.POD_DB_USER || 'development';
 const POD_DB_PASS = process.env.POD_DB_PASS || 'development';
 const POD_DB_NAME = process.env.POD_DB_NAME || 'regenesis';
 const POD_DB_PORT = parseInt(process.env.POD_DB_PORT || '5432', 10);
+
+/**
+ * Fast TCP connection probe (500-1000ms timeout)
+ */
+function checkTcpConnection(host, port, timeout = 1000) {
+  return new Promise((resolve) => {
+    if (!host) return resolve(false);
+    const socket = new net.Socket();
+    let isResolved = false;
+
+    socket.setTimeout(timeout);
+    socket.on('connect', () => {
+      if (!isResolved) {
+        isResolved = true;
+        socket.destroy();
+        resolve(true);
+      }
+    });
+
+    socket.on('timeout', () => {
+      if (!isResolved) {
+        isResolved = true;
+        socket.destroy();
+        resolve(false);
+      }
+    });
+
+    socket.on('error', () => {
+      if (!isResolved) {
+        isResolved = true;
+        socket.destroy();
+        resolve(false);
+      }
+    });
+
+    socket.connect(port || 22, host);
+  });
+}
 
 /**
  * Helper to build PG connection string for a POD host
@@ -40,10 +79,19 @@ function createMasterClient(masterRecord) {
 
 /**
  * Helper to determine unique conflict key columns for tables.
- * For example, tables with compound FK unique constraints like terms_and_conditions_answers
- * must conflict on (fk_user_id, fk_question_id) to match POD DB unique index.
+ * targetType: 'pod' | 'master'
+ * - When writing to POD: POD DB has compound FK unique constraints like (fk_user_id, fk_question_id).
+ * - When writing to Master: Master DB does NOT have compound unique constraints on these tables,
+ *   so Master uses the primary key (pkColumn / id) or natural keys like key/topic.
  */
-function getTableConflictColumns(tableName, colNames = [], pkColumn = 'id') {
+function getTableConflictColumns(tableName, colNames = [], pkColumn = 'id', targetType = 'pod') {
+  if (targetType === 'master') {
+    if (colNames.includes('key')) return ['key'];
+    if (colNames.includes('topic')) return ['topic'];
+    return [pkColumn || 'id'];
+  }
+
+  // When writing to POD
   if (tableName === 'terms_and_conditions_answers') {
     if (colNames.includes('fk_user_id') && colNames.includes('fk_question_id')) {
       return ['fk_user_id', 'fk_question_id'];
@@ -394,7 +442,27 @@ async function executeBatchUpsert({
       upsertSql += ` ON CONFLICT (${conflictStr}) DO NOTHING`;
     }
 
-    await client.query(upsertSql, values);
+    try {
+      await client.query(upsertSql, values);
+    } catch (upsertErr) {
+      if (
+        upsertErr.code === '42P10' ||
+        (upsertErr.message && upsertErr.message.includes('no unique or exclusion constraint'))
+      ) {
+        // Fallback: try using pkColumn ('id') or plain INSERT
+        const fallbackPk = uniqueCols.includes('id') ? 'id' : uniqueCols[0];
+        const fallbackUpdateSet = uniqueCols.filter(c => c !== fallbackPk).map(c => `"${c}" = EXCLUDED."${c}"`).join(', ');
+        let fallbackSql = `INSERT INTO public."${tableName}" (${colListStr}) VALUES ${valuePlaceholders.join(', ')}`;
+        if (fallbackUpdateSet) {
+          fallbackSql += ` ON CONFLICT ("${fallbackPk}") DO UPDATE SET ${fallbackUpdateSet}`;
+        } else {
+          fallbackSql += ` ON CONFLICT ("${fallbackPk}") DO NOTHING`;
+        }
+        await client.query(fallbackSql, values);
+      } else {
+        throw upsertErr;
+      }
+    }
     processedCount += chunk.length;
   }
 
@@ -515,6 +583,369 @@ async function fetchPodTableInfo(podServer, tableName) {
       };
     }
   }
+}
+
+/**
+ * 2B. Fast Master Table Inspection (Instant < 50ms)
+ * Loads Master schema and rows, plus all POD V3 server info in idle NOT_LOADED state.
+ */
+async function getMasterTableFast(masterId, tableName) {
+  if (!masterId || !tableName) throw new Error('Master Database ID dan Nama Tabel wajib diisi.');
+
+  const master = await dbAsync.get('SELECT * FROM databases_postgres WHERE id = ?', [masterId]);
+  if (!master) throw new Error('Master DB tidak ditemukan.');
+
+  const masterClient = createMasterClient(master);
+  let masterColumns = [];
+  let masterRows = [];
+  let masterRowCount = 0;
+  let masterPkColumn = 'id';
+
+  await masterClient.connect();
+  try {
+    masterColumns = await getTableColumnsFromClient(masterClient, tableName);
+    if (masterColumns.length === 0) {
+      throw new Error(`Tabel '${tableName}' tidak ditemukan pada Master Database '${master.name}'.`);
+    }
+
+    const pkQuery = `
+      SELECT kcu.column_name
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+      WHERE tc.constraint_type = 'PRIMARY KEY'
+        AND tc.table_schema = 'public'
+        AND tc.table_name = $1;
+    `;
+    const pkRes = await masterClient.query(pkQuery, [tableName]);
+    if (pkRes.rows.length > 0) {
+      masterPkColumn = pkRes.rows[0].column_name;
+    } else {
+      masterPkColumn = masterColumns[0].column_name;
+    }
+
+    const countRes = await masterClient.query(`SELECT COUNT(*) as cnt FROM public."${tableName}"`);
+    masterRowCount = parseInt(countRes.rows[0].cnt, 10);
+
+    const rowsRes = await masterClient.query(`SELECT * FROM public."${tableName}" ORDER BY "${masterPkColumn}" ASC LIMIT 500`);
+    masterRows = rowsRes.rows;
+  } finally {
+    await masterClient.end().catch(() => { });
+  }
+
+  const podV3List = await dbAsync.all(
+    "SELECT id, name, host, port, username, password, private_key FROM servers WHERE pod_version = 'v3' ORDER BY name ASC"
+  );
+
+  const getRowKeyHelper = (row) => {
+    if (!row) return '';
+    if (row.key) return String(row.key);
+    if (row.topic) return String(row.topic);
+    if (row.code) return String(row.code);
+    if (row[masterPkColumn] !== undefined) return String(row[masterPkColumn]);
+    return JSON.stringify(row);
+  };
+
+  const columnMatrix = masterColumns.map(col => ({
+    columnName: col.column_name,
+    dataType: col.data_type,
+    isNullable: col.is_nullable,
+    isPk: col.column_name === masterPkColumn,
+    presence: {},
+    presentCount: 0,
+    totalPods: podV3List.length
+  }));
+
+  const dataMatrix = masterRows.map(mr => {
+    const key = getRowKeyHelper(mr);
+    return {
+      rowKey: key,
+      sampleData: mr,
+      inMaster: true,
+      isPodOnly: false,
+      originPodId: null,
+      originPodName: null,
+      originPodHost: null,
+      podSources: [],
+      podIds: [],
+      podSourcesDetail: [],
+      presence: {},
+      presentCount: 0,
+      totalPods: podV3List.length
+    };
+  });
+
+  // Fast parallel TCP probe to detect real-time Online / Offline status for all PODs (1s timeout)
+  const probeResults = await Promise.all(
+    podV3List.map(async (pod) => {
+      const isOnline = await checkTcpConnection(pod.host, pod.port || 22, 1000);
+      return { id: pod.id, isOnline };
+    })
+  );
+  const onlineMap = new Map(probeResults.map(r => [r.id, r.isOnline]));
+
+  const podSummaries = podV3List.map(pod => {
+    const isOnline = onlineMap.get(pod.id) ?? false;
+    return {
+      id: pod.id,
+      name: pod.name,
+      host: pod.host,
+      isOnline,
+      tableExists: null,
+      rowCount: null,
+      status: isOnline ? 'NOT_LOADED' : 'OFFLINE',
+      missingColumnsCount: 0,
+      missingRowsCount: 0,
+      missingColumns: [],
+      missingRowsSample: []
+    };
+  });
+
+  const onlineCount = podSummaries.filter(p => p.isOnline).length;
+
+  return {
+    master: {
+      id: master.id,
+      name: master.name,
+      host: master.host,
+      tableName,
+      pkColumn: masterPkColumn,
+      columnCount: masterColumns.length,
+      rowCount: masterRowCount
+    },
+    pods: podSummaries,
+    columnsMatrix: columnMatrix,
+    dataMatrix,
+    summary: {
+      totalPods: podV3List.length,
+      onlinePods: onlineCount,
+      syncedPods: 0,
+      mismatchPods: 0,
+      isAllSynced: false,
+      podOnlyRowsCount: 0
+    }
+  };
+}
+
+/**
+ * 2C. Compare Master Table against a Single Specific POD V3 Server (~200ms)
+ */
+async function compareMasterTableWithSinglePod(masterId, tableName, podId) {
+  if (!masterId || !tableName || !podId) {
+    throw new Error('Master DB ID, Nama Tabel, dan POD ID wajib diisi.');
+  }
+
+  const master = await dbAsync.get('SELECT * FROM databases_postgres WHERE id = ?', [masterId]);
+  if (!master) throw new Error('Master DB tidak ditemukan.');
+
+  const podServer = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [podId]);
+  if (!podServer) throw new Error('POD Server tidak ditemukan.');
+
+  const masterClient = createMasterClient(master);
+  let masterColumns = [];
+  let masterRows = [];
+  let masterRowCount = 0;
+  let masterPkColumn = 'id';
+
+  await masterClient.connect();
+  try {
+    masterColumns = await getTableColumnsFromClient(masterClient, tableName);
+    if (masterColumns.length === 0) {
+      throw new Error(`Tabel '${tableName}' tidak ditemukan pada Master Database '${master.name}'.`);
+    }
+
+    const pkQuery = `
+      SELECT kcu.column_name
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+      WHERE tc.constraint_type = 'PRIMARY KEY'
+        AND tc.table_schema = 'public'
+        AND tc.table_name = $1;
+    `;
+    const pkRes = await masterClient.query(pkQuery, [tableName]);
+    if (pkRes.rows.length > 0) {
+      masterPkColumn = pkRes.rows[0].column_name;
+    } else {
+      masterPkColumn = masterColumns[0].column_name;
+    }
+
+    const countRes = await masterClient.query(`SELECT COUNT(*) as cnt FROM public."${tableName}"`);
+    masterRowCount = parseInt(countRes.rows[0].cnt, 10);
+
+    const rowsRes = await masterClient.query(`SELECT * FROM public."${tableName}" ORDER BY "${masterPkColumn}" ASC LIMIT 500`);
+    masterRows = rowsRes.rows;
+  } finally {
+    await masterClient.end().catch(() => { });
+  }
+
+  const getRowKeyHelper = (row) => {
+    if (!row) return '';
+    if (row.key) return String(row.key);
+    if (row.topic) return String(row.topic);
+    if (row.code) return String(row.code);
+    if (row[masterPkColumn] !== undefined) return String(row[masterPkColumn]);
+    return JSON.stringify(row);
+  };
+
+  // Query ONLY this specific POD
+  const podRes = await fetchPodTableInfo(podServer, tableName);
+
+  let podSummary = {};
+  const columnPresenceMap = {};
+  const dataPresenceMap = {};
+  const podOnlyRows = [];
+
+  if (!podRes.isOnline) {
+    podSummary = {
+      id: podServer.id,
+      name: podServer.name,
+      host: podServer.host,
+      isOnline: false,
+      tableExists: false,
+      rowCount: 0,
+      status: 'OFFLINE',
+      missingColumnsCount: masterColumns.length,
+      missingRowsCount: masterRowCount,
+      missingColumns: [],
+      missingRowsSample: [],
+      rows: [],
+      columns: []
+    };
+  } else if (!podRes.tableExists) {
+    podSummary = {
+      id: podServer.id,
+      name: podServer.name,
+      host: podServer.host,
+      isOnline: true,
+      tableExists: false,
+      rowCount: 0,
+      status: 'TABLE_MISSING',
+      missingColumnsCount: masterColumns.length,
+      missingRowsCount: masterRowCount,
+      missingColumns: masterColumns.map(c => c.column_name),
+      missingRowsSample: [],
+      rows: [],
+      columns: []
+    };
+  } else {
+    // 1. Columns check
+    for (const col of masterColumns) {
+      const podCol = (podRes.columns || []).find(c => c.column_name === col.column_name);
+      if (podCol) {
+        columnPresenceMap[col.column_name] = {
+          isOnline: true,
+          exists: true,
+          typeMatch: podCol.data_type === col.data_type,
+          podType: podCol.data_type
+        };
+      } else {
+        columnPresenceMap[col.column_name] = {
+          isOnline: true,
+          exists: false,
+          typeMatch: false
+        };
+      }
+    }
+
+    const missingCols = masterColumns.filter(mc => !columnPresenceMap[mc.column_name]?.exists);
+
+    // 2. Data rows check
+    const podRowKeySet = new Set((podRes.rows || []).map(r => getRowKeyHelper(r)));
+
+    for (const mr of masterRows) {
+      const key = getRowKeyHelper(mr);
+      const isPresent = podRowKeySet.has(key);
+      dataPresenceMap[key] = {
+        isOnline: true,
+        present: isPresent
+      };
+    }
+
+    const missingRows = masterRows.filter(mr => !podRowKeySet.has(getRowKeyHelper(mr)));
+
+    // 3. Pod-only rows (in POD but not in Master sample)
+    const masterRowKeySet = new Set(masterRows.map(mr => getRowKeyHelper(mr)));
+    for (const pr of (podRes.rows || [])) {
+      const key = getRowKeyHelper(pr);
+      if (!masterRowKeySet.has(key)) {
+        podOnlyRows.push({
+          rowKey: key,
+          sampleData: pr,
+          inMaster: false,
+          isPodOnly: true,
+          originPodId: podServer.id,
+          originPodName: podServer.name,
+          originPodHost: podServer.host,
+          podSources: [podServer.name],
+          podIds: [podServer.id],
+          podSourcesDetail: [`${podServer.name} (${podServer.host})`],
+          presence: {
+            [podServer.id]: { isOnline: true, present: true }
+          },
+          presentCount: 1,
+          totalPods: 1
+        });
+      }
+    }
+
+    // Verify if podOnlyRows are actually in Master (for tables > 500 rows)
+    if (podOnlyRows.length > 0) {
+      const pkVals = podOnlyRows.map(r => r.sampleData[masterPkColumn]).filter(v => v !== undefined && v !== null);
+      if (pkVals.length > 0) {
+        const verifyClient = createMasterClient(master);
+        await verifyClient.connect();
+        try {
+          const verifyQuery = `SELECT "${masterPkColumn}" FROM public."${tableName}" WHERE "${masterPkColumn}" = ANY($1)`;
+          const verifyRes = await verifyClient.query(verifyQuery, [pkVals]);
+          if (verifyRes.rows.length > 0) {
+            const verifiedSet = new Set(verifyRes.rows.map(r => String(r[masterPkColumn])));
+            for (const item of podOnlyRows) {
+              if (verifiedSet.has(String(item.sampleData[masterPkColumn]))) {
+                item.inMaster = true;
+                item.isPodOnly = false;
+              }
+            }
+          }
+        } catch (err) {
+          console.error(`[Single POD Verify Error]:`, err.message);
+        } finally {
+          await verifyClient.end().catch(() => { });
+        }
+      }
+    }
+
+    let status = 'SYNCED';
+    if (missingCols.length > 0) status = 'COLUMN_MISMATCH';
+    else if (missingRows.length > 0 || podRes.rowCount !== masterRowCount) status = 'ROW_MISMATCH';
+
+    podSummary = {
+      id: podServer.id,
+      name: podServer.name,
+      host: podServer.host,
+      isOnline: true,
+      tableExists: true,
+      rowCount: podRes.rowCount,
+      status,
+      missingColumnsCount: missingCols.length,
+      missingRowsCount: missingRows.length,
+      missingColumns: missingCols.map(c => c.column_name),
+      missingRowsSample: missingRows.slice(0, 10).map(r => getRowKeyHelper(r)),
+      rows: podRes.rows || [],
+      columns: podRes.columns || []
+    };
+  }
+
+  return {
+    success: true,
+    podId: podServer.id,
+    podSummary,
+    columnPresenceMap,
+    dataPresenceMap,
+    podOnlyRows
+  };
 }
 
 /**
@@ -1419,7 +1850,7 @@ async function syncPodTableToMaster({
   }
 
   const colNames = Array.from(new Set(masterColumns.map(c => c.column_name)));
-  const conflictCols = getTableConflictColumns(tableName, colNames, pkColumn);
+  const conflictCols = getTableConflictColumns(tableName, colNames, pkColumn, 'master');
   const conflictColsArray = Array.isArray(conflictCols) ? conflictCols : [conflictCols];
   const updateSet = colNames
     .filter(c => !conflictColsArray.includes(c) && c !== 'id')
@@ -1609,7 +2040,7 @@ async function syncSinglePodRowToMaster({
     const colNames = Array.from(new Set(masterColumns.map(c => c.column_name)));
     const colListStr = colNames.map(c => `"${c}"`).join(', ');
 
-    const conflictCols = getTableConflictColumns(tableName, colNames, pkColumn);
+    const conflictCols = getTableConflictColumns(tableName, colNames, pkColumn, 'master');
     const conflictStr = conflictCols.map(c => `"${c.trim()}"`).join(', ');
 
     const updateSet = colNames
@@ -2070,6 +2501,8 @@ async function syncRelationalTablesToPods({
 
 /**
  * Clean Duplicate Data from Master Database
+ * Automatically archives duplicate rows to [tableName]_history if a history table exists (e.g. terms_and_conditions_answers_history)
+ * Also purges & archives answers for inactive/deleted/obsolete questions when cleaning terms_and_conditions_answers!
  */
 async function cleanMasterDuplicates(masterId, tableName, conflictColsArray) {
   if (!masterId || !tableName || !conflictColsArray || conflictColsArray.length === 0) {
@@ -2083,10 +2516,103 @@ async function cleanMasterDuplicates(masterId, tableName, conflictColsArray) {
   await client.connect();
 
   let deletedCount = 0;
+  let archivedCount = 0;
+  let obsoleteCount = 0;
+  let duplicateDeletedCount = 0;
+  let historyTableName = null;
+
   try {
     const colsStr = conflictColsArray.map(c => `"${c.trim()}"`).join(', ');
 
-    // We keep the row with the maximum ctid (latest inserted version) and delete the rest
+    // 1. Check if corresponding history table exists in Master DB
+    const candidateHistoryTable = `${tableName}_history`;
+    const checkHistRes = await client.query(
+      `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`,
+      [candidateHistoryTable]
+    );
+
+    if (checkHistRes.rows.length > 0) {
+      historyTableName = candidateHistoryTable;
+    }
+
+    await client.query('BEGIN');
+
+    // Get common columns between main table and history table
+    let commonColsStr = '';
+    if (historyTableName) {
+      const mainColsRes = await client.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`,
+        [tableName]
+      );
+      const histColsRes = await client.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`,
+        [historyTableName]
+      );
+
+      const histColSet = new Set(histColsRes.rows.map(c => c.column_name));
+      // Exclude 'id' so history table sequence / default generates new ID without collision
+      const commonCols = mainColsRes.rows
+        .map(c => c.column_name)
+        .filter(c => histColSet.has(c) && c !== 'id');
+
+      if (commonCols.length > 0) {
+        commonColsStr = commonCols.map(c => `"${c}"`).join(', ');
+      }
+    }
+
+    // 2. Specialized Step for terms_and_conditions_answers:
+    // Purge and archive answers belonging to obsolete / inactive / deleted questions
+    if (tableName === 'terms_and_conditions_answers') {
+      const hasQuestionsTable = await client.query(`
+        SELECT table_name FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = 'terms_and_conditions_questions'
+      `);
+
+      if (hasQuestionsTable.rows.length > 0) {
+        const obsoleteWhereClause = `
+          "fk_question_id" NOT IN (
+            SELECT "id" FROM public."terms_and_conditions_questions"
+            WHERE "active" = true AND "deleted_at" IS NULL
+          )
+        `;
+
+        if (historyTableName && commonColsStr) {
+          const archiveObsoleteSql = `
+            INSERT INTO public."${historyTableName}" (${commonColsStr})
+            SELECT ${commonColsStr}
+            FROM public."${tableName}"
+            WHERE ${obsoleteWhereClause};
+          `;
+          const archRes = await client.query(archiveObsoleteSql);
+          obsoleteCount = archRes.rowCount;
+          archivedCount += archRes.rowCount;
+        }
+
+        const deleteObsoleteSql = `
+          DELETE FROM public."${tableName}"
+          WHERE ${obsoleteWhereClause};
+        `;
+        const delRes = await client.query(deleteObsoleteSql);
+        deletedCount += delRes.rowCount;
+      }
+    }
+
+    // 3. Archive & Deduplicate user duplicates (preserving the latest row with max(ctid))
+    if (historyTableName && commonColsStr) {
+      const archiveSql = `
+        INSERT INTO public."${historyTableName}" (${commonColsStr})
+        SELECT ${commonColsStr}
+        FROM public."${tableName}"
+        WHERE ctid NOT IN (
+          SELECT max(ctid)
+          FROM public."${tableName}"
+          GROUP BY ${colsStr}
+        );
+      `;
+      const archRes = await client.query(archiveSql);
+      archivedCount += archRes.rowCount;
+    }
+
     const deleteSql = `
       DELETE FROM public."${tableName}"
       WHERE ctid NOT IN (
@@ -2096,9 +2622,10 @@ async function cleanMasterDuplicates(masterId, tableName, conflictColsArray) {
       );
     `;
 
-    await client.query('BEGIN');
     const res = await client.query(deleteSql);
-    deletedCount = res.rowCount;
+    duplicateDeletedCount = res.rowCount;
+    deletedCount += res.rowCount;
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK').catch(() => { });
@@ -2107,11 +2634,19 @@ async function cleanMasterDuplicates(masterId, tableName, conflictColsArray) {
     await client.end().catch(() => { });
   }
 
-  return { success: true, deletedCount };
+  return { 
+    success: true, 
+    deletedCount, 
+    archivedCount, 
+    obsoleteCount,
+    duplicateDeletedCount,
+    historyTableName 
+  };
 }
 
 /**
  * Check Duplicate Data from Master Database
+ * Also checks for obsolete/inactive question answers for terms_and_conditions_answers
  */
 async function checkMasterDuplicates(masterId, tableName, conflictColsArray) {
   if (!masterId || !tableName || !conflictColsArray || conflictColsArray.length === 0) {
@@ -2126,6 +2661,31 @@ async function checkMasterDuplicates(masterId, tableName, conflictColsArray) {
 
   try {
     const colsStr = conflictColsArray.map(c => `"${c.trim()}"`).join(', ');
+
+    let obsoleteCount = 0;
+    let obsoleteSampleRows = [];
+
+    // If checking terms_and_conditions_answers, also inspect obsolete questions
+    if (tableName === 'terms_and_conditions_answers') {
+      const hasQuestionsTable = await client.query(`
+        SELECT table_name FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = 'terms_and_conditions_questions'
+      `);
+
+      if (hasQuestionsTable.rows.length > 0) {
+        const obsoleteRes = await client.query(`
+          SELECT fk_question_id, COUNT(*) as cnt
+          FROM public."${tableName}"
+          WHERE "fk_question_id" NOT IN (
+            SELECT "id" FROM public."terms_and_conditions_questions"
+            WHERE "active" = true AND "deleted_at" IS NULL
+          )
+          GROUP BY fk_question_id;
+        `);
+        obsoleteSampleRows = obsoleteRes.rows;
+        obsoleteCount = obsoleteRes.rows.reduce((acc, r) => acc + parseInt(r.cnt, 10), 0);
+      }
+    }
 
     const sampleQuery = `
       SELECT ${colsStr}, COUNT(*) as duplicate_count
@@ -2155,12 +2715,17 @@ async function checkMasterDuplicates(masterId, tableName, conflictColsArray) {
     ]);
 
     const totals = totalsRes.rows[0] || { total_duplicate_rows: 0, rows_to_delete: 0 };
+    const duplicateRowsToDelete = parseInt(totals.rows_to_delete, 10);
+    const totalRowsToDelete = duplicateRowsToDelete + obsoleteCount;
 
     return {
       success: true,
-      hasDuplicates: parseInt(totals.rows_to_delete, 10) > 0,
+      hasDuplicates: totalRowsToDelete > 0,
       totalDuplicateRows: parseInt(totals.total_duplicate_rows, 10),
-      rowsToDelete: parseInt(totals.rows_to_delete, 10),
+      rowsToDelete: totalRowsToDelete,
+      duplicateRowsToDelete,
+      obsoleteCount,
+      obsoleteSampleRows,
       sampleRows: sampleRes.rows
     };
   } finally {
@@ -2172,6 +2737,8 @@ module.exports = {
   getMasterDatabases,
   getMasterTables,
   getTableRelations,
+  getMasterTableFast,
+  compareMasterTableWithSinglePod,
   compareMasterTableAcrossPods,
   syncMasterTableToPods,
   syncRelationalTablesToPods,

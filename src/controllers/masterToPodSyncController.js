@@ -29,6 +29,44 @@ const getMasterTables = async (req, res) => {
 };
 
 /**
+ * GET /api/master-pod-sync/master-table-fast?masterId=X&table=Y
+ * Instant fetch of Master table schema & rows, plus POD server list (NOT_LOADED)
+ */
+const getMasterTableFast = async (req, res) => {
+  try {
+    const { masterId, table } = req.query;
+    if (!masterId || !table) {
+      return res.status(400).json({ success: false, error: 'Parameter masterId dan table wajib diisi.' });
+    }
+    const data = await masterToPodSyncService.getMasterTableFast(Number(masterId), table);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * GET /api/master-pod-sync/compare-single-pod?masterId=X&table=Y&podId=Z
+ * On-demand comparison between Master DB and a single specific POD (~200ms)
+ */
+const compareSinglePod = async (req, res) => {
+  try {
+    const { masterId, table, podId } = req.query;
+    if (!masterId || !table || !podId) {
+      return res.status(400).json({ success: false, error: 'Parameter masterId, table, dan podId wajib diisi.' });
+    }
+    const result = await masterToPodSyncService.compareMasterTableWithSinglePod(
+      Number(masterId),
+      table,
+      Number(podId)
+    );
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
  * GET /api/master-pod-sync/matrix?masterId=X&table=Y
  */
 const getTableComparisonMatrix = async (req, res) => {
@@ -294,7 +332,20 @@ const cleanMasterDuplicates = async (req, res) => {
       return res.status(400).json({ success: false, error: 'masterId, tableName, dan conflictCols wajib diisi.' });
     }
     const result = await masterToPodSyncService.cleanMasterDuplicates(Number(masterId), tableName, conflictCols);
-    res.json({ success: true, data: result });
+    let msgParts = [];
+    if (result.obsoleteCount > 0) {
+      msgParts.push(`${result.obsoleteCount} baris jawaban dari pertanyaan nonaktif/usang dipindahkan ke history`);
+    }
+    if (result.duplicateDeletedCount > 0) {
+      msgParts.push(`${result.duplicateDeletedCount} baris duplikat lama dibersihkan`);
+    }
+    const detailStr = msgParts.length > 0 ? ` (${msgParts.join(', ')})` : '';
+
+    const msg = result.archivedCount > 0
+      ? `Sukses! Total ${result.archivedCount} baris data berhasil diarsipkan ke "${result.historyTableName}", dan ${result.deletedCount} baris dibersihkan dari "${tableName}"${detailStr}.`
+      : `Sukses! ${result.deletedCount} baris data berhasil dibersihkan dari "${tableName}".`;
+
+    res.json({ success: true, data: result, message: msg });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -319,6 +370,8 @@ const checkMasterDuplicates = async (req, res) => {
 module.exports = {
   getMasterDatabases,
   getMasterTables,
+  getMasterTableFast,
+  compareSinglePod,
   getTableComparisonMatrix,
   getTableRelations,
   performSync,

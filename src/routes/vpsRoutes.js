@@ -160,6 +160,8 @@ router.get('/pod-topics/:serverId', requireAuth, podTopicController.getPodTopicD
 // 12. Master DB to Multi-POD Sync Matrix routes
 router.get('/master-pod-sync/masters', requireAuth, masterToPodSyncController.getMasterDatabases);
 router.get('/master-pod-sync/tables', requireAuth, masterToPodSyncController.getMasterTables);
+router.get('/master-pod-sync/master-table-fast', requireAuth, masterToPodSyncController.getMasterTableFast);
+router.get('/master-pod-sync/compare-single-pod', requireAuth, masterToPodSyncController.compareSinglePod);
 router.get('/master-pod-sync/matrix', requireAuth, masterToPodSyncController.getTableComparisonMatrix);
 router.get('/master-pod-sync/relations', requireAuth, masterToPodSyncController.getTableRelations);
 router.get('/master-pod-sync/fleet-audit', requireAuth, masterToPodSyncController.getFleetAudit);
