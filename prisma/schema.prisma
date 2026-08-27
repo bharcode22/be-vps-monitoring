@@ -20,6 +20,7 @@ model Server {
   latitude      String?
   longitude     String?
   mac_address   String?
+  pod_uuid      String?
   is_local      Int      @default(0)
   type          String   @default("vps") // 'vps' | 'pod'
   pod_version   String   @default("") // 'v2' | 'v3' | ''

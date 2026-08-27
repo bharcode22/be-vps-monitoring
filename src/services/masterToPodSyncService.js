@@ -213,6 +213,33 @@ async function getMasterDatabases() {
 }
 
 /**
+ * Helper to build UUID -> POD info lookup map
+ */
+async function getPodUuidMap() {
+  try {
+    const servers = await dbAsync.all(
+      "SELECT id, name, host, code, pod_version, pod_uuid FROM servers WHERE pod_uuid IS NOT NULL AND pod_uuid != ''"
+    );
+    const map = {};
+    for (const s of (servers || [])) {
+      if (s.pod_uuid) {
+        map[s.pod_uuid] = {
+          id: s.id,
+          name: s.name,
+          host: s.host,
+          code: s.code,
+          pod_version: s.pod_version
+        };
+      }
+    }
+    return map;
+  } catch (err) {
+    console.error('Error getPodUuidMap:', err.message);
+    return {};
+  }
+}
+
+/**
  * 2. Fetch public tables and their row counts + FK relations from selected Master Database
  * Ultra-Fast Single Aggregated Query (Eliminates N+1 query loops)
  */
@@ -635,7 +662,7 @@ async function getMasterTableFast(masterId, tableName) {
   }
 
   const podV3List = await dbAsync.all(
-    "SELECT id, name, host, port, username, password, private_key FROM servers WHERE pod_version = 'v3' ORDER BY name ASC"
+    "SELECT id, name, host, port, username, password, private_key, pod_uuid, code FROM servers WHERE pod_version = 'v3' ORDER BY name ASC"
   );
 
   const getRowKeyHelper = (row) => {
@@ -691,6 +718,8 @@ async function getMasterTableFast(masterId, tableName) {
       id: pod.id,
       name: pod.name,
       host: pod.host,
+      pod_uuid: pod.pod_uuid,
+      code: pod.code,
       isOnline,
       tableExists: null,
       rowCount: null,
@@ -703,6 +732,7 @@ async function getMasterTableFast(masterId, tableName) {
   });
 
   const onlineCount = podSummaries.filter(p => p.isOnline).length;
+  const podUuidMap = await getPodUuidMap();
 
   return {
     master: {
@@ -717,6 +747,7 @@ async function getMasterTableFast(masterId, tableName) {
     pods: podSummaries,
     columnsMatrix: columnMatrix,
     dataMatrix,
+    podUuidMap,
     summary: {
       totalPods: podV3List.length,
       onlinePods: onlineCount,
@@ -955,6 +986,8 @@ async function compareMasterTableWithSinglePod(masterId, tableName, podId) {
       id: podServer.id,
       name: podServer.name,
       host: podServer.host,
+      pod_uuid: podServer.pod_uuid,
+      code: podServer.code,
       isOnline: true,
       tableExists: true,
       rowCount: podRes.rowCount,
@@ -968,10 +1001,13 @@ async function compareMasterTableWithSinglePod(masterId, tableName, podId) {
     };
   }
 
+  const podUuidMap = await getPodUuidMap();
+
   return {
     success: true,
     podId: podServer.id,
     podSummary,
+    podUuidMap,
     columnPresenceMap,
     dataPresenceMap,
     podOnlyRows
@@ -1031,7 +1067,7 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
 
   // 2. Fetch all POD V3 servers
   const podV3List = await dbAsync.all(
-    "SELECT id, name, host, port, username, password, private_key FROM servers WHERE pod_version = 'v3' ORDER BY name ASC"
+    "SELECT id, name, host, port, username, password, private_key, pod_uuid, code FROM servers WHERE pod_version = 'v3' ORDER BY name ASC"
   );
 
   // 3. Query all PODs with Controlled Concurrency Pool (Prevents socket exhaustion & CPU load spikes)
@@ -1226,6 +1262,9 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
       return {
         id: pod.id,
         name: pod.name,
+        host: pod.host,
+        pod_uuid: pod.pod_uuid,
+        code: pod.code,
         isOnline: false,
         tableExists: false,
         rowCount: 0,
@@ -1239,6 +1278,9 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
       return {
         id: pod.id,
         name: pod.name,
+        host: pod.host,
+        pod_uuid: pod.pod_uuid,
+        code: pod.code,
         isOnline: true,
         tableExists: false,
         rowCount: 0,
@@ -1265,6 +1307,9 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
     return {
       id: pod.id,
       name: pod.name,
+      host: pod.host,
+      pod_uuid: pod.pod_uuid,
+      code: pod.code,
       isOnline: true,
       tableExists: true,
       rowCount: podRes.rowCount,
@@ -1281,6 +1326,7 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
   const syncedPodsCount = podSummaries.filter(p => p.status === 'SYNCED').length;
   const mismatchPodsCount = podSummaries.filter(p => p.isOnline && p.status !== 'SYNCED').length;
   const podOnlyRowsCount = dataMatrix.filter(d => !d.inMaster).length;
+  const podUuidMap = await getPodUuidMap();
 
   return {
     master: {
@@ -1295,6 +1341,7 @@ async function compareMasterTableAcrossPods(masterId, tableName) {
     pods: podSummaries,
     columnsMatrix: columnMatrix,
     dataMatrix,
+    podUuidMap,
     summary: {
       totalPods: podV3List.length,
       onlinePods: onlinePodsCount,
@@ -2664,13 +2711,13 @@ async function cleanMasterDuplicates(masterId, tableName, conflictColsArray) {
     await client.end().catch(() => { });
   }
 
-  return { 
-    success: true, 
-    deletedCount, 
-    archivedCount, 
+  return {
+    success: true,
+    deletedCount,
+    archivedCount,
     obsoleteCount,
     duplicateDeletedCount,
-    historyTableName 
+    historyTableName
   };
 }
 
