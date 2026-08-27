@@ -242,13 +242,18 @@ async function updateMasterRow(masterId, tableName, pkColumn, pkValue, data) {
     const keys = Object.keys(updateData).filter(k => updateData[k] !== undefined && updateData[k] !== '');
     if (keys.length === 0) throw new Error('Tidak ada data yang diperbarui.');
 
-    const setClause = keys.map((k, i) => `"${k}" = $${i + 1}`).join(', ');
+    const setClause = keys.map((k, i) => {
+      if (k === 'userLevel') {
+        return `"${k}" = $${i + 1}::public."userLevel"`;
+      }
+      return `"${k}" = $${i + 1}`;
+    }).join(', ');
     const values = keys.map(k => updateData[k]);
 
     // Add pkValue as the last parameter
     values.push(pkValue);
 
-    const query = `UPDATE public."${tableName}" SET ${setClause} WHERE "${pkColumn}" = $${values.length} RETURNING *`;
+    const query = `UPDATE public."${tableName}" SET ${setClause} WHERE "${pkColumn}"::text = $${values.length}::text RETURNING *`;
     const res = await client.query(query, values);
 
     if (res.rowCount === 0) {
@@ -288,8 +293,8 @@ async function deleteMasterRow(masterId, tableName, pkColumn, pkValue) {
     await client.query('BEGIN');
 
     // First fetch the row to log to history
-    const selectQuery = `SELECT * FROM public."${tableName}" WHERE "${pkColumn}" = $1`;
-    const selectRes = await client.query(selectQuery, [pkValue]);
+    const selectQuery = `SELECT * FROM public."${tableName}" WHERE "${pkColumn}"::text = $1::text`;
+    const selectRes = await client.query(selectQuery, [String(pkValue)]);
     if (selectRes.rowCount === 0) {
       throw new Error('Data tidak ditemukan.');
     }
@@ -299,8 +304,8 @@ async function deleteMasterRow(masterId, tableName, pkColumn, pkValue) {
     await recordHistory(client, tableName, rowToDelete, 'DELETE');
 
     // Perform hard delete
-    const deleteQuery = `DELETE FROM public."${tableName}" WHERE "${pkColumn}" = $1`;
-    await client.query(deleteQuery, [pkValue]);
+    const deleteQuery = `DELETE FROM public."${tableName}" WHERE "${pkColumn}"::text = $1::text`;
+    await client.query(deleteQuery, [String(pkValue)]);
 
     await client.query('COMMIT');
     return { success: true, deletedId: pkValue };
