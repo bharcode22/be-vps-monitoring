@@ -64,19 +64,44 @@ async function getAudit(req, res) {
  */
 async function pullLogs(req, res) {
   try {
-    const { masterId, targetPodIds, options } = req.body || {};
+    const {
+      masterId,
+      targetPodIds,
+      podIds,
+      options,
+      mode,
+      batchSize,
+      markSyncedOnPod,
+      datePreset,
+      customDateFrom,
+      customDateTo
+    } = req.body || {};
 
     if (!masterId) {
       return res.status(400).json({ success: false, error: 'masterId wajib disertakan dalam request body.' });
     }
 
-    const logs = [];
+    const mergedPodIds = Array.isArray(targetPodIds) && targetPodIds.length > 0
+      ? targetPodIds
+      : Array.isArray(podIds) && podIds.length > 0
+      ? podIds
+      : [];
+
+    const mergedOptions = {
+      mode: options?.mode || mode || 'id_diff',
+      batchSize: options?.batchSize || batchSize || 2000,
+      markSyncedOnPod: options?.markSyncedOnPod !== undefined ? options.markSyncedOnPod : markSyncedOnPod !== undefined ? markSyncedOnPod : true,
+      datePreset: options?.datePreset || datePreset || '7_DAYS',
+      dateFrom: options?.dateFrom || customDateFrom || null,
+      dateTo: options?.dateTo || customDateTo || null
+    };
+
     const progressUpdates = [];
 
     const result = await pullPodLogsFleet({
       masterId: parseInt(masterId, 10),
-      targetPodIds: Array.isArray(targetPodIds) ? targetPodIds.map(Number) : [],
-      options: options || {},
+      targetPodIds: mergedPodIds.map(Number),
+      options: mergedOptions,
       onProgress: (prog) => {
         progressUpdates.push({
           timestamp: new Date().toISOString(),

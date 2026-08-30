@@ -1,6 +1,7 @@
 const path = require('path');
 const { executeCommand } = require('./podDiskService');
 const { categorizeFile, formatBytes } = require('../s3Service');
+const { decrypt } = require('../../utils/crypto');
 
 /**
  * Scan all physical files in /home/pod/sounds, /home/pod/videos, /home/pod/images
@@ -470,6 +471,16 @@ async function downloadS3FilesToPod(server, s3Code, filenames = [], onProgress =
   const baseUrl = (process.env.AWS_URL || 'https://developerfile-084897310273.s3.ap-southeast-1.amazonaws.com').replace(/\/+$/, '');
   const cleanCode = String(s3Code).trim().replace(/^\/+/, '').replace(/^media\/?/i, '').replace(/^\/+|\/+$/g, '');
 
+  // Auto-verify and guarantee directory permissions for /home/pod/videos, /home/pod/sounds, /home/pod/images
+  try {
+    const rawPass = server.password ? decrypt(server.password) : null;
+    const targetUser = server.username || 'pod';
+    const prepCmd = rawPass
+      ? `echo "${rawPass}" | sudo -S mkdir -p /home/pod/sounds /home/pod/videos /home/pod/images && echo "${rawPass}" | sudo -S chown -R ${targetUser}:${targetUser} /home/pod/sounds /home/pod/videos /home/pod/images && echo "${rawPass}" | sudo -S chmod 777 /home/pod/sounds /home/pod/videos /home/pod/images 2>/dev/null || true`
+      : `mkdir -p /home/pod/sounds /home/pod/videos /home/pod/images && chmod 777 /home/pod/sounds /home/pod/videos /home/pod/images 2>/dev/null || true`;
+    await executeCommand(server, prepCmd, 8000).catch(() => {});
+  } catch (_) {}
+
   // Prepare file items with designated target folder
   const items = filenames.map(fn => {
     const filename = String(fn).trim();
@@ -600,7 +611,7 @@ print('DOWNLOAD_RESULT_JSON:' + json.dumps(results), flush=True)
     }
   };
 
-  const output = await executeCommand(server, downloadScript, 300000, { onStdout }); // 5 minutes timeout
+  const output = await executeCommand(server, downloadScript, 300000, { onStdout, resetTimeoutOnActivity: true }); // 5 minutes inactivity timeout
   const match = output.match(/DOWNLOAD_RESULT_JSON:(.*)/);
 
   if (!match) {
@@ -631,6 +642,146 @@ print('DOWNLOAD_RESULT_JSON:' + json.dumps(results), flush=True)
   };
 }
 
+function formatDuration(sec) {
+  if (!sec || isNaN(sec)) return '0s';
+  const totalSec = Math.round(sec);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (hours > 0) return `${hours}j ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function formatBitrate(bps) {
+  if (!bps || isNaN(bps)) return '0 bps';
+  if (bps >= 1000000) return `${(bps / 1000000).toFixed(1)} Mbps`;
+  return `${Math.round(bps / 1000)} Kbps`;
+}
+
+/**
+ * Check media file integrity using ffprobe & stat on remote POD
+ */
+async function checkPodFileIntegrity(server, filePath) {
+  if (!server) throw new Error('Server POD tidak ditemukan.');
+  if (!filePath) throw new Error('Path file wajib ditentukan.');
+
+  const b64Path = Buffer.from(filePath).toString('base64');
+  const checkScript = `
+python3 -c "
+import os, sys, json, base64, subprocess
+
+file_path = base64.b64decode('${b64Path}').decode('utf-8')
+ext = os.path.splitext(file_path)[1].lower()
+if ext in ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif']:
+    file_type = 'image'
+elif ext in ['.wav', '.mp3', '.flac', '.aac', '.ogg', '.m4a']:
+    file_type = 'audio'
+else:
+    file_type = 'video'
+
+res = {'path': file_path, 'filename': os.path.basename(file_path), 'fileType': file_type, 'exists': os.path.exists(file_path)}
+
+if not res['exists']:
+    res['status'] = 'missing'
+    res['isCorrupt'] = True
+    res['message'] = 'File fisik tidak ditemukan di POD'
+    print('INTEGRITY_JSON:' + json.dumps(res))
+    sys.exit(0)
+
+size_bytes = os.path.getsize(file_path)
+res['sizeBytes'] = size_bytes
+
+if size_bytes == 0:
+    res['status'] = 'corrupt'
+    res['isCorrupt'] = True
+    res['message'] = 'Ukuran file 0 byte (kosong / rusak)'
+    print('INTEGRITY_JSON:' + json.dumps(res))
+    sys.exit(0)
+
+# Run ffprobe for video/audio/image container and stream validation
+cmd = [
+    'ffprobe', '-v', 'error',
+    '-show_entries', 'format=format_name,duration,size,bit_rate',
+    '-show_entries', 'stream=codec_name,codec_type,width,height,sample_rate,channels,pix_fmt',
+    '-of', 'json',
+    file_path
+]
+
+try:
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=25)
+    if proc.returncode != 0:
+        err_msg = proc.stderr.strip() or 'Struktur file media tidak valid'
+        res['status'] = 'corrupt'
+        res['isCorrupt'] = True
+        res['message'] = f'File korup: {err_msg}'
+    else:
+        info = json.loads(proc.stdout) if proc.stdout else {}
+        fmt = info.get('format', {})
+        streams = info.get('streams', [])
+        duration_sec = float(fmt.get('duration', 0)) if fmt.get('duration') else None
+        bitrate_val = int(fmt.get('bit_rate', 0)) if fmt.get('bit_rate') else None
+
+        res['status'] = 'healthy'
+        res['isCorrupt'] = False
+        res['duration'] = duration_sec
+        res['bitrate'] = bitrate_val
+        res['formatName'] = fmt.get('format_name', '')
+        res['streams'] = [{
+            'codec': s.get('codec_name'),
+            'type': 'image' if file_type == 'image' else s.get('codec_type'),
+            'width': s.get('width'),
+            'height': s.get('height'),
+            'pixFmt': s.get('pix_fmt'),
+            'sampleRate': s.get('sample_rate'),
+            'channels': s.get('channels')
+        } for s in streams]
+
+        if file_type == 'image':
+            w = res['streams'][0].get('width') if res['streams'] else None
+            h = res['streams'][0].get('height') if res['streams'] else None
+            res['dimensions'] = f'{w} × {h} px' if w and h else None
+            res['message'] = 'File gambar valid, struktur visual utuh dan siap ditampilkan'
+        elif file_type == 'audio':
+            res['message'] = 'File audio valid, sampel suara utuh dan siap diputar'
+        else:
+            res['message'] = 'File video valid, kontainer audio & visual utuh dan siap diputar'
+except subprocess.TimeoutExpired:
+    res['status'] = 'timeout'
+    res['isCorrupt'] = False
+    res['message'] = 'Pemeriksaan ffprobe melebihi batas waktu (timeout)'
+except Exception as e:
+    res['status'] = 'error'
+    res['isCorrupt'] = True
+    res['message'] = str(e)
+
+print('INTEGRITY_JSON:' + json.dumps(res))
+"
+  `;
+
+  const output = await executeCommand(server, checkScript, 35000);
+  const match = output.match(/INTEGRITY_JSON:(.*)/);
+  if (!match) {
+    throw new Error(`Gagal memproses hasil cek integritas di POD: ${output.substring(0, 150)}`);
+  }
+
+  let data = {};
+  try {
+    data = JSON.parse(match[1]);
+  } catch (err) {
+    throw new Error(`Format respon integritas tidak valid: ${err.message}`);
+  }
+
+  return {
+    serverId: server.id,
+    serverName: server.name,
+    ...data,
+    sizeFormatted: formatBytes(data.sizeBytes || 0),
+    durationFormatted: data.duration ? formatDuration(data.duration) : null,
+    bitrateFormatted: data.bitrate ? formatBitrate(data.bitrate) : null
+  };
+}
+
 module.exports = {
   scanPodPhysicalFiles,
   detectPodJunkFiles,
@@ -638,5 +789,6 @@ module.exports = {
   checkCodeFilesOnSinglePod,
   hardDeletePodCodeFiles,
   detectPodRogueFiles,
-  downloadS3FilesToPod
+  downloadS3FilesToPod,
+  checkPodFileIntegrity
 };

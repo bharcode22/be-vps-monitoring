@@ -13,6 +13,7 @@ const { registerRabbitMqTracerHandlers } = require('./services/rabbitmqTracer');
 const { registerInstallationStreamHandlers } = require('./services/installationStreamer');
 const { registerSshTerminalHandlers } = require('./services/sshTerminalStreamer');
 const { registerMqttSnifferHandlers } = require('./services/mqttSnifferService');
+const { initPodActivityService, getPodActivityStatus } = require('./services/podActivityService');
 
 const app = express();
 const server = http.createServer(app);
@@ -42,6 +43,11 @@ io.on('connection', (socket) => {
   if (cachedList && cachedList.length > 0) {
     socket.emit('metrics_update', cachedList);
   }
+
+  // Send latest POD activity occupancy status to newly connected socket
+  getPodActivityStatus().then((activityData) => {
+    socket.emit('pod-activity:initial', activityData);
+  }).catch(() => {});
 
   // Trigger fresh collection
   collectAllServerMetrics(io);
@@ -85,6 +91,9 @@ async function runPollingLoop() {
     setTimeout(runPollingLoop, MONITOR_INTERVAL);
   }
 }
+
+// Initialize real-time POD Activity MQTT service
+initPodActivityService(io);
 
 // Start continuous polling loop
 setTimeout(runPollingLoop, 1000);

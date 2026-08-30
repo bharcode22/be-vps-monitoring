@@ -21,6 +21,7 @@ const tncSyncController = require('../controllers/tncSyncController');
 const masterCrudController = require('../controllers/masterCrudController');
 const regenesisLogController = require('../controllers/regenesisLogController');
 const podLogsSyncController = require('../controllers/podLogsSyncController');
+const podActivityController = require('../controllers/podActivityController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // 1. Health check & Settings
@@ -80,6 +81,7 @@ router.post('/vps/content/pods/cleanup', requireAuth, contentController.cleanupP
 router.post('/vps/content/pods/sync', requireAuth, contentController.syncS3ToPod);
 router.post('/vps/content/pods/download-code', requireAuth, contentController.downloadCodeFilesToPod);
 router.post('/vps/content/pods/download-batch', requireAuth, contentController.downloadCodeFilesToBatchPods);
+router.post('/vps/content/pods/check-file-integrity', requireAuth, contentController.checkFileIntegrity);
 router.post('/vps/content/matrix/check-pods', requireAuth, contentController.checkCodeOnPods);
 router.post('/vps/content/pods/delete-code', requireAuth, contentController.deleteCodeOnPod);
 router.post('/vps/content/batch-delete', requireAuth, contentController.batchDeleteCode);
@@ -228,5 +230,11 @@ router.get('/pod-logs-sync/activity-types', requireAuth, podLogsSyncController.g
 router.get('/pod-logs-sync/compare-pod', requireAuth, podLogsSyncController.comparePod);
 router.post('/pod-logs-sync/sync-single-row', requireAuth, podLogsSyncController.syncSingleRow);
 router.get('/pod-logs-sync/pod-uuid-map', requireAuth, podLogsSyncController.getPodUuidMapController);
+
+// POD Activity (Real-Time Occupancy mod_chair/pob_state)
+router.get('/pod-activity/status', optionalAuth, podActivityController.getStatus);
+router.get('/pod-activity/history', optionalAuth, podActivityController.getHistory);
+router.post('/pod-activity/simulate', requireAuth, podActivityController.simulate);
+router.post('/pod-activity/reconnect', requireAuth, podActivityController.reconnect);
 
 module.exports = router;

@@ -12,7 +12,8 @@ const {
   cleanPodDockerStorage,
   executeCommand,
   detectPodRogueFiles,
-  downloadS3FilesToPod
+  downloadS3FilesToPod,
+  checkPodFileIntegrity
 } = require('../services/podStorageService');
 
 const { getMultimediaSoundScapes, getValidMultimediaFilenames } = require('../services/masterDbService');
@@ -318,26 +319,62 @@ const downloadCodeFilesToPod = async (req, res) => {
       }
     };
 
-    const result = await downloadS3FilesToPod(server, s3Code, targetFilenames, onProgress);
-
-    if (io) {
-      io.emit('s3_pod_download_complete', {
+    // Instant non-blocking HTTP response so large files (video/audio GB) never timeout on browser / Cloudflare Tunnel
+    res.json({
+      success: true,
+      status: 'started',
+      message: `Proses download ${targetFilenames.length} file ke ${server.name} dimulai di latar belakang...`,
+      data: {
         serverId: server.id,
         serverName: server.name,
         s3Code,
-        successCount: result.successCount,
-        totalRequested: result.totalRequested
-      });
-    }
-
-    res.json({
-      success: true,
-      message: `Berhasil mendownload ${result.successCount} dari ${result.totalRequested} file ke ${server.name} (${result.totalDownloadedFormatted}).`,
-      data: result
+        totalRequested: targetFilenames.length,
+        filenames: targetFilenames
+      }
     });
+
+    // Execute the download asynchronously in background
+    downloadS3FilesToPod(server, s3Code, targetFilenames, onProgress)
+      .then((result) => {
+        if (io) {
+          const isSuccess = result.successCount > 0 && result.errorCount === 0;
+          const firstError = result.errorCount > 0
+            ? (result.downloads?.find(d => d.status === 'error')?.error || `Gagal mendownload ${result.errorCount} file`)
+            : undefined;
+
+          io.emit('s3_pod_download_complete', {
+            serverId: server.id,
+            serverName: server.name,
+            s3Code,
+            success: isSuccess,
+            error: firstError,
+            successCount: result.successCount,
+            totalRequested: result.totalRequested,
+            totalDownloadedFormatted: result.totalDownloadedFormatted,
+            filenames: targetFilenames
+          });
+        }
+      })
+      .catch((err) => {
+        console.error(`Background download error on ${server.name}:`, err.message);
+        if (io) {
+          io.emit('s3_pod_download_complete', {
+            serverId: server.id,
+            serverName: server.name,
+            s3Code,
+            success: false,
+            error: err.message,
+            successCount: 0,
+            totalRequested: targetFilenames.length,
+            filenames: targetFilenames
+          });
+        }
+      });
   } catch (err) {
-    console.error('Error downloading files to POD:', err.message);
-    res.status(500).json({ success: false, error: err.message });
+    console.error('Error starting download to POD:', err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: err.message });
+    }
   }
 };
 
@@ -363,76 +400,96 @@ const downloadCodeFilesToBatchPods = async (req, res) => {
       return res.status(404).json({ success: false, error: 'Tidak ada server valid yang ditemukan.' });
     }
 
-    const s3Data = await listS3FolderFiles(s3Code);
-    const allS3Filenames = s3Data.files.map(f => f.filename);
+    // Instant non-blocking HTTP response
+    res.json({
+      success: true,
+      status: 'started',
+      message: `Proses batch download ke ${servers.length} POD dimulai di latar belakang...`,
+      data: {
+        serverIds: servers.map(s => s.id),
+        s3Code
+      }
+    });
 
-    const batchResults = await Promise.allSettled(
-      servers.map(async (server) => {
-        let filesToDownload = filenames;
-        if (!filesToDownload || !Array.isArray(filesToDownload) || filesToDownload.length === 0) {
-          const check = await checkCodeFilesOnSinglePod(server, s3Code, allS3Filenames);
-          filesToDownload = (check.missingFiles || []).map(f => typeof f === 'string' ? f : f.filename);
-        }
+    // Execute in background
+    (async () => {
+      const s3Data = await listS3FolderFiles(s3Code);
+      const allS3Filenames = s3Data.files.map(f => f.filename);
 
-        if (filesToDownload.length === 0) {
-          return {
-            serverId: server.id,
-            serverName: server.name,
-            status: 'skipped',
-            message: 'Semua file sudah ada di POD ini.'
+      for (const server of servers) {
+        try {
+          let filesToDownload = filenames;
+          if (!filesToDownload || !Array.isArray(filesToDownload) || filesToDownload.length === 0) {
+            const check = await checkCodeFilesOnSinglePod(server, s3Code, allS3Filenames);
+            filesToDownload = (check.missingFiles || []).map(f => typeof f === 'string' ? f : f.filename);
+          }
+
+          if (filesToDownload.length === 0) {
+            if (io) {
+              io.emit('s3_pod_download_complete', {
+                serverId: server.id,
+                serverName: server.name,
+                s3Code,
+                success: true,
+                successCount: 0,
+                totalRequested: 0,
+                message: 'Semua file sudah lengkap di POD ini.'
+              });
+            }
+            continue;
+          }
+
+          const onProgress = (prog) => {
+            if (io) {
+              io.emit('s3_pod_download_progress', {
+                serverId: server.id,
+                serverName: server.name,
+                s3Code,
+                ...prog
+              });
+            }
           };
-        }
 
-        const onProgress = (prog) => {
+          const dlResult = await downloadS3FilesToPod(server, s3Code, filesToDownload, onProgress);
+
           if (io) {
-            io.emit('s3_pod_download_progress', {
+            const isSuccess = dlResult.successCount > 0 && dlResult.errorCount === 0;
+            const errorMsg = dlResult.errorCount > 0
+              ? (dlResult.downloads?.find(d => d.status === 'error')?.error || `Gagal mendownload ${dlResult.errorCount} file`)
+              : undefined;
+
+            io.emit('s3_pod_download_complete', {
               serverId: server.id,
               serverName: server.name,
               s3Code,
-              ...prog
+              success: isSuccess,
+              error: errorMsg,
+              successCount: dlResult.successCount,
+              totalRequested: dlResult.totalRequested,
+              totalDownloadedFormatted: dlResult.totalDownloadedFormatted
             });
           }
-        };
-
-        const dlResult = await downloadS3FilesToPod(server, s3Code, filesToDownload, onProgress);
-
-        if (io) {
-          io.emit('s3_pod_download_complete', {
-            serverId: server.id,
-            serverName: server.name,
-            s3Code,
-            successCount: dlResult.successCount,
-            totalRequested: dlResult.totalRequested
-          });
+        } catch (err) {
+          console.error(`Batch download error on ${server.name}:`, err.message);
+          if (io) {
+            io.emit('s3_pod_download_complete', {
+              serverId: server.id,
+              serverName: server.name,
+              s3Code,
+              success: false,
+              error: err.message
+            });
+          }
         }
-
-        return {
-          serverId: server.id,
-          serverName: server.name,
-          status: 'success',
-          ...dlResult
-        };
-      })
-    );
-
-    const summary = batchResults.map((r, i) => {
-      if (r.status === 'fulfilled') return r.value;
-      return {
-        serverId: servers[i].id,
-        serverName: servers[i].name,
-        status: 'error',
-        error: r.reason?.message || 'Gagal download'
-      };
-    });
-
-    res.json({
-      success: true,
-      message: `Proses download ke ${servers.length} POD selesai diproses.`,
-      data: summary
+      }
+    })().catch(err => {
+      console.error('Fatal batch download runner error:', err.message);
     });
   } catch (err) {
-    console.error('Error in batch download to PODs:', err.message);
-    res.status(500).json({ success: false, error: err.message });
+    console.error('Error starting batch download to PODs:', err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: err.message });
+    }
   }
 };
 
@@ -849,6 +906,32 @@ const cleanupRogueFiles = async (req, res) => {
   }
 };
 
+/**
+ * 14. Check single file integrity using ffprobe & stat on a specific POD
+ */
+const checkFileIntegrity = async (req, res) => {
+  try {
+    const { serverId, filePath } = req.body;
+    if (!serverId) {
+      return res.status(400).json({ success: false, error: 'serverId wajib ditentukan' });
+    }
+    if (!filePath) {
+      return res.status(400).json({ success: false, error: 'filePath wajib ditentukan' });
+    }
+
+    const server = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
+    if (!server) {
+      return res.status(404).json({ success: false, error: 'Server POD tidak ditemukan' });
+    }
+
+    const result = await checkPodFileIntegrity(server, filePath);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    console.error('Error checking file integrity:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 module.exports = {
   getS3Folders,
   getS3FolderFiles,
@@ -869,7 +952,8 @@ module.exports = {
   scanAllPodsRogueFiles,
   cleanupRogueFiles,
   downloadCodeFilesToPod,
-  downloadCodeFilesToBatchPods
+  downloadCodeFilesToBatchPods,
+  checkFileIntegrity
 };
 
 

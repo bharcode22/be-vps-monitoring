@@ -45,16 +45,23 @@ function executeSshCommand(server, command, options = {}) {
     let activeStream = null;
 
     const timeoutSec = Math.round(timeoutMs / 1000);
-    const timeout = setTimeout(() => {
-      if (!isHandled) {
-        isHandled = true;
-        cleanupResources();
-        reject(new Error(`Koneksi SSH ke server waktu habis (timeout ${timeoutSec} detik)`));
-      }
-    }, timeoutMs);
+    let timeoutTimer = null;
+
+    function resetTimer() {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      timeoutTimer = setTimeout(() => {
+        if (!isHandled) {
+          isHandled = true;
+          cleanupResources();
+          reject(new Error(`Koneksi SSH ke server waktu habis (inaktif ${timeoutSec} detik)`));
+        }
+      }, timeoutMs);
+    }
+
+    resetTimer();
 
     function cleanupResources() {
-      clearTimeout(timeout);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
       if (activeStream) {
         try { activeStream.destroy(); } catch (_) {}
       }
@@ -71,7 +78,7 @@ function executeSshCommand(server, command, options = {}) {
         password = decrypt(server.password);
       }
     } catch (decryptErr) {
-      clearTimeout(timeout);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
       return reject(new Error(`Gagal mendekripsi kredensial SSH: ${decryptErr.message}`));
     }
 
@@ -117,12 +124,18 @@ function executeSshCommand(server, command, options = {}) {
         stream.on('data', (data) => {
           const str = data.toString();
           stdout += str;
+          if (options.resetTimeoutOnActivity) {
+            resetTimer();
+          }
           if (options.onStdout) {
             options.onStdout(str);
           }
         });
 
         stream.stderr.on('data', (data) => {
+          if (options.resetTimeoutOnActivity) {
+            resetTimer();
+          }
           stderr += data.toString();
         });
       });

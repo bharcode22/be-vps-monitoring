@@ -786,67 +786,76 @@ async function compareSinglePodLogs({ masterId, podId, limit = 50 }) {
       totalInMasterForPod = parseInt(masterCountRes.rows[0].total_in_master, 10) || 0;
     }
 
-    // 2. Fetch sample rows from POD: latest logs + unsynced logs
-    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 60, 10), 200);
-    
-    // 2a. Latest rows from POD regardless of flag
-    const latestPodRes = await podClient.query(`
-      SELECT id, pod_id, user_id, code, value, activity_type, data, timestamp_start, is_synced, created_at
-      FROM public.pod_logs
-      ORDER BY created_at DESC
-      LIMIT $1;
-    `, [safeLimit]);
+    // 2. Query ALL row IDs from POD (up to 50,000) to find the EXACT missing rows
+    const idRes = await podClient.query(
+      'SELECT id, created_at, is_synced FROM public.pod_logs ORDER BY created_at DESC LIMIT 50000;'
+    );
+    const allPodRows = idRes.rows;
+    const allPodIds = allPodRows.map(r => r.id);
 
-    // 2b. Specifically unsynced rows from POD
-    const unsyncedPodRes = await podClient.query(`
-      SELECT id, pod_id, user_id, code, value, activity_type, data, timestamp_start, is_synced, created_at
-      FROM public.pod_logs
-      WHERE (is_synced = false OR is_synced IS NULL)
-      ORDER BY created_at DESC
-      LIMIT $1;
-    `, [safeLimit]);
-
-    // Merge & deduplicate sample rows by ID
-    const sampleMap = new Map();
-    latestPodRes.rows.forEach(r => sampleMap.set(r.id, r));
-    unsyncedPodRes.rows.forEach(r => sampleMap.set(r.id, r));
-    const combinedPodSample = Array.from(sampleMap.values());
-    const sampleIds = combinedPodSample.map(r => r.id);
-
-    // 2c. Verify each sample ID directly against Master RDS
-    let masterFoundIds = new Set();
-    if (sampleIds.length > 0) {
-      const masterCheckRes = await masterClient.query(
+    // Verify all IDs in batches against Master DB
+    const masterFoundSet = new Set();
+    const batchSizeCheck = 5000;
+    for (let i = 0; i < allPodIds.length; i += batchSizeCheck) {
+      const chunk = allPodIds.slice(i, i + batchSizeCheck);
+      const checkRes = await masterClient.query(
         'SELECT id FROM public.pod_logs WHERE id = ANY($1::uuid[]);',
-        [sampleIds]
+        [chunk]
       );
-      masterFoundIds = new Set(masterCheckRes.rows.map(r => r.id));
+      for (const r of checkRes.rows) {
+        masterFoundSet.add(r.id);
+      }
     }
 
-    // 2d. Partition into: Missing in Master (ID not found) vs Present in Master (ID found)
-    const missingInMasterRows = [];
-    const presentInMasterRows = [];
+    // Find ALL rows that exist in POD but NOT in Master RDS!
+    const missingPodRows = allPodRows.filter(r => !masterFoundSet.has(r.id));
+    const missingIds = missingPodRows.map(r => r.id);
+    const actualMissingCount = missingIds.length;
+
+    // Fetch full details of the missing rows from POD (up to 200 rows for display)
+    let missingInMasterRows = [];
     let falseSyncedCount = 0;
 
-    combinedPodSample.forEach(row => {
-      const inMaster = masterFoundIds.has(row.id);
-      if (inMaster) {
-        presentInMasterRows.push({
-          ...row,
-          __status: 'IN_MASTER'
-        });
-      } else {
+    if (missingIds.length > 0) {
+      const targetMissingIds = missingIds.slice(0, 200);
+      const missingDetailsRes = await podClient.query(`
+        SELECT id, pod_id, user_id, code, value, activity_type, data, timestamp_start, is_synced, created_at, updated_at
+        FROM public.pod_logs
+        WHERE id = ANY($1::uuid[])
+        ORDER BY created_at DESC;
+      `, [targetMissingIds]);
+
+      missingInMasterRows = missingDetailsRes.rows.map(row => {
         const isFalseSynced = !!row.is_synced;
-        if (isFalseSynced) falseSyncedCount++;
-        missingInMasterRows.push({
+        return {
           ...row,
           __status: 'MISSING_IN_MASTER',
           isFalseSynced
-        });
-      }
-    });
+        };
+      });
 
-    // 3. Fetch sample synced rows from Master for this POD
+      // Total missing rows that have is_synced = true (false flag anomaly)
+      falseSyncedCount = missingPodRows.filter(r => r.is_synced).length;
+    }
+
+    // 3. For presentInMasterRows, get a sample of rows that are present in Master
+    const presentPodRows = allPodRows.filter(r => masterFoundSet.has(r.id)).slice(0, 60);
+    let presentInMasterRows = [];
+    if (presentPodRows.length > 0) {
+      const presentIds = presentPodRows.map(r => r.id);
+      const presentDetailsRes = await podClient.query(`
+        SELECT id, pod_id, user_id, code, value, activity_type, data, timestamp_start, is_synced, created_at
+        FROM public.pod_logs
+        WHERE id = ANY($1::uuid[])
+        ORDER BY created_at DESC;
+      `, [presentIds]);
+      presentInMasterRows = presentDetailsRes.rows.map(r => ({
+        ...r,
+        __status: 'IN_MASTER'
+      }));
+    }
+
+    // 4. Fetch sample synced rows from Master for this POD
     let masterRows = [];
     if (podUuid) {
       const masterRowsRes = await masterClient.query(`
@@ -854,8 +863,8 @@ async function compareSinglePodLogs({ masterId, podId, limit = 50 }) {
         FROM public.pod_logs
         WHERE pod_id = $1
         ORDER BY created_at DESC
-        LIMIT $2;
-      `, [podUuid, safeLimit]);
+        LIMIT 60;
+      `, [podUuid]);
       masterRows = masterRowsRes.rows;
     }
 
@@ -878,6 +887,7 @@ async function compareSinglePodLogs({ masterId, podId, limit = 50 }) {
         unsyncedInPod,
         syncedInPod,
         totalInMasterForPod,
+        actualMissingCount,
         missingSampleCount: missingInMasterRows.length,
         falseSyncedCount
       },

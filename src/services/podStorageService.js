@@ -20,7 +20,8 @@ const {
   checkCodeFilesOnSinglePod,
   hardDeletePodCodeFiles,
   detectPodRogueFiles,
-  downloadS3FilesToPod
+  downloadS3FilesToPod,
+  checkPodFileIntegrity
 } = require('./podStorage/podMediaScannerService');
 
 const {
@@ -46,5 +47,6 @@ module.exports = {
   inspectPodDockerStorage,
   cleanPodDockerStorage,
   detectPodRogueFiles,
-  downloadS3FilesToPod
+  downloadS3FilesToPod,
+  checkPodFileIntegrity
 };
