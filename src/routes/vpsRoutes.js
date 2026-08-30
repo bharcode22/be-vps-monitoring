@@ -19,6 +19,8 @@ const podTopicController = require('../controllers/podTopicController');
 const masterToPodSyncController = require('../controllers/masterToPodSyncController');
 const tncSyncController = require('../controllers/tncSyncController');
 const masterCrudController = require('../controllers/masterCrudController');
+const regenesisLogController = require('../controllers/regenesisLogController');
+const podLogsSyncController = require('../controllers/podLogsSyncController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // 1. Health check & Settings
@@ -209,5 +211,22 @@ router.post('/vps/:id/scripts/run', requireAuth, scriptController.executeScript)
 router.get('/vps/:id/sounds/validate', requireAuth, soundController.validateSounds);
 router.get('/vps/:id/pod-config', requireAuth, podConfigController.getPodConfig);
 router.put('/vps/:id/pod-config', requireAuth, podConfigController.updatePodConfig);
+
+// Regenesis Logs (/home/pod/Documents/RegenesisLogs)
+router.get('/vps/:id/regenesis-logs', requireAuth, regenesisLogController.getLogs);
+router.get('/vps/:id/regenesis-logs/content', requireAuth, regenesisLogController.getLogContent);
+router.get('/vps/:id/regenesis-logs/download', optionalAuth, regenesisLogController.downloadLogFile);
+router.delete('/vps/:id/regenesis-logs', requireAuth, regenesisLogController.deleteLog);
+
+// POD Logs Sync (High-Volume POD V3 -> Master RDS)
+router.get('/pod-logs-sync/masters', requireAuth, podLogsSyncController.getMasters);
+router.get('/pod-logs-sync/pods', requireAuth, podLogsSyncController.getPods);
+router.get('/pod-logs-sync/audit', requireAuth, podLogsSyncController.getAudit);
+router.post('/pod-logs-sync/pull', requireAuth, podLogsSyncController.pullLogs);
+router.get('/pod-logs-sync/master-logs', requireAuth, podLogsSyncController.getMasterLogs);
+router.get('/pod-logs-sync/activity-types', requireAuth, podLogsSyncController.getActivityTypes);
+router.get('/pod-logs-sync/compare-pod', requireAuth, podLogsSyncController.comparePod);
+router.post('/pod-logs-sync/sync-single-row', requireAuth, podLogsSyncController.syncSingleRow);
+router.get('/pod-logs-sync/pod-uuid-map', requireAuth, podLogsSyncController.getPodUuidMapController);
 
 module.exports = router;
