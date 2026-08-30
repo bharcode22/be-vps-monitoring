@@ -509,7 +509,7 @@ async function downloadS3FilesToPod(server, s3Code, filenames = [], onProgress =
   // Script using Python3 to download files safely with urllib reporthook for live progress
   const downloadScript = `
 python3 -c "
-import json, os, sys, base64, urllib.request, urllib.parse, time
+import json, os, sys, base64, urllib.request, urllib.parse, subprocess, time
 
 try:
     data = json.loads(base64.b64decode('${b64Payload}').decode('utf-8'))
@@ -563,8 +563,32 @@ for item in files:
                 last_b[0] = downloaded
         return reporthook
 
-    try:
-        urllib.request.urlretrieve(url, dest_path, reporthook=make_reporthook(fn))
+    file_success = False
+    err_str = ''
+    for attempt in range(1, 4):
+        try:
+            urllib.request.urlretrieve(url, dest_path, reporthook=make_reporthook(fn))
+            if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+                file_success = True
+                break
+        except Exception as e:
+            err_str = str(e)
+            if os.path.exists(dest_path):
+                try: os.remove(dest_path)
+                except: pass
+            if attempt < 3:
+                time.sleep(1.5 * attempt)
+
+    if not file_success:
+        try:
+            curl_cmd = ['curl', '-sSL', '--retry', '3', '--retry-delay', '2', '--connect-timeout', '15', '-m', '600', url, '-o', dest_path]
+            cp = subprocess.run(curl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=610)
+            if cp.returncode == 0 and os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+                file_success = True
+        except Exception as ce:
+            err_str += f' | curl error: {ce}'
+
+    if file_success:
         size = os.path.getsize(dest_path)
         results.append({
             'filename': fn,
@@ -573,12 +597,12 @@ for item in files:
             'destPath': dest_path,
             'sizeBytes': size
         })
-    except Exception as e:
+    else:
         results.append({
             'filename': fn,
             'status': 'error',
             'folderType': folder,
-            'error': str(e)
+            'error': err_str or 'Gagal mendownload'
         })
 
 print('DOWNLOAD_RESULT_JSON:' + json.dumps(results), flush=True)

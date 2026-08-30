@@ -90,7 +90,28 @@ async function getValidMultimediaFilenames() {
   return Array.from(filenames);
 }
 
+async function getFileFlowEditorRecords() {
+  const pool = await getMasterPool();
+  const query = `
+    SELECT 
+      id, 
+      file_name, 
+      file_type, 
+      placement, 
+      url, 
+      created_date, 
+      update_date, 
+      deleted_at 
+    FROM "fileFlowEditor" 
+    WHERE deleted_at IS NULL 
+    ORDER BY created_date DESC;
+  `;
+  const result = await pool.query(query);
+  return result.rows;
+}
+
 module.exports = {
   getMultimediaSoundScapes,
-  getValidMultimediaFilenames
+  getValidMultimediaFilenames,
+  getFileFlowEditorRecords
 };

@@ -206,3 +206,21 @@ model PodBundleState {
   @@index([pod_code])
   @@map("pod_bundle_states")
 }
+
+model PodOccupancyLog {
+  id               Int       @id @default(autoincrement())
+  server_id        Int
+  server_name      String?   @db.VarChar(100)
+  server_code      String?   @db.VarChar(50)
+  server_host      String?   @db.VarChar(50)
+  state_value      Int
+  state_label      String    @db.VarChar(30)
+  topic            String?   @db.VarChar(255)
+  raw_payload      String?   @db.Text
+  duration_seconds Int?      @default(0)
+  created_at       DateTime? @default(now()) @db.Timestamptz(6)
+
+  @@index([server_id], map: "idx_occupancy_logs_server_id")
+  @@index([created_at(sort: Desc)], map: "idx_occupancy_logs_created_at")
+  @@map("pod_occupancy_logs")
+}

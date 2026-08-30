@@ -22,6 +22,7 @@ const masterCrudController = require('../controllers/masterCrudController');
 const regenesisLogController = require('../controllers/regenesisLogController');
 const podLogsSyncController = require('../controllers/podLogsSyncController');
 const podActivityController = require('../controllers/podActivityController');
+const flowEditorStorageController = require('../controllers/flowEditorStorageController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // 1. Health check & Settings
@@ -92,6 +93,14 @@ router.get('/vps/storage/docker/inspect/:serverId', requireAuth, contentControll
 router.post('/vps/storage/docker/inspect-all', requireAuth, contentController.inspectAllPodsDocker);
 router.post('/vps/storage/docker/cleanup', requireAuth, contentController.cleanupSinglePodDocker);
 router.post('/vps/storage/docker/cleanup-batch', requireAuth, contentController.cleanupBatchPodsDocker);
+
+// --- Flow Editor Media Storage (Master RDS, S3 images/, POD V3) ---
+router.get('/vps/flow-editor/files', requireAuth, flowEditorStorageController.getFlowEditorFiles);
+router.post('/vps/flow-editor/pods/check', requireAuth, flowEditorStorageController.checkFlowFilesOnPods);
+router.post('/vps/flow-editor/pods/download', requireAuth, flowEditorStorageController.downloadFlowFilesToSinglePod);
+router.post('/vps/flow-editor/pods/download-batch', requireAuth, flowEditorStorageController.downloadFlowFilesToBatchPods);
+router.post('/vps/flow-editor/pods/delete', requireAuth, flowEditorStorageController.deleteFlowFileOnPod);
+router.post('/vps/flow-editor/s3/delete', requireAuth, flowEditorStorageController.deleteFlowFileOnS3);
 
 // --- T&C / User Sync (Batch Ops) ---
 router.post('/tnc-sync/publish-definitions', requireAuth, tncSyncController.publishDefinitions);
