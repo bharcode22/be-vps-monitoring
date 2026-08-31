@@ -26,9 +26,23 @@ function generateBatchDownloadScript(serverName, appConfigs, environment) {
   let downloadScript = `echo "[JENKINS_STAGE:1:START:${serverName}]"\necho "=== [STAGE 1/5] Clean & MinIO Parallel Download ==="\n`;
   downloadScript += generateMinioClientResolutionSnippet();
 
+  downloadScript += `echo "  [INFO] Menghitung estimasi total ukuran artefak..."\n`;
+  downloadScript += `TOTAL_BYTES=0\n`;
+  downloadScript += `TARGET_DIRS=""\n`;
+  downloadScript += `DOWNLOAD_PIDS=""\n`;
+
   appConfigs.forEach(cfg => {
     const minioAppPath = resolveMinioAppPath(cfg.app_name);
     const isDebApp = cfg.app_name === 'big-screen' || cfg.app_name === 'small-screen';
+    
+    // Add size calculation snippet
+    if (isDebApp) {
+      downloadScript += `APP_SIZE=$($MC_CMD ls --json minio-deploy/deploybox/${minioAppPath}/${environment}/${cfg.version}/artifact-bundle-${cfg.version}.zip 2>/dev/null | grep -o '"size":[0-9]*' | cut -d: -f2 | head -n 1)\n`;
+    } else {
+      downloadScript += `APP_SIZE=$($MC_CMD ls --recursive --json minio-deploy/deploybox/${minioAppPath}/${environment}/${cfg.version} 2>/dev/null | grep -o '"size":[0-9]*' | cut -d: -f2 | awk '{s+=$1} END {print s}')\n`;
+    }
+    downloadScript += `if [ -n "$APP_SIZE" ]; then TOTAL_BYTES=$(( TOTAL_BYTES + APP_SIZE )); fi\n`;
+
     const appDeployDir = isDebApp
       ? `/home/pod/workspace/Deployment/${cfg.app_name}-app`
       : `$HOME/${environment}`;
@@ -37,16 +51,40 @@ function generateBatchDownloadScript(serverName, appConfigs, environment) {
     downloadScript += `mkdir -p "${appDeployDir}"\ncd "${appDeployDir}"\n`;
     downloadScript += `rm -rf dev-* 2>/dev/null || true\nrm -rf "${cfg.version}" 2>/dev/null || true\n`;
     downloadScript += `echo "  [$MC_CMD cp] Downloading ${cfg.app_name} (${cfg.version}) in background..."\n`;
+    downloadScript += `TARGET_DIRS="$TARGET_DIRS \\"${appDeployDir}/${cfg.version}\\""\n`;
 
     if (isDebApp) {
       downloadScript += `mkdir -p "${cfg.version}"\ncd "${appDeployDir}/${cfg.version}"\n`;
       downloadScript += `$MC_CMD cp --disable-multipart minio-deploy/deploybox/${minioAppPath}/${environment}/${cfg.version}/artifact-bundle-${cfg.version}.zip ./ &\n`;
+      downloadScript += `DOWNLOAD_PIDS="$DOWNLOAD_PIDS $!"\n`;
     } else {
       downloadScript += `$MC_CMD cp --recursive minio-deploy/deploybox/${minioAppPath}/${environment}/${cfg.version} ./ &\n`;
+      downloadScript += `DOWNLOAD_PIDS="$DOWNLOAD_PIDS $!"\n`;
     }
   });
 
-  downloadScript += `echo "  [$MC_CMD cp] Menunggu seluruh download paralel selesai..."\nwait\necho "✔ [STAGE 1/5 SELESAI] All MinIO artifacts downloaded successfully!"\necho "[JENKINS_STAGE:1:END:${serverName}]"\n\n`;
+  // Background monitor to print MB downloaded as a progress indicator in the logs
+  downloadScript += `
+TOT_MB=$(( TOTAL_BYTES / 1024 / 1024 ))
+if [ "$TOT_MB" -eq 0 ]; then TOT_MB=1; fi
+echo "  [INFO] Menjalankan pemantau progress download (~ \${TOT_MB} MB)..."
+(
+  while true; do
+    # Calculate total size of ONLY the newly downloading app deployment directories
+    CURRENT_SIZE=$(eval du -sb $TARGET_DIRS 2>/dev/null | awk '{s+=$1} END {print s}')
+    if [ -n "$CURRENT_SIZE" ] && [ "$CURRENT_SIZE" -gt 0 ]; then
+      CUR_MB=$(( CURRENT_SIZE / 1024 / 1024 ))
+      PCT=$(( CUR_MB * 100 / TOT_MB ))
+      if [ $PCT -gt 100 ]; then PCT=100; fi
+      echo "  [PROGRESS] Total Terunduh: \${CUR_MB} MB / \${TOT_MB} MB (\${PCT}%)"
+    fi
+    sleep 3
+  done
+) &
+MONITOR_PID=$!
+`;
+
+  downloadScript += `echo "  [$MC_CMD cp] Menunggu seluruh download paralel selesai..."\nwait $DOWNLOAD_PIDS\nkill $MONITOR_PID 2>/dev/null || true\necho "✔ [STAGE 1/5 SELESAI] All MinIO artifacts downloaded successfully!"\necho "[JENKINS_STAGE:1:END:${serverName}]"\n\n`;
   return downloadScript;
 }
 
