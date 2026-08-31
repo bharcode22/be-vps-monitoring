@@ -110,8 +110,37 @@ async function getFileFlowEditorRecords() {
   return result.rows;
 }
 
+async function getMultimediaDetailBySoundScape(soundScapeId) {
+  try {
+    const pool = await getMasterPool();
+    const result = await pool.query(
+      'SELECT * FROM multimedia WHERE sound_scape::text = $1 OR id::text = $1 LIMIT 1',
+      [String(soundScapeId).trim()]
+    );
+    return result.rows[0] || null;
+  } catch (err) {
+    console.error('Error fetching multimedia by sound_scape:', err.message);
+    return null;
+  }
+}
+
+async function getAllMultimediaList() {
+  try {
+    const pool = await getMasterPool();
+    const result = await pool.query(
+      'SELECT sound_scape, song as title, name, lamp FROM multimedia WHERE sound_scape IS NOT NULL ORDER BY sound_scape ASC LIMIT 200'
+    );
+    return result.rows || [];
+  } catch (err) {
+    console.error('Error fetching multimedia list:', err.message);
+    return [];
+  }
+}
+
 module.exports = {
   getMultimediaSoundScapes,
   getValidMultimediaFilenames,
-  getFileFlowEditorRecords
+  getFileFlowEditorRecords,
+  getMultimediaDetailBySoundScape,
+  getAllMultimediaList
 };

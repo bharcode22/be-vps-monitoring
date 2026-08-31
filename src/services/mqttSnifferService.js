@@ -8,6 +8,8 @@ const DEFAULT_MQTT_PASS = process.env.MQTT_PASSWORD;
 
 // Map<brokerUrl, mqttClient>
 const clientPool = new Map();
+// Map<brokerUrl, Map<topic, packetData>>
+const retainedCache = new Map();
 // Map<socketId, { socket, brokerUrl }>
 const activeSniffingSockets = new Map();
 
@@ -106,6 +108,25 @@ function getMqttClient(brokerUrlInput, username = DEFAULT_MQTT_USER, password = 
       timestamp: Date.now()
     };
 
+    // Update cache for this broker
+    if (!retainedCache.has(brokerUrl)) {
+      retainedCache.set(brokerUrl, new Map());
+    }
+
+    // Special case: Preserve duration for track/seek if pod only sends position on heartbeat
+    if (topic === 'mod_audio/track/seek' && payloadJson && payloadJson.position !== undefined && payloadJson.duration === undefined) {
+      if (retainedCache.get(brokerUrl).has(topic)) {
+        const prevPacket = retainedCache.get(brokerUrl).get(topic);
+        if (prevPacket && prevPacket.payloadJson && prevPacket.payloadJson.duration !== undefined) {
+          payloadJson.duration = prevPacket.payloadJson.duration;
+          packetData.payloadJson = payloadJson;
+          packetData.payload = JSON.stringify(payloadJson);
+        }
+      }
+    }
+
+    retainedCache.get(brokerUrl).set(topic, packetData);
+
     // Broadcast to sockets attached to this broker
     for (const [_, session] of activeSniffingSockets) {
       if (!session.brokerUrl || session.brokerUrl === brokerUrl) {
@@ -168,6 +189,8 @@ async function publishMqttMessage({ topic, payload, qos = 0, retain = false, bro
 /**
  * Register MQTT sniffer handlers on Socket.io connection
  */
+const activePodSockets = new Map(); // socket.id -> socket.io-client instance
+
 function registerMqttSnifferHandlers(socket, io) {
   socket.on('mqtt:start-sniff', async (data) => {
     try {
@@ -197,16 +220,24 @@ function registerMqttSnifferHandlers(socket, io) {
         }
       }
 
-      const finalUrl = normalizeBrokerUrl(targetUrl || 'tcp://127.0.0.1:1883');
-      activeSniffingSockets.set(socket.id, { socket, brokerUrl: finalUrl });
-
-      const client = getMqttClient(finalUrl);
-
-      socket.emit('mqtt:status', {
-        connected: client.connected,
-        brokerUrl: finalUrl,
-        timestamp: Date.now()
-      });
+      const url = normalizeBrokerUrl(targetUrl);
+      const session = { socket, brokerUrl: url };
+      activeSniffingSockets.set(socket.id, session);
+      
+      // Make sure we have a client for this broker
+      const client = getMqttClient(url);
+      if (client.connected) {
+        socket.emit('mqtt:status', { connected: true, brokerUrl: url, timestamp: Date.now() });
+        
+        // Dump the retained cache to the newly connected socket
+        if (retainedCache.has(url)) {
+          const cacheForUrl = retainedCache.get(url);
+          console.log(`Dumping ${cacheForUrl.size} retained messages to new socket for ${url}`);
+          for (const [_, packetData] of cacheForUrl) {
+            socket.emit('mqtt:packet', packetData);
+          }
+        }
+      }
     } catch (err) {
       socket.emit('mqtt:error', { error: err.message });
     }
@@ -228,8 +259,101 @@ function registerMqttSnifferHandlers(socket, io) {
     }
   });
 
+  socket.on('pod-socket:start-sniff', async (data) => {
+    try {
+      const { host, port = 3000 } = data || {};
+      if (!host) return;
+
+      if (activePodSockets.has(socket.id)) {
+        const oldClient = activePodSockets.get(socket.id);
+        try { oldClient.disconnect(); } catch (_) {}
+        activePodSockets.delete(socket.id);
+      }
+
+      const ioClient = require('socket.io-client');
+      const podClient = ioClient(`http://${host}:${port}`, {
+        transports: ['websocket', 'polling'],
+        reconnection: true,
+        timeout: 5000
+      });
+
+      activePodSockets.set(socket.id, podClient);
+
+      podClient.on('connect', () => {
+        socket.emit('pod-socket:status', { connected: true, host, port });
+      });
+
+      podClient.on('connect_error', (err) => {
+        socket.emit('pod-socket:status', { connected: false, host, port, error: err.message });
+      });
+
+      podClient.on('disconnect', () => {
+        socket.emit('pod-socket:status', { connected: false, host, port });
+      });
+
+      podClient.onAny((event, ...args) => {
+        const payload = args.length === 1 ? args[0] : args;
+        socket.emit('pod-socket:packet', {
+          event,
+          payload,
+          timestamp: Date.now()
+        });
+      });
+    } catch (err) {
+      socket.emit('pod-socket:error', { error: err.message });
+    }
+  });
+
+  socket.on('pod-socket:stop-sniff', () => {
+    if (activePodSockets.has(socket.id)) {
+      const podClient = activePodSockets.get(socket.id);
+      try { podClient.disconnect(); } catch (_) {}
+      activePodSockets.delete(socket.id);
+    }
+  });
+
+  socket.on('pod-socket:emit', async (data) => {
+    try {
+      const { host, port = 3000, event, payload, token } = data || {};
+      if (!token) return socket.emit('pod-socket:error', { error: 'Otentikasi token diperlukan.' });
+      if (!host || !event) return socket.emit('pod-socket:error', { error: 'Host dan event wajib diisi.' });
+
+      // If active pod socket is available for this client, use it; otherwise create temporary client
+      let podClient = activePodSockets.get(socket.id);
+      if (podClient && podClient.connected) {
+        podClient.emit(event, payload);
+        socket.emit('pod-socket:success', { host, port, event, payload });
+      } else {
+        const ioClient = require('socket.io-client');
+        const targetSocketUrl = `http://${host}:${port}`;
+        const tempClient = ioClient(targetSocketUrl, {
+          transports: ['websocket', 'polling'],
+          timeout: 4000
+        });
+
+        tempClient.on('connect', () => {
+          tempClient.emit(event, payload);
+          socket.emit('pod-socket:success', { host, port, event, payload });
+          setTimeout(() => tempClient.disconnect(), 1000);
+        });
+
+        tempClient.on('connect_error', (err) => {
+          socket.emit('pod-socket:error', { error: `Gagal terhubung ke http://${host}:${port}: ${err.message}` });
+          tempClient.disconnect();
+        });
+      }
+    } catch (err) {
+      socket.emit('pod-socket:error', { error: err.message });
+    }
+  });
+
   socket.on('disconnect', () => {
     activeSniffingSockets.delete(socket.id);
+    if (activePodSockets.has(socket.id)) {
+      const podClient = activePodSockets.get(socket.id);
+      try { podClient.disconnect(); } catch (_) {}
+      activePodSockets.delete(socket.id);
+    }
   });
 }
 

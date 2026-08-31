@@ -16,7 +16,7 @@ const {
   checkPodFileIntegrity
 } = require('../services/podStorageService');
 
-const { getMultimediaSoundScapes, getValidMultimediaFilenames } = require('../services/masterDbService');
+const { getMultimediaSoundScapes, getValidMultimediaFilenames, getMultimediaDetailBySoundScape, getAllMultimediaList } = require('../services/masterDbService');
 
 /**
  * 1. Get list of all code folders in AWS S3 media/
@@ -932,6 +932,30 @@ const checkFileIntegrity = async (req, res) => {
   }
 };
 
+const getMultimediaBySoundScape = async (req, res) => {
+  try {
+    const { soundScapeId } = req.params;
+    if (!soundScapeId) {
+      return res.status(400).json({ success: false, error: 'soundScapeId required' });
+    }
+    const item = await getMultimediaDetailBySoundScape(soundScapeId);
+    res.json({ success: true, data: item });
+  } catch (err) {
+    console.error('Get Multimedia Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+const getMultimediaList = async (req, res) => {
+  try {
+    const list = await getAllMultimediaList();
+    res.json({ success: true, data: list });
+  } catch (err) {
+    console.error('Get Multimedia List Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 module.exports = {
   getS3Folders,
   getS3FolderFiles,
@@ -953,7 +977,9 @@ module.exports = {
   cleanupRogueFiles,
   downloadCodeFilesToPod,
   downloadCodeFilesToBatchPods,
-  checkFileIntegrity
+  checkFileIntegrity,
+  getMultimediaBySoundScape,
+  getMultimediaList
 };
 
 
