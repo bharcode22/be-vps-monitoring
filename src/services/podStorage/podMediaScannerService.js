@@ -565,9 +565,21 @@ for item in files:
 
     file_success = False
     err_str = ''
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
     for attempt in range(1, 4):
         try:
-            urllib.request.urlretrieve(url, dest_path, reporthook=make_reporthook(fn))
+            with urllib.request.urlopen(req, timeout=30) as response, open(dest_path, 'wb') as out_file:
+                total_size = int(response.getheader('Content-Length', -1))
+                make_hook = make_reporthook(fn)
+                block_num = 0
+                block_size = 8192
+                while True:
+                    buffer = response.read(block_size)
+                    if not buffer:
+                        break
+                    out_file.write(buffer)
+                    block_num += 1
+                    make_hook(block_num, block_size, total_size)
             if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
                 file_success = True
                 break
@@ -585,6 +597,14 @@ for item in files:
             cp = subprocess.run(curl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=610)
             if cp.returncode == 0 and os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
                 file_success = True
+                sz = os.path.getsize(dest_path)
+                print('PROGRESS|' + json.dumps({
+                    'filename': fn,
+                    'downloaded': sz,
+                    'total': sz,
+                    'percent': 100,
+                    'speed': '0 KB/s'
+                }), flush=True)
         except Exception as ce:
             err_str += f' | curl error: {ce}'
 
