@@ -179,14 +179,15 @@ function connectPodMqtt(pod) {
   client.on('connect', () => {
     podState.brokerConnected = true;
 
-    // Subscribe to chair state topics and wildcards
+    // Subscribe specifically to modules for monitoring POD activity
+    // Using '+' wildcard for MAC address and '#' for all sub-topics (state, level, cmd, etc)
     const targetTopics = [
-      'mod_chair/pob_state',
-      '+/mod_chair/pob_state',
-      'mod_server/pob_state',
-      '+/mod_server/pob_state',
-      'pod/+/mod_chair/pob_state',
-      'chair-status'
+      'pod/+/2.0/mod_lighting/#',
+      'pod/+/2.0/mod_door/#',
+      'pod/+/2.0/mod_chair/#',
+      'pod/+/2.0/mod_audio/#',
+      'pod/+/2.0/mod_ambience/#',
+      'pod/+/2.0/mod_olfactory/#'
     ];
 
     client.subscribe(targetTopics, { qos: 0 }, (err) => {
@@ -212,6 +213,17 @@ function connectPodMqtt(pod) {
     podState.lastSeenAt = new Date().toISOString();
     podState.lastTopic = topic;
     podState.lastPayload = rawStr;
+
+    // Emit raw MQTT log for the live activity feed in frontend
+    if (socketIoInstance) {
+      socketIoInstance.emit('pod-activity:mqtt-log', {
+        serverId: pod.id,
+        serverName: pod.name,
+        topic,
+        payload: rawStr,
+        timestamp: podState.lastSeenAt
+      });
+    }
 
     if (parsedVal === null) return; // Skip unrecognizable packets
 
