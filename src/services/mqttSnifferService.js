@@ -52,11 +52,19 @@ function getMqttClient(brokerUrlInput, username = DEFAULT_MQTT_USER, password = 
   });
 
   client.on('connect', () => {
-    console.log(`Connected to MQTT Broker: ${brokerUrl}`);
-    // Subscribe to all pod topics
-    client.subscribe(['pod/#', 'socket/#', '#'], { qos: 0 }, (err) => {
+    // console.log(`Connected to MQTT Broker: ${brokerUrl}`);
+    // Subscribe to specific pod topics only to prevent unnecessary traffic
+    const activeTopics = [
+      'pod/+/2.0/#',
+      'mod_audio/#',
+      'mod_ambience/#',
+      'mod_lighting/#',
+      'mod_olfactory/#',
+      'session-data'
+    ];
+    client.subscribe(activeTopics, { qos: 0 }, (err) => {
       if (err) console.error(`Error subscribing on ${brokerUrl}:`, err.message);
-      else console.log(`Subscribed to wildcard topics on ${brokerUrl}`);
+      else console.log(`Subscribed to active pod topics on ${brokerUrl}`);
     });
 
     // Notify sockets listening to this broker
@@ -223,12 +231,12 @@ function registerMqttSnifferHandlers(socket, io) {
       const url = normalizeBrokerUrl(targetUrl);
       const session = { socket, brokerUrl: url };
       activeSniffingSockets.set(socket.id, session);
-      
+
       // Make sure we have a client for this broker
       const client = getMqttClient(url);
       if (client.connected) {
         socket.emit('mqtt:status', { connected: true, brokerUrl: url, timestamp: Date.now() });
-        
+
         // Dump the retained cache to the newly connected socket
         if (retainedCache.has(url)) {
           const cacheForUrl = retainedCache.get(url);
@@ -266,7 +274,7 @@ function registerMqttSnifferHandlers(socket, io) {
 
       if (activePodSockets.has(socket.id)) {
         const oldClient = activePodSockets.get(socket.id);
-        try { oldClient.disconnect(); } catch (_) {}
+        try { oldClient.disconnect(); } catch (_) { }
         activePodSockets.delete(socket.id);
       }
 
@@ -307,7 +315,7 @@ function registerMqttSnifferHandlers(socket, io) {
   socket.on('pod-socket:stop-sniff', () => {
     if (activePodSockets.has(socket.id)) {
       const podClient = activePodSockets.get(socket.id);
-      try { podClient.disconnect(); } catch (_) {}
+      try { podClient.disconnect(); } catch (_) { }
       activePodSockets.delete(socket.id);
     }
   });
@@ -351,7 +359,7 @@ function registerMqttSnifferHandlers(socket, io) {
     activeSniffingSockets.delete(socket.id);
     if (activePodSockets.has(socket.id)) {
       const podClient = activePodSockets.get(socket.id);
-      try { podClient.disconnect(); } catch (_) {}
+      try { podClient.disconnect(); } catch (_) { }
       activePodSockets.delete(socket.id);
     }
   });
