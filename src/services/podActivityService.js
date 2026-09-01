@@ -185,7 +185,13 @@ function connectPodMqtt(pod) {
     const targetTopics = [
       'pod/+/2.0/mod_chair/pob_state',
       'pod/+/mod_chair/pob_state',
+      'pod/+/2.0/mod_chair/temperature',
+      'pod/+/mod_chair/temperature',
+      'pod/+/2.0/mod_chair/humidity',
+      'pod/+/mod_chair/humidity',
       'mod_chair/pob_state',
+      'mod_chair/temperature',
+      'mod_chair/humidity',
       'pod/+/2.0/mod_ambience/pod_state',
       'pod/+/mod_ambience/pod_state',
       'mod_ambience/pod_state'
@@ -214,11 +220,8 @@ function connectPodMqtt(pod) {
   client.on('message', async (topic, message) => {
     podState.brokerConnected = true;
     const rawStr = message.toString('utf-8');
-    const parsedVal = parseOccupancyValue(rawStr);
 
     podState.lastSeenAt = new Date().toISOString();
-    podState.lastTopic = topic;
-    podState.lastPayload = rawStr;
 
     // Emit raw MQTT log for the live activity feed in frontend
     if (socketIoInstance) {
@@ -231,7 +234,17 @@ function connectPodMqtt(pod) {
       });
     }
 
+    // Only process occupancy state if the topic is specifically pob_state or pod_state
+    const isOccupancyTopic = topic.includes('pob_state') || topic.includes('pod_state');
+    if (!isOccupancyTopic) {
+      return;
+    }
+
+    const parsedVal = parseOccupancyValue(rawStr);
     if (parsedVal === null) return; // Skip unrecognizable packets
+
+    podState.lastTopic = topic;
+    podState.lastPayload = rawStr;
 
     const isTransition = podState.stateValue !== parsedVal;
     const now = new Date();
