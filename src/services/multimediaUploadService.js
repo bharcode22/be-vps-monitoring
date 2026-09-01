@@ -179,9 +179,9 @@ async function mergeFieldChunks(sessionDir, fieldName, totalChunks, finalFilenam
 }
 
 /**
- * Stream FormData directly to Master API with real-time progress callbacks
+ * Stream FormData directly to Master API with real-time progress callbacks and SSE handling
  */
-function sendFormDataToMasterApiWithProgress(targetUrl, formData, token, onProgress) {
+function sendFormDataToMasterApiWithProgress(targetUrl, formData, token, onProgress, onSseEvent = null) {
   return new Promise((resolve, reject) => {
     formData.getLength((err, totalLength) => {
       if (err) return reject(err);
@@ -204,12 +204,44 @@ function sendFormDataToMasterApiWithProgress(targetUrl, formData, token, onProgr
         headers
       };
 
+      let sseCompletedData = null;
+      let sseError = null;
+      let responseBody = '';
+
       const req = client.request(options, (res) => {
-        let responseBody = '';
         res.on('data', (chunk) => {
-          responseBody += chunk;
+          const text = chunk.toString();
+          responseBody += text;
+
+          const lines = text.split('\n');
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('data:')) {
+              try {
+                const parsed = JSON.parse(trimmed.replace(/^data:\s*/, ''));
+                if (parsed.status === 'completed') {
+                  sseCompletedData = parsed.data || parsed;
+                }
+                if (parsed.status === 'error') {
+                  sseError = parsed.error || 'Master API Error';
+                }
+                if (onSseEvent) {
+                  onSseEvent(parsed);
+                }
+              } catch (_) { }
+            }
+          }
         });
+
         res.on('end', () => {
+          if (sseError) {
+            return reject(new Error(sseError));
+          }
+
+          if (sseCompletedData) {
+            return resolve(sseCompletedData);
+          }
+
           let json = null;
           try {
             json = JSON.parse(responseBody);
@@ -344,7 +376,7 @@ async function dispatchToMasterApi(uploadSessionId, metadata, filesManifest, io 
     const token = await getAuthToken();
 
     // STAGE 3: Dispatching / Uploading from Backend to Master API & AWS S3
-    const uploadUrl = `${MASTER_API_BASE}/multimedia`;
+    const uploadUrl = `${MASTER_API_BASE}/multimedia/upload-with-progress`;
     console.log(`🚀 Mengirim form-data multimedia lengkap ke ${uploadUrl}...`);
 
     emitProgress({
@@ -369,8 +401,27 @@ async function dispatchToMasterApi(uploadSessionId, metadata, filesManifest, io 
           etaFormatted: progressData.etaFormatted,
           message: `Mengunggah dari Server ke Master API (${progressData.bytesSentFormatted} / ${progressData.totalBytesFormatted} - ${progressData.progress}%)`
         });
+      },
+      (sseEvent) => {
+        if (sseEvent.status === 'uploading') {
+          emitProgress({
+            stage: 's3_streaming',
+            stageTitle: 'Master Server Streaming ke S3',
+            progress: sseEvent.overallPercent || 0,
+            message: `Master Server mengunggah ke S3: ${sseEvent.overallPercent || 0}%`,
+            files: sseEvent.files || []
+          });
+        } else if (sseEvent.status === 'processing') {
+          emitProgress({
+            stage: 'processing',
+            stageTitle: 'Registrasi Database & Hash',
+            progress: 95,
+            message: sseEvent.message || 'Menghitung hash SHA-256 dan menyimpan ke database...'
+          });
+        }
       }
     );
+
 
     // STAGE 4: Final Processing
     emitProgress({
