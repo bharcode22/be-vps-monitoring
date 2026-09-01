@@ -55,7 +55,10 @@ function getMqttClient(brokerUrlInput, username = DEFAULT_MQTT_USER, password = 
     // console.log(`Connected to MQTT Broker: ${brokerUrl}`);
     // Subscribe to specific pod topics only to prevent unnecessary traffic
     const activeTopics = [
+      '#',
       'pod/+/2.0/#',
+      'pod/+/#',
+      'mod_chair/#',
       'mod_audio/#',
       'mod_ambience/#',
       'mod_lighting/#',
@@ -240,7 +243,7 @@ function registerMqttSnifferHandlers(socket, io) {
         // Dump the retained cache to the newly connected socket
         if (retainedCache.has(url)) {
           const cacheForUrl = retainedCache.get(url);
-          console.log(`Dumping ${cacheForUrl.size} retained messages to new socket for ${url}`);
+          console.log(`Dumping ${cacheForUrl.size} retained messages to new socket`);
           for (const [_, packetData] of cacheForUrl) {
             socket.emit('mqtt:packet', packetData);
           }

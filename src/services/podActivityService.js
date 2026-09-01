@@ -38,6 +38,7 @@ function parseOccupancyValue(rawPayload) {
     if (json.state !== undefined) return parseOccupancyValue(json.state);
     if (json.pob !== undefined) return parseOccupancyValue(json.pob);
     if (json.pob_state !== undefined) return parseOccupancyValue(json.pob_state);
+    if (json.pod_state !== undefined) return parseOccupancyValue(json.pod_state);
     if (json.status !== undefined) return parseOccupancyValue(json.status);
     if (json.occupied !== undefined) return parseOccupancyValue(json.occupied);
   } catch (_) { }
@@ -179,15 +180,15 @@ function connectPodMqtt(pod) {
   client.on('connect', () => {
     podState.brokerConnected = true;
 
-    // Subscribe specifically to modules for monitoring POD activity
-    // Using '+' wildcard for MAC address and '#' for all sub-topics (state, level, cmd, etc)
+    // Subscribe specifically to mod_chair/pob_state or mod_ambience/pod_state for monitoring POD activity
+    // Using '+' wildcard for MAC address (e.g. pod/345a600230b9/2.0/mod_chair/pob_state or mod_ambience/pod_state)
     const targetTopics = [
-      'pod/+/2.0/mod_lighting/#',
-      'pod/+/2.0/mod_door/#',
-      'pod/+/2.0/mod_chair/#',
-      'pod/+/2.0/mod_audio/#',
-      'pod/+/2.0/mod_ambience/#',
-      'pod/+/2.0/mod_olfactory/#'
+      'pod/+/2.0/mod_chair/pob_state',
+      'pod/+/mod_chair/pob_state',
+      'mod_chair/pob_state',
+      'pod/+/2.0/mod_ambience/pod_state',
+      'pod/+/mod_ambience/pod_state',
+      'mod_ambience/pod_state'
     ];
 
     client.subscribe(targetTopics, { qos: 0 }, (err) => {
@@ -206,7 +207,12 @@ function connectPodMqtt(pod) {
     }
   });
 
+  client.on('reconnect', () => {
+    podState.brokerConnected = true;
+  });
+
   client.on('message', async (topic, message) => {
+    podState.brokerConnected = true;
     const rawStr = message.toString('utf-8');
     const parsedVal = parseOccupancyValue(rawStr);
 
@@ -321,7 +327,7 @@ function getSummaryStats() {
   const occupiedCount = podList.filter(p => p.stateValue === 1).length;
   const vacantCount = podList.filter(p => p.stateValue === 0).length;
   const unknownCount = podList.filter(p => p.stateValue === null).length;
-  const brokersConnected = podList.filter(p => p.brokerConnected).length;
+  const brokersConnected = podList.filter(p => p.brokerConnected || (p.lastPayload !== null && p.lastPayload !== undefined)).length;
 
   return {
     totalPods,
