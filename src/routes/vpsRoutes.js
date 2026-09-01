@@ -93,6 +93,7 @@ router.get('/vps/content/multimedia-list', optionalAuth, contentController.getMu
 router.get('/vps/content/multimedia/:soundScapeId', optionalAuth, contentController.getMultimediaBySoundScape);
 
 // Multimedia Batch Chunk Upload to Master API routes
+router.get('/vps/multimedia/master-token', optionalAuth, multimediaUploadController.getMasterApiToken);
 router.post('/vps/multimedia/upload-chunk', optionalAuth, multimediaUploadController.uploadChunk);
 router.post('/vps/multimedia/complete-upload', optionalAuth, multimediaUploadController.completeUpload);
 router.post('/vps/multimedia/cancel-upload', optionalAuth, multimediaUploadController.cancelUpload);
