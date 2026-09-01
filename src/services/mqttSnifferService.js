@@ -53,9 +53,8 @@ function getMqttClient(brokerUrlInput, username = DEFAULT_MQTT_USER, password = 
 
   client.on('connect', () => {
     // console.log(`Connected to MQTT Broker: ${brokerUrl}`);
-    // Subscribe to specific pod topics only to prevent unnecessary traffic
+    // Subscribe to specific pod topics
     const activeTopics = [
-      '#',
       'pod/+/2.0/#',
       'pod/+/#',
       'mod_chair/#',
@@ -63,12 +62,14 @@ function getMqttClient(brokerUrlInput, username = DEFAULT_MQTT_USER, password = 
       'mod_ambience/#',
       'mod_lighting/#',
       'mod_olfactory/#',
-      'session-data'
+      'session-data',
+      '#'
     ];
-    client.subscribe(activeTopics, { qos: 0 }, (err) => {
-      if (err) console.error(`Error subscribing on ${brokerUrl}:`, err.message);
-      else console.log(`Subscribed to active pod topics on ${brokerUrl}`);
-    });
+    for (const top of activeTopics) {
+      client.subscribe(top, { qos: 0 }, (err) => {
+        if (err) console.warn(`MQTT subscribe warning for ${top} on ${brokerUrl}:`, err.message);
+      });
+    }
 
     // Notify sockets listening to this broker
     for (const [_, session] of activeSniffingSockets) {
