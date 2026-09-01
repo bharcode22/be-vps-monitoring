@@ -1,8 +1,8 @@
 const mqtt = require('mqtt');
 const { dbAsync, pool } = require('./db');
 
-const DEFAULT_MQTT_USER = process.env.MQTT_USERNAME || 'development';
-const DEFAULT_MQTT_PASS = process.env.MQTT_PASSWORD || 'dev$#23477';
+const DEFAULT_MQTT_USER = process.env.MQTT_USERNAME;
+const DEFAULT_MQTT_PASS = process.env.MQTT_PASSWORD;
 
 // Track active MQTT clients per serverId: Map<serverId, MqttClient>
 const activePodClients = new Map();
@@ -180,21 +180,18 @@ function connectPodMqtt(pod) {
   client.on('connect', () => {
     podState.brokerConnected = true;
 
-    // Subscribe specifically to mod_chair/pob_state or mod_ambience/pod_state for monitoring POD activity
-    // Using '+' wildcard for MAC address (e.g. pod/345a600230b9/2.0/mod_chair/pob_state or mod_ambience/pod_state)
+    // Subscribe specifically to mod_chair/pob_state and chair sensors for monitoring POD activity
+    // Using '+' wildcard for MAC address (e.g. pod/345a600230b9/2.0/mod_chair/pob_state)
     const targetTopics = [
       'pod/+/2.0/mod_chair/pob_state',
       'pod/+/mod_chair/pob_state',
+      'mod_chair/pob_state',
       'pod/+/2.0/mod_chair/temperature',
       'pod/+/mod_chair/temperature',
+      'mod_chair/temperature',
       'pod/+/2.0/mod_chair/humidity',
       'pod/+/mod_chair/humidity',
-      'mod_chair/pob_state',
-      'mod_chair/temperature',
-      'mod_chair/humidity',
-      'pod/+/2.0/mod_ambience/pod_state',
-      'pod/+/mod_ambience/pod_state',
-      'mod_ambience/pod_state'
+      'mod_chair/humidity'
     ];
 
     client.subscribe(targetTopics, { qos: 0 }, (err) => {
@@ -234,8 +231,8 @@ function connectPodMqtt(pod) {
       });
     }
 
-    // Only process occupancy state if the topic is specifically pob_state or pod_state
-    const isOccupancyTopic = topic.includes('pob_state') || topic.includes('pod_state');
+    // Only process occupancy state if the topic is specifically mod_chair/pob_state
+    const isOccupancyTopic = topic.includes('mod_chair/pob_state') || topic === 'mod_chair/pob_state' || topic.endsWith('/pob_state') || topic === 'pob_state';
     if (!isOccupancyTopic) {
       return;
     }
