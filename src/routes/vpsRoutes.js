@@ -92,11 +92,8 @@ router.get('/vps/content/pods/file-stream', optionalAuth, contentController.stre
 router.get('/vps/content/multimedia-list', optionalAuth, contentController.getMultimediaList);
 router.get('/vps/content/multimedia/:soundScapeId', optionalAuth, contentController.getMultimediaBySoundScape);
 
-// Multimedia Batch Chunk Upload to Master API routes
+// Master Multimedia API Token for Direct Browser Upload
 router.get('/vps/multimedia/master-token', optionalAuth, multimediaUploadController.getMasterApiToken);
-router.post('/vps/multimedia/upload-chunk', optionalAuth, multimediaUploadController.uploadChunk);
-router.post('/vps/multimedia/complete-upload', optionalAuth, multimediaUploadController.completeUpload);
-router.post('/vps/multimedia/cancel-upload', optionalAuth, multimediaUploadController.cancelUpload);
 
 // Multimedia RabbitMQ Sync to PODs routes
 router.get('/vps/multimedia-sync/list', optionalAuth, multimediaSyncController.getMultimediaList);
