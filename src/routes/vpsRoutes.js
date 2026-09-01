@@ -15,6 +15,8 @@ const bundleController = require('../controllers/bundleController');
 const envController = require('../controllers/envController');
 const heartbeatController = require('../controllers/heartbeatController');
 const contentController = require('../controllers/contentController');
+const multimediaUploadController = require('../controllers/multimediaUploadController');
+const multimediaSyncController = require('../controllers/multimediaSyncController');
 const podTopicController = require('../controllers/podTopicController');
 const masterToPodSyncController = require('../controllers/masterToPodSyncController');
 const tncSyncController = require('../controllers/tncSyncController');
@@ -89,6 +91,24 @@ router.post('/vps/content/batch-delete', requireAuth, contentController.batchDel
 router.get('/vps/content/pods/file-stream', optionalAuth, contentController.streamPodFile);
 router.get('/vps/content/multimedia-list', optionalAuth, contentController.getMultimediaList);
 router.get('/vps/content/multimedia/:soundScapeId', optionalAuth, contentController.getMultimediaBySoundScape);
+
+// Multimedia Batch Chunk Upload to Master API routes
+router.post('/vps/multimedia/upload-chunk', optionalAuth, multimediaUploadController.uploadChunk);
+router.post('/vps/multimedia/complete-upload', optionalAuth, multimediaUploadController.completeUpload);
+router.post('/vps/multimedia/cancel-upload', optionalAuth, multimediaUploadController.cancelUpload);
+
+// Multimedia RabbitMQ Sync to PODs routes
+router.get('/vps/multimedia-sync/list', optionalAuth, multimediaSyncController.getMultimediaList);
+router.get('/vps/multimedia-sync/inspect-fleet', optionalAuth, multimediaSyncController.inspectFleetStatus);
+router.post('/vps/multimedia-sync/inspect-fleet', optionalAuth, multimediaSyncController.inspectFleetStatus);
+router.get('/vps/multimedia-sync/inspect-pod/:serverId', optionalAuth, multimediaSyncController.inspectSinglePodStatus);
+router.post('/vps/multimedia-sync/control-container', optionalAuth, multimediaSyncController.controlContainer);
+router.post('/vps/multimedia-sync/batch-control-containers', optionalAuth, multimediaSyncController.batchControlContainers);
+router.post('/vps/multimedia-sync/wake-container', optionalAuth, multimediaSyncController.wakeContainer);
+router.post('/vps/multimedia-sync/batch-wake-containers', optionalAuth, multimediaSyncController.batchWakeContainers);
+router.post('/vps/multimedia-sync/trigger-resave', optionalAuth, multimediaSyncController.triggerResave);
+router.delete('/vps/multimedia-sync/delete/:soundScapeCode', optionalAuth, multimediaSyncController.deleteMultimedia);
+router.get('/vps/multimedia-sync/pod-logs/:serverId', optionalAuth, multimediaSyncController.getContainerLogs);
 
 // Docker Build Junk & Fleet Storage Cleanup routes
 router.get('/vps/storage/docker/inspect/:serverId', requireAuth, contentController.inspectSinglePodDocker);

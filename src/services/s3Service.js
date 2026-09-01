@@ -109,9 +109,16 @@ async function listS3MediaFolders() {
       let imageCount = 0;
       let strobeCount = 0;
       let otherCount = 0;
+      let latestModified = null;
 
       objects.forEach(obj => {
         totalSize += obj.Size || 0;
+        if (obj.LastModified) {
+          const objDate = new Date(obj.LastModified);
+          if (!latestModified || objDate > latestModified) {
+            latestModified = objDate;
+          }
+        }
         const category = categorizeFile(obj.Key);
         if (category === 'audio') audioCount++;
         else if (category === 'video') videoCount++;
@@ -131,7 +138,7 @@ async function listS3MediaFolders() {
         imageCount,
         strobeCount,
         otherCount,
-        lastModified: objects.length > 0 ? objects[0].LastModified : null
+        lastModified: latestModified ? latestModified.toISOString() : null
       });
     } catch (err) {
       console.error(`Error inspecting folder ${rawPrefix}:`, err.message);
@@ -146,13 +153,26 @@ async function listS3MediaFolders() {
         imageCount: 0,
         strobeCount: 0,
         otherCount: 0,
+        lastModified: null,
         error: err.message
       });
     }
   }
 
-  // Sort folders alphabetically or by code
-  folders.sort((a, b) => b.totalSizeBytes - a.totalSizeBytes);
+  // Sort folders: newest / latest modified first
+  folders.sort((a, b) => {
+    const timeA = a.lastModified ? new Date(a.lastModified).getTime() : 0;
+    const timeB = b.lastModified ? new Date(b.lastModified).getTime() : 0;
+    if (timeB !== timeA) {
+      return timeB - timeA; // Newest first
+    }
+    const numA = parseInt(a.code, 10);
+    const numB = parseInt(b.code, 10);
+    if (!isNaN(numA) && !isNaN(numB)) {
+      return numB - numA;
+    }
+    return String(b.code).localeCompare(String(a.code), undefined, { numeric: true });
+  });
 
   return {
     bucket,
