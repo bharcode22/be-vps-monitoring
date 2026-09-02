@@ -10,6 +10,7 @@ const {
   getPodSyncLogs,
   deleteMasterMultimedia
 } = require('../services/multimediaSyncService');
+const { logUserActivity } = require('../services/activityLoggerService');
 
 /**
  * Get paginated list of multimedia from Master API
@@ -88,6 +89,16 @@ const controlContainer = async (req, res) => {
     }
     const result = await controlPodSyncContainer(serverId, action, containerName);
     const actionLabel = action === 'stop' ? 'dihentikan' : action === 'restart' ? 'dimuat ulang (restart)' : 'dinyalakan';
+
+    logUserActivity(req, {
+      action: `CONTAINER_${action.toUpperCase()}`,
+      category: 'MULTIMEDIA',
+      target: result.serverName || `Server #${serverId}`,
+      description: `Mengontrol container mobile-synch (${action}) di ${result.serverName || serverId}`,
+      details: result,
+      status: 'SUCCESS'
+    });
+
     return res.json({
       success: true,
       message: `Container berhasil ${actionLabel} di ${result.serverName}`,
@@ -112,6 +123,16 @@ const batchControlContainers = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Parameter serverIds (array) wajib disertakan' });
     }
     const result = await batchControlPodsSyncContainers(serverIds, action, containerName);
+
+    logUserActivity(req, {
+      action: `BATCH_CONTAINER_${action.toUpperCase()}`,
+      category: 'MULTIMEDIA',
+      target: `${serverIds.length} Unit Pod`,
+      description: `Batch kontrol container mobile-synch (${action}) pada ${serverIds.length} server`,
+      details: { serverIds, action },
+      status: 'SUCCESS'
+    });
+
     return res.json(result);
   } catch (err) {
     console.error('Error batch controlling containers:', err.message);
@@ -142,6 +163,16 @@ const triggerResave = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Parameter soundScapeCode wajib disertakan' });
     }
     const result = await triggerMasterResave(soundScapeCode);
+
+    logUserActivity(req, {
+      action: 'MULTIMEDIA_POD_SYNC',
+      category: 'MULTIMEDIA',
+      target: `Soundscape #${soundScapeCode}`,
+      description: `Memicu sinkronisasi RabbitMQ konten #${soundScapeCode} ke seluruh armada Pod`,
+      details: result,
+      status: 'SUCCESS'
+    });
+
     return res.json({
       success: true,
       message: `Pesan sinkronisasi RabbitMQ untuk #${soundScapeCode} berhasil dikirim ke Master API!`,
@@ -187,6 +218,16 @@ const deleteMultimedia = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Parameter soundScapeCode wajib disertakan' });
     }
     const result = await deleteMasterMultimedia(soundScapeCode);
+
+    logUserActivity(req, {
+      action: 'DELETE_MEDIA',
+      category: 'MULTIMEDIA',
+      target: `Soundscape #${soundScapeCode}`,
+      description: `Menghapus multimedia soundscape #${soundScapeCode} dari Master API`,
+      details: result,
+      status: 'SUCCESS'
+    });
+
     return res.json({
       success: true,
       message: `Multimedia #${soundScapeCode} berhasil dihapus dari Master API`,

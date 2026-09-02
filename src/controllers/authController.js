@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 const dbAsync = require('../services/db');
+const { logUserActivity } = require('../services/activityLoggerService');
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -90,6 +91,15 @@ const googleLogin = async (req, res) => {
 
     // Check approval status
     if (user.status !== 'approved') {
+      logUserActivity(req, {
+        action: 'LOGIN_DENIED',
+        category: 'AUTH',
+        target: 'Google OAuth',
+        description: `Login ditolak untuk ${user.email} (Status akun: ${user.status})`,
+        status: 'DENIED',
+        explicitUser: { userId: user.id, userEmail: user.email, userName: user.name, userRole: user.role }
+      });
+
       return res.status(403).json({
         success: false,
         status: 'pending',
@@ -111,6 +121,15 @@ const googleLogin = async (req, res) => {
       JWT_SECRET,
       { expiresIn: '7d' }
     );
+
+    logUserActivity(req, {
+      action: 'LOGIN',
+      category: 'AUTH',
+      target: 'Google OAuth',
+      description: `Pengguna ${user.name || user.email} berhasil login ke sistem`,
+      status: 'SUCCESS',
+      explicitUser: { userId: user.id, userEmail: user.email, userName: user.name, userRole: user.role }
+    });
 
     res.json({
       success: true,
@@ -185,6 +204,15 @@ const updateUserStatus = async (req, res) => {
       'UPDATE users SET status = ?, role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
       [newStatus, newRole, id]
     );
+
+    logUserActivity(req, {
+      action: 'UPDATE_USER_STATUS',
+      category: 'USERS',
+      target: user.email,
+      description: `Mengubah status user ${user.email} menjadi '${newStatus}' (Role: ${newRole})`,
+      details: { previousStatus: user.status, newStatus, previousRole: user.role, newRole },
+      status: 'SUCCESS'
+    });
 
     res.json({ success: true, message: `Status akun ${user.email} berhasil diperbarui menjadi ${newStatus}` });
   } catch (err) {
