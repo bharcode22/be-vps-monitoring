@@ -25,6 +25,7 @@ const regenesisLogController = require('../controllers/regenesisLogController');
 const podLogsSyncController = require('../controllers/podLogsSyncController');
 const podActivityController = require('../controllers/podActivityController');
 const flowEditorStorageController = require('../controllers/flowEditorStorageController');
+const directS3Controller = require('../controllers/directS3Controller');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // 1. Health check & Settings
@@ -95,6 +96,10 @@ router.get('/vps/content/multimedia/:soundScapeId', optionalAuth, contentControl
 
 // Master Multimedia API Token for Direct Browser Upload
 router.get('/vps/multimedia/master-token', optionalAuth, multimediaUploadController.getMasterApiToken);
+
+// Direct S3 Presigned Upload & Media Forensik (SHA-256) Routes
+router.post('/vps/direct-s3/presigned-urls', optionalAuth, directS3Controller.getPresignedUrls);
+router.post('/vps/direct-s3/save-metadata', optionalAuth, directS3Controller.saveMetadataAndForensics);
 
 // Multimedia RabbitMQ Sync to PODs routes
 router.get('/vps/multimedia-sync/list', optionalAuth, multimediaSyncController.getMultimediaList);

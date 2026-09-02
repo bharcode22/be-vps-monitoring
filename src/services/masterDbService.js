@@ -138,6 +138,7 @@ async function getAllMultimediaList() {
 }
 
 module.exports = {
+  getMasterPool,
   getMultimediaSoundScapes,
   getValidMultimediaFilenames,
   getFileFlowEditorRecords,
