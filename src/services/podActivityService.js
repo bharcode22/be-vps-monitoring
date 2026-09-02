@@ -1,5 +1,6 @@
 const mqtt = require('mqtt');
 const { dbAsync, pool } = require('./db');
+const { recordHeartbeatPacket } = require('./podHeartbeatWatchdogService');
 
 const DEFAULT_MQTT_USER = process.env.MQTT_USERNAME;
 const DEFAULT_MQTT_PASS = process.env.MQTT_PASSWORD;
@@ -180,8 +181,8 @@ function connectPodMqtt(pod) {
   client.on('connect', () => {
     podState.brokerConnected = true;
 
-    // Subscribe specifically to mod_chair/pob_state and chair sensors for monitoring POD activity
-    // Using '+' wildcard for MAC address (e.g. pod/345a600230b9/2.0/mod_chair/pob_state)
+    // Subscribe to mod_chair/pob_state, chair sensors, and mod_server module heartbeats for monitoring POD activity
+    // Using '+' wildcard for MAC address and module IDs
     const targetTopics = [
       'pod/+/2.0/mod_chair/pob_state',
       'pod/+/mod_chair/pob_state',
@@ -191,7 +192,9 @@ function connectPodMqtt(pod) {
       'mod_chair/temperature',
       'pod/+/2.0/mod_chair/humidity',
       'pod/+/mod_chair/humidity',
-      'mod_chair/humidity'
+      'mod_chair/humidity',
+      'mod_server/+/data',
+      'mod_server/#'
     ];
 
     client.subscribe(targetTopics, { qos: 0 }, (err) => {
@@ -229,6 +232,29 @@ function connectPodMqtt(pod) {
         payload: rawStr,
         timestamp: podState.lastSeenAt
       });
+    }
+
+    // Process and record module heartbeats into Watchdog
+    if (topic.includes('mod_server') || rawStr.includes('"hb"')) {
+      try {
+        let parsed = null;
+        if (rawStr.startsWith('{')) parsed = JSON.parse(rawStr);
+        let modId = null;
+        const match = topic.match(/mod_server\/(\d+)/);
+        if (match) modId = parseInt(match[1], 10);
+        else if (parsed?.id) modId = parseInt(parsed.id, 10);
+
+        if (modId && (parsed?.hb !== undefined || !isNaN(Number(rawStr)))) {
+          const hbVal = parsed?.hb !== undefined ? parsed.hb : Number(rawStr);
+          recordHeartbeatPacket({
+            serverId: pod.id,
+            serverName: pod.name,
+            moduleId: modId,
+            hb: hbVal,
+            timestamp: Date.now()
+          });
+        }
+      } catch (_) {}
     }
 
     // Only process occupancy state if the topic is specifically mod_chair/pob_state

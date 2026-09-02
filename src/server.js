@@ -14,6 +14,7 @@ const { registerInstallationStreamHandlers } = require('./services/installationS
 const { registerSshTerminalHandlers } = require('./services/sshTerminalStreamer');
 const { registerMqttSnifferHandlers } = require('./services/mqttSnifferService');
 const { initPodActivityService, getPodActivityStatus } = require('./services/podActivityService');
+const { initHeartbeatWatchdog } = require('./services/podHeartbeatWatchdogService');
 
 const app = express();
 const server = http.createServer(app);
@@ -92,8 +93,9 @@ async function runPollingLoop() {
   }
 }
 
-// Initialize real-time POD Activity MQTT service
+// Initialize real-time POD Activity MQTT service & Heartbeat Watchdog
 initPodActivityService(io);
+initHeartbeatWatchdog(io);
 
 // Start continuous polling loop
 setTimeout(runPollingLoop, 1000);

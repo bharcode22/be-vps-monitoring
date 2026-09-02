@@ -5,6 +5,12 @@ const {
   syncAndConnectAllV3Pods
 } = require('../services/podActivityService');
 
+const {
+  getHeartbeatModulesConfig,
+  saveHeartbeatModulesConfig,
+  resetHeartbeatModulesConfig
+} = require('../services/podHeartbeatConfigService');
+
 /**
  * GET /api/pod-activity/status
  * Get current real-time status of all POD V3 units, summary counts, and recent logs
@@ -71,9 +77,59 @@ async function reconnect(req, res) {
   }
 }
 
+/**
+ * GET /api/pod-activity/heartbeat-modules
+ * Get list of configured heartbeat modules from JSON file
+ */
+async function getHeartbeatModules(req, res) {
+  try {
+    const data = getHeartbeatModulesConfig();
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('Error getting heartbeat modules:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * POST /api/pod-activity/heartbeat-modules
+ * Save / update list of heartbeat modules to JSON file
+ */
+async function saveHeartbeatModules(req, res) {
+  try {
+    const { modules } = req.body;
+    if (!Array.isArray(modules)) {
+      return res.status(400).json({ success: false, error: 'Format data modul harus berupa array.' });
+    }
+
+    const saved = saveHeartbeatModulesConfig(modules);
+    res.json({ success: true, message: 'Konfigurasi modul heartbeat berhasil disimpan ke file JSON!', data: saved });
+  } catch (err) {
+    console.error('Error saving heartbeat modules:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * POST /api/pod-activity/heartbeat-modules/reset
+ * Reset heartbeat modules config to default 9 modules in JSON file
+ */
+async function resetHeartbeatModules(req, res) {
+  try {
+    const data = resetHeartbeatModulesConfig();
+    res.json({ success: true, message: 'Konfigurasi modul heartbeat berhasil direset ke default 9 modul!', data });
+  } catch (err) {
+    console.error('Error resetting heartbeat modules:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 module.exports = {
   getStatus,
   getHistory,
   simulate,
-  reconnect
+  reconnect,
+  getHeartbeatModules,
+  saveHeartbeatModules,
+  resetHeartbeatModules
 };

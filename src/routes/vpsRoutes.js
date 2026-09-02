@@ -266,10 +266,13 @@ router.get('/pod-logs-sync/compare-pod', requireAuth, podLogsSyncController.comp
 router.post('/pod-logs-sync/sync-single-row', requireAuth, podLogsSyncController.syncSingleRow);
 router.get('/pod-logs-sync/pod-uuid-map', requireAuth, podLogsSyncController.getPodUuidMapController);
 
-// POD Activity (Real-Time Occupancy mod_chair/pob_state)
+// POD Activity (Real-Time Occupancy mod_chair/pob_state & Heartbeat Modules)
 router.get('/pod-activity/status', optionalAuth, podActivityController.getStatus);
 router.get('/pod-activity/history', optionalAuth, podActivityController.getHistory);
 router.post('/pod-activity/simulate', requireAuth, podActivityController.simulate);
 router.post('/pod-activity/reconnect', requireAuth, podActivityController.reconnect);
+router.get('/pod-activity/heartbeat-modules', optionalAuth, podActivityController.getHeartbeatModules);
+router.post('/pod-activity/heartbeat-modules', requireAuth, podActivityController.saveHeartbeatModules);
+router.post('/pod-activity/heartbeat-modules/reset', requireAuth, podActivityController.resetHeartbeatModules);
 
 module.exports = router;
