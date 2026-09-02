@@ -37,17 +37,14 @@ async function fetchMasterMultimediaList(search = '', page = 1, limit = 12) {
 
 /**
  * 2. Inspect all POD v3 servers for:
- * - Docker container 'mobile-synch' state (running / exited / not_found)
- * - Existence of files in /home/pod/media/{soundScapeCode}
+ * - Docker container 'mobile-synch' state (running / exited / missing)
  */
 async function inspectPodsSyncStatus(soundScapeCode = '') {
-  const pods = await dbAsync.all("SELECT id, name, host, port, username, password, private_key, type, pod_version FROM servers WHERE type = 'pod' AND pod_version = 'v3' ORDER BY id ASC");
+  const pods = await dbAsync.all("SELECT * FROM servers WHERE type = 'pod' AND pod_version = 'v3' ORDER BY id ASC");
 
   if (!pods || pods.length === 0) {
     return [];
   }
-
-  const cleanSoundScape = soundScapeCode ? String(soundScapeCode).replace(/[^a-zA-Z0-9_-]/g, '') : '';
 
   // Inspect each POD in parallel with timeout safety
   const inspectPromises = pods.map(async (pod) => {
@@ -61,35 +58,18 @@ async function inspectPodsSyncStatus(soundScapeCode = '') {
       containerName: 'mobile-synch',
       containerState: 'unknown', // 'running' | 'exited' | 'missing' | 'unknown'
       containerStatus: 'Tidak terjangkau',
-      hasMediaFolder: false,
-      localFileCount: 0,
-      localFiles: [],
       error: null
     };
 
     try {
-      // Single compact bash command to inspect docker container & check files
-      const script = `
-        CONTAINER_INFO=$(docker inspect --format '{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}' mobile-synch 2>/dev/null || docker inspect --format '{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}' mobile-sync 2>/dev/null || echo "MISSING")
-        
-        MEDIA_FILES=""
-        if [ -n "${cleanSoundScape}" ] && [ -d "/home/pod/media/${cleanSoundScape}" ]; then
-          MEDIA_FILES=$(ls -1 "/home/pod/media/${cleanSoundScape}" 2>/dev/null | tr '\n' ',')
-        fi
-        
-        echo "===STATUS==="
-        echo "$CONTAINER_INFO"
-        echo "===FILES==="
-        echo "$MEDIA_FILES"
-      `;
+      // Single compact bash command to inspect docker container status
+      const script = `docker inspect --format '{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}' mobile-synch 2>/dev/null || docker inspect --format '{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}' mobile-sync 2>/dev/null || echo "MISSING"`;
 
       const stdout = await executeSshCommand(pod, script, { timeoutMs: 10000 });
       result.isOnline = true;
       result.pingMs = Date.now() - startTime;
 
-      const parts = stdout.split('===FILES===');
-      const statusPart = (parts[0] || '').replace('===STATUS===', '').trim();
-      const filesPart = (parts[1] || '').trim();
+      const statusPart = (stdout || '').trim();
 
       if (statusPart === 'MISSING' || !statusPart) {
         result.containerState = 'missing';
@@ -103,17 +83,6 @@ async function inspectPodsSyncStatus(soundScapeCode = '') {
           result.containerState = 'exited';
           result.containerStatus = `Exited (code: ${exitCode || '0'})`;
         }
-      }
-
-      if (filesPart) {
-        const files = filesPart.split(',').map(f => f.trim()).filter(Boolean);
-        result.hasMediaFolder = files.length > 0;
-        result.localFileCount = files.length;
-        result.localFiles = files;
-      } else {
-        result.hasMediaFolder = false;
-        result.localFileCount = 0;
-        result.localFiles = [];
       }
     } catch (err) {
       result.isOnline = false;
@@ -132,12 +101,11 @@ async function inspectPodsSyncStatus(soundScapeCode = '') {
  * 2b. Inspect a single POD v3 server
  */
 async function inspectSinglePodSyncStatus(serverId, soundScapeCode = '') {
-  const pod = await dbAsync.get("SELECT id, name, host, port, username, password, private_key, type, pod_version FROM servers WHERE id = ?", [serverId]);
+  const pod = await dbAsync.get("SELECT * FROM servers WHERE id = ?", [serverId]);
   if (!pod) {
     throw new Error(`Server POD ID ${serverId} tidak ditemukan`);
   }
 
-  const cleanSoundScape = soundScapeCode ? String(soundScapeCode).replace(/[^a-zA-Z0-9_-]/g, '') : '';
   const startTime = Date.now();
   const result = {
     serverId: pod.id,
@@ -148,34 +116,17 @@ async function inspectSinglePodSyncStatus(serverId, soundScapeCode = '') {
     containerName: 'mobile-synch',
     containerState: 'unknown',
     containerStatus: 'Tidak terjangkau',
-    hasMediaFolder: false,
-    localFileCount: 0,
-    localFiles: [],
     error: null
   };
 
   try {
-    const script = `
-      CONTAINER_INFO=$(docker inspect --format '{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}' mobile-synch 2>/dev/null || docker inspect --format '{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}' mobile-sync 2>/dev/null || echo "MISSING")
-      
-      MEDIA_FILES=""
-      if [ -n "${cleanSoundScape}" ] && [ -d "/home/pod/media/${cleanSoundScape}" ]; then
-        MEDIA_FILES=$(ls -1 "/home/pod/media/${cleanSoundScape}" 2>/dev/null | tr '\n' ',')
-      fi
-      
-      echo "===STATUS==="
-      echo "$CONTAINER_INFO"
-      echo "===FILES==="
-      echo "$MEDIA_FILES"
-    `;
+    const script = `docker inspect --format '{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}' mobile-synch 2>/dev/null || docker inspect --format '{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}' mobile-sync 2>/dev/null || echo "MISSING"`;
 
     const stdout = await executeSshCommand(pod, script, { timeoutMs: 10000 });
     result.isOnline = true;
     result.pingMs = Date.now() - startTime;
 
-    const parts = stdout.split('===FILES===');
-    const statusPart = (parts[0] || '').replace('===STATUS===', '').trim();
-    const filesPart = (parts[1] || '').trim();
+    const statusPart = (stdout || '').trim();
 
     if (statusPart === 'MISSING' || !statusPart) {
       result.containerState = 'missing';
@@ -189,17 +140,6 @@ async function inspectSinglePodSyncStatus(serverId, soundScapeCode = '') {
         result.containerState = 'exited';
         result.containerStatus = `Exited (code: ${exitCode || '0'})`;
       }
-    }
-
-    if (filesPart) {
-      const files = filesPart.split(',').map(f => f.trim()).filter(Boolean);
-      result.hasMediaFolder = files.length > 0;
-      result.localFileCount = files.length;
-      result.localFiles = files;
-    } else {
-      result.hasMediaFolder = false;
-      result.localFileCount = 0;
-      result.localFiles = [];
     }
   } catch (err) {
     result.isOnline = false;

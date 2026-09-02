@@ -89,6 +89,7 @@ router.post('/vps/content/matrix/check-pods', requireAuth, contentController.che
 router.post('/vps/content/pods/delete-code', requireAuth, contentController.deleteCodeOnPod);
 router.post('/vps/content/batch-delete', requireAuth, contentController.batchDeleteCode);
 router.get('/vps/content/pods/file-stream', optionalAuth, contentController.streamPodFile);
+router.get('/vps/content/s3/proxy-file', optionalAuth, contentController.proxyS3File);
 router.get('/vps/content/multimedia-list', optionalAuth, contentController.getMultimediaList);
 router.get('/vps/content/multimedia/:soundScapeId', optionalAuth, contentController.getMultimediaBySoundScape);
 

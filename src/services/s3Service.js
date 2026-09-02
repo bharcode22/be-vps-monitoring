@@ -1,4 +1,4 @@
-const { S3Client, ListObjectsV2Command, HeadObjectCommand, DeleteObjectsCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, ListObjectsV2Command, HeadObjectCommand, DeleteObjectsCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const path = require('path');
 
 function getS3Client() {
@@ -434,6 +434,27 @@ async function listAllS3Filenames() {
   }
 }
 
+/**
+ * Get a readable stream for an S3 object
+ */
+async function getS3ObjectStream(s3Key) {
+  const client = getS3Client();
+  const bucket = getBucketName();
+  s3Key = s3Key.replace(/^\/+/, '');
+
+  const command = new GetObjectCommand({
+    Bucket: bucket,
+    Key: s3Key
+  });
+
+  const response = await client.send(command);
+  return {
+    stream: response.Body,
+    contentType: response.ContentType || 'application/octet-stream',
+    contentLength: response.ContentLength
+  };
+}
+
 module.exports = {
   getS3Client,
   getBucketName,
@@ -444,5 +465,6 @@ module.exports = {
   listS3FolderFiles,
   deleteS3CodeFolder,
   deleteS3File,
-  listAllS3Filenames
+  listAllS3Filenames,
+  getS3ObjectStream
 };

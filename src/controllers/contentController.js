@@ -1,5 +1,6 @@
 const dbAsync = require('../services/db');
-const { listS3MediaFolders, listS3FolderFiles, deleteS3CodeFolder, deleteS3File, formatBytes, listAllS3Filenames } = require('../services/s3Service');
+const s3Service = require('../services/s3Service');
+const { listS3MediaFolders, listS3FolderFiles, deleteS3CodeFolder, deleteS3File, formatBytes, listAllS3Filenames } = s3Service;
 const {
   getPodStorageSummary,
   scanPodPhysicalFiles,
@@ -956,6 +957,40 @@ const getMultimediaList = async (req, res) => {
   }
 };
 
+/**
+ * 23. Proxy / Stream S3 file to frontend for Web Audio decoding (CORS-Friendly)
+ */
+const proxyS3File = async (req, res) => {
+  try {
+    const { key, url } = req.query;
+    let s3Key = key;
+    if (!s3Key && url) {
+      try {
+        const parsedUrl = new URL(url);
+        s3Key = decodeURIComponent(parsedUrl.pathname.replace(/^\/+/, ''));
+      } catch (e) {
+        s3Key = url;
+      }
+    }
+
+    if (!s3Key) {
+      return res.status(400).json({ error: 'Parameter key atau url harus disertakan.' });
+    }
+
+    const { stream, contentType, contentLength } = await s3Service.getS3ObjectStream(s3Key);
+    res.set({
+      'Content-Type': contentType,
+      'Content-Length': contentLength,
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=86400'
+    });
+    stream.pipe(res);
+  } catch (err) {
+    console.error('Error in proxyS3File:', err.message);
+    res.status(500).json({ error: `Gagal mengambil berkas dari S3: ${err.message}` });
+  }
+};
+
 module.exports = {
   getS3Folders,
   getS3FolderFiles,
@@ -979,7 +1014,8 @@ module.exports = {
   downloadCodeFilesToBatchPods,
   checkFileIntegrity,
   getMultimediaBySoundScape,
-  getMultimediaList
+  getMultimediaList,
+  proxyS3File
 };
 
 
