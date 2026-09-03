@@ -2,7 +2,8 @@ const {
   getPodActivityStatus,
   getOccupancyHistory,
   simulatePodActivity,
-  syncAndConnectAllV3Pods
+  syncAndConnectAllV3Pods,
+  getIngestionDaemonStatus
 } = require('../services/podActivityService');
 const { dbAsync } = require('../services/db');
 
@@ -335,6 +336,20 @@ function getPodStorageFilesHandler(req, res) {
   }
 }
 
+/**
+ * GET /api/pod-activity/daemon-status
+ * Return health and status of background heartbeat ingestion daemon
+ */
+function getDaemonStatusHandler(req, res) {
+  try {
+    const status = getIngestionDaemonStatus();
+    res.json({ success: true, data: status });
+  } catch (err) {
+    console.error('Error fetching daemon status:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 module.exports = {
   getStatus,
   getHistory,
@@ -352,5 +367,6 @@ module.exports = {
   getPodHeartbeatsHandler,
   downloadPodHeartbeatsHandler,
   getPodLogDatesHandler,
-  getPodStorageFilesHandler
+  getPodStorageFilesHandler,
+  getDaemonStatusHandler
 };

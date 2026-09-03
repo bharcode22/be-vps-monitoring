@@ -18,6 +18,7 @@ const MAX_RECENT_LOGS = 150;
 
 let socketIoInstance = null;
 let isInitialized = false;
+const daemonStartTime = Date.now();
 
 /**
  * Standardize and parse occupancy value from raw MQTT payload
@@ -414,6 +415,53 @@ async function initPodActivityService(io) {
 
   // Periodic resync of servers list every 60 seconds
   setInterval(syncAndConnectAllV3Pods, 60000);
+
+  // Auto-heal watchdog: Check and reconnect disconnected MQTT brokers every 25 seconds
+  setInterval(() => {
+    for (const [id, client] of activePodClients.entries()) {
+      if (client && !client.connected && !client.reconnecting) {
+        try {
+          client.reconnect();
+        } catch (_) {}
+      }
+    }
+  }, 25000);
+}
+
+/**
+ * Get background ingestion daemon status summary
+ */
+function getIngestionDaemonStatus() {
+  const now = Date.now();
+  const pods = Array.from(podStateMap.values()).map(p => {
+    const client = activePodClients.get(p.id);
+    const isConnected = Boolean(client && client.connected);
+    return {
+      id: p.id,
+      name: p.name,
+      host: p.host,
+      code: p.code,
+      connected: isConnected,
+      lastSeenAt: p.lastSeenAt,
+      stateText: p.stateText,
+      brokerUrl: p.brokerUrl
+    };
+  });
+
+  const totalPods = pods.length;
+  const connectedPods = pods.filter(p => p.connected).length;
+  const uptimeSeconds = Math.floor((now - daemonStartTime) / 1000);
+
+  return {
+    status: 'active',
+    uptimeSeconds,
+    totalPods,
+    connectedPods,
+    offlinePods: totalPods - connectedPods,
+    healthPercent: totalPods > 0 ? Math.round((connectedPods / totalPods) * 100) : 100,
+    timestamp: new Date().toISOString(),
+    pods
+  };
 }
 
 /**
@@ -533,5 +581,6 @@ module.exports = {
   getPodActivityStatus,
   getOccupancyHistory,
   simulatePodActivity,
-  syncAndConnectAllV3Pods
+  syncAndConnectAllV3Pods,
+  getIngestionDaemonStatus
 };
