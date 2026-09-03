@@ -28,8 +28,9 @@ const flowEditorStorageController = require('../controllers/flowEditorStorageCon
 const directS3Controller = require('../controllers/directS3Controller');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
-// 1. Health check & Settings
+// 1. Health check, Speedtest & Settings
 router.get('/health', vpsController.getHealth);
+router.get('/speedtest-data', vpsController.getSpeedtestData);
 router.get('/settings', vpsController.getSettings);
 router.post('/settings', requireAuth, vpsController.saveSetting);
 

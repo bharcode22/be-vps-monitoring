@@ -45,6 +45,18 @@ const getHealth = (req, res) => {
 };
 
 /**
+ * Speedtest data generator handler (for measuring client bandwidth / download speed)
+ */
+const getSpeedtestData = (req, res) => {
+  const bytes = Math.min(2000000, Math.max(50000, parseInt(req.query.bytes, 10) || 250000)); // Default 250KB, max 2MB
+  const buffer = Buffer.alloc(bytes, 'x');
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.send(buffer);
+};
+
+/**
  * Helper to mask sensitive connection details (host IP, usernames, connection strings)
  * for unauthenticated guest requests.
  */
@@ -841,6 +853,7 @@ const redeployBackend = async (req, res) => {
 
 module.exports = {
   getHealth,
+  getSpeedtestData,
   getAllServers,
   getVpsServers,
   getPodServers,
