@@ -1,6 +1,6 @@
 const mqtt = require('mqtt');
 const { dbAsync, pool } = require('./db');
-const { recordHeartbeatPacket } = require('./podHeartbeatWatchdogService');
+const { recordHeartbeatPacket, getHeartbeatSnapshot } = require('./podHeartbeatWatchdogService');
 
 const DEFAULT_MQTT_USER = process.env.MQTT_USERNAME;
 const DEFAULT_MQTT_PASS = process.env.MQTT_PASSWORD;
@@ -251,6 +251,7 @@ function connectPodMqtt(pod) {
             serverName: pod.name,
             moduleId: modId,
             hb: hbVal,
+            port: parsed?.port || null,
             timestamp: Date.now()
           });
         }
@@ -413,7 +414,8 @@ async function getPodActivityStatus() {
   return {
     summary: getSummaryStats(),
     pods,
-    recentLogs: recentActivityLogs.slice(0, 50)
+    recentLogs: recentActivityLogs.slice(0, 50),
+    heartbeatSnapshot: getHeartbeatSnapshot()
   };
 }
 

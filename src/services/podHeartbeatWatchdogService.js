@@ -1,7 +1,7 @@
 const { pool } = require('./db');
 
 // In-memory registry of latest heartbeat status per pod & module
-// Map<podId, Map<moduleId, { hb, lastSeenAt, isAlive, previousHb, lastHbChangeAt }>>
+// Map<podId, Map<moduleId, { hb, lastSeenAt, isAlive, previousHb, lastHbChangeAt, port, totalPackets }>>
 const heartbeatRegistry = new Map();
 
 // Alert history log ring buffer
@@ -11,8 +11,8 @@ const MAX_ALERTS = 100;
 let socketIoInstance = null;
 let watchdogInterval = null;
 
-const TIMEOUT_DEAD_SECONDS = 12; // Modul dianggap mati jika tidak kirim hb > 12 detik
-const TIMEOUT_WARNING_SECONDS = 5; // Modul dianggap delay jika > 5 detik
+const TIMEOUT_DEAD_SECONDS = 30; // Modul dianggap mati jika tidak kirim hb >= 30 detik
+const TIMEOUT_WARNING_SECONDS = 3; // Modul dianggap pulih jika delay < 3 detik
 
 /**
  * Initialize Postgres schema for heartbeat incident logs
@@ -43,7 +43,7 @@ async function initAlertsSchema() {
 /**
  * Update incoming packet in registry
  */
-function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, timestamp = Date.now() }) {
+function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null, timestamp = Date.now() }) {
   if (!serverId || !moduleId) return;
 
   if (!heartbeatRegistry.has(serverId)) {
@@ -51,18 +51,23 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, timestamp =
   }
 
   const podModules = heartbeatRegistry.get(serverId);
-  const now = Date.now();
+  const now = timestamp || Date.now();
   const prevRecord = podModules.get(moduleId);
 
   let isFrozen = false;
   let lastHbChangeAt = now;
 
+  const currentHbNum = (hb !== null && hb !== undefined && !isNaN(Number(hb))) ? Number(hb) : null;
+  const prevHbNum = (prevRecord?.hb !== null && prevRecord?.hb !== undefined && !isNaN(Number(prevRecord.hb))) ? Number(prevRecord.hb) : null;
+
   if (prevRecord) {
-    if (prevRecord.hb === hb) {
+    if (prevHbNum !== null && currentHbNum !== null && prevHbNum === currentHbNum) {
       lastHbChangeAt = prevRecord.lastHbChangeAt || now;
-      if (now - lastHbChangeAt > 15000) {
+      if (now - lastHbChangeAt >= 10000) {
         isFrozen = true;
       }
+    } else {
+      lastHbChangeAt = now;
     }
   }
 
@@ -70,16 +75,42 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, timestamp =
     serverId,
     serverName: serverName || `Pod ${serverId}`,
     moduleId: Number(moduleId),
-    hb: Number(hb),
+    hb: currentHbNum,
     lastSeenAt: now,
-    previousHb: prevRecord?.hb ?? null,
+    previousHb: prevHbNum,
     lastHbChangeAt,
     isFrozen,
     isDead: false,
+    port: port || prevRecord?.port || null,
+    totalPackets: (prevRecord?.totalPackets || 0) + 1,
     alertSent: false
   };
 
   podModules.set(moduleId, record);
+}
+
+/**
+ * Return in-memory snapshot of all pod heartbeat states
+ * Format: { [serverId]: { [moduleId]: { id, hb, lastSeenAt, lastHbChangeAt, isFrozen, port, totalPackets } } }
+ */
+function getHeartbeatSnapshot() {
+  const snapshot = {};
+  for (const [serverId, podModules] of heartbeatRegistry.entries()) {
+    snapshot[serverId] = {};
+    for (const [moduleId, record] of podModules.entries()) {
+      snapshot[serverId][moduleId] = {
+        id: record.moduleId,
+        hb: record.hb,
+        lastSeenAt: record.lastSeenAt,
+        lastHbChangeAt: record.lastHbChangeAt,
+        isFrozen: record.isFrozen,
+        isDead: record.isDead,
+        port: record.port || null,
+        totalPackets: record.totalPackets || 1
+      };
+    }
+  }
+  return snapshot;
 }
 
 /**
@@ -184,6 +215,7 @@ function getRecentIncidentAlerts() {
 module.exports = {
   initHeartbeatWatchdog,
   recordHeartbeatPacket,
+  getHeartbeatSnapshot,
   getRecentIncidentAlerts,
   logIncidentAlert
 };
