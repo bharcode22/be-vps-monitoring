@@ -4,6 +4,7 @@ const {
   simulatePodActivity,
   syncAndConnectAllV3Pods
 } = require('../services/podActivityService');
+const { dbAsync } = require('../services/db');
 
 const {
   getHeartbeatModulesConfig,
@@ -13,6 +14,18 @@ const {
   saveHeartbeatThresholdsConfig,
   resetHeartbeatThresholdsConfig
 } = require('../services/podHeartbeatConfigService');
+
+const {
+  getPodEvents,
+  getPodState,
+  getPodHeartbeatStream,
+  getPodLogDates,
+  getPodStorageFilesList,
+  streamPodHeartbeatsDownload,
+  getRecentFleetIncidents,
+  getPodEventsLogPath,
+  getPodHeartbeatsLogPath
+} = require('../services/podStorageService');
 
 /**
  * GET /api/pod-activity/status
@@ -170,6 +183,158 @@ async function resetHeartbeatThresholds(req, res) {
   }
 }
 
+/**
+ * GET /api/pod-activity/pods/:id/events
+ * Get daily events list for a specific pod
+ */
+async function getPodEventsHandler(req, res) {
+  try {
+    const podId = parseInt(req.params.id, 10);
+    const dateStr = req.query.date || null;
+    const events = getPodEvents(podId, dateStr);
+    res.json({ success: true, podId, date: dateStr || new Date().toISOString().split('T')[0], events });
+  } catch (err) {
+    console.error('Error fetching pod events:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * GET /api/pod-activity/pods/:id/state
+ * Get current state.json for a specific pod
+ */
+async function getPodStateHandler(req, res) {
+  try {
+    const podId = parseInt(req.params.id, 10);
+    const state = getPodState(podId);
+    res.json({ success: true, podId, state });
+  } catch (err) {
+    console.error('Error fetching pod state:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * GET /api/pod-activity/incidents/recent
+ * Get recent incidents across all fleet pods
+ */
+async function getRecentIncidentsHandler(req, res) {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const incidents = getRecentFleetIncidents(limit);
+    res.json({ success: true, data: incidents });
+  } catch (err) {
+    console.error('Error fetching recent fleet incidents:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * GET /api/pod-activity/pods/:id/heartbeats
+ * Get raw heartbeat stream for a specific pod
+ */
+async function getPodHeartbeatsHandler(req, res) {
+  try {
+    const podId = parseInt(req.params.id, 10);
+    const dateStr = req.query.date || null;
+    const limit = parseInt(req.query.limit, 10) || 500;
+    const moduleId = req.query.moduleId || null;
+    const startTime = req.query.startTime || null;
+    const endTime = req.query.endTime || null;
+    const source = req.query.source || 'auto';
+
+    const heartbeats = await getPodHeartbeatStream({
+      podId,
+      dateStr,
+      moduleId,
+      startTime,
+      endTime,
+      limit,
+      source
+    });
+
+    res.json({
+      success: true,
+      podId,
+      date: dateStr || new Date().toISOString().split('T')[0],
+      totalReturned: heartbeats.length,
+      heartbeats
+    });
+  } catch (err) {
+    console.error('Error fetching pod heartbeats:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * GET /api/pod-activity/pods/:id/heartbeats/download
+ * Download raw heartbeats file as JSON or JSONL directly from disk/stream
+ */
+async function downloadPodHeartbeatsHandler(req, res) {
+  try {
+    const podId = parseInt(req.params.id, 10);
+    const dateStr = req.query.date || null;
+    const format = (req.query.format || 'json').toLowerCase();
+    const moduleId = req.query.moduleId || null;
+    const startTime = req.query.startTime || null;
+    const endTime = req.query.endTime || null;
+
+    let serverName = null;
+    try {
+      const server = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
+      if (server && server.name) {
+        serverName = server.name;
+      }
+    } catch (_) {}
+
+    streamPodHeartbeatsDownload({
+      podId,
+      serverName,
+      dateStr,
+      format,
+      moduleId,
+      startTime,
+      endTime,
+      res
+    });
+  } catch (err) {
+    console.error('Error downloading pod heartbeats:', err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  }
+}
+
+/**
+ * GET /api/pod-activity/pods/:id/log-dates
+ * Get list of available recorded dates for a specific pod
+ */
+async function getPodLogDatesHandler(req, res) {
+  try {
+    const podId = parseInt(req.params.id, 10);
+    const dates = getPodLogDates(podId);
+    res.json({ success: true, podId, dates });
+  } catch (err) {
+    console.error('Error fetching pod log dates:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * GET /api/pod-activity/pods/:id/storage-files
+ * Return list of physical files in pod_storage for a pod
+ */
+function getPodStorageFilesHandler(req, res) {
+  try {
+    const podId = parseInt(req.params.id, 10);
+    const result = getPodStorageFilesList(podId);
+    res.json(result);
+  } catch (err) {
+    console.error('Error fetching pod storage files:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 module.exports = {
   getStatus,
   getHistory,
@@ -180,5 +345,12 @@ module.exports = {
   resetHeartbeatModules,
   getHeartbeatThresholds,
   saveHeartbeatThresholds,
-  resetHeartbeatThresholds
+  resetHeartbeatThresholds,
+  getPodEventsHandler,
+  getPodStateHandler,
+  getRecentIncidentsHandler,
+  getPodHeartbeatsHandler,
+  downloadPodHeartbeatsHandler,
+  getPodLogDatesHandler,
+  getPodStorageFilesHandler
 };

@@ -276,6 +276,13 @@ router.get('/pod-activity/heartbeat-modules', optionalAuth, podActivityControlle
 router.post('/pod-activity/heartbeat-modules', requireAuth, podActivityController.saveHeartbeatModules);
 router.post('/pod-activity/heartbeat-modules/reset', requireAuth, podActivityController.resetHeartbeatModules);
 router.get('/pod-activity/heartbeat-thresholds', optionalAuth, podActivityController.getHeartbeatThresholds);
+router.get('/pod-activity/pods/:id/events', optionalAuth, podActivityController.getPodEventsHandler);
+router.get('/pod-activity/pods/:id/heartbeats', optionalAuth, podActivityController.getPodHeartbeatsHandler);
+router.get('/pod-activity/pods/:id/heartbeats/download', optionalAuth, podActivityController.downloadPodHeartbeatsHandler);
+router.get('/pod-activity/pods/:id/log-dates', optionalAuth, podActivityController.getPodLogDatesHandler);
+router.get('/pod-activity/pods/:id/state', optionalAuth, podActivityController.getPodStateHandler);
+router.get('/pod-activity/pods/:id/storage-files', optionalAuth, podActivityController.getPodStorageFilesHandler);
+router.get('/pod-activity/incidents/recent', optionalAuth, podActivityController.getRecentIncidentsHandler);
 router.post('/pod-activity/heartbeat-thresholds', optionalAuth, podActivityController.saveHeartbeatThresholds);
 router.post('/pod-activity/heartbeat-thresholds/reset', optionalAuth, podActivityController.resetHeartbeatThresholds);
 

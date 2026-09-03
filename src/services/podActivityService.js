@@ -1,6 +1,7 @@
 const mqtt = require('mqtt');
 const { dbAsync, pool } = require('./db');
 const { recordHeartbeatPacket, getHeartbeatSnapshot } = require('./podHeartbeatWatchdogService');
+const { recordPodEvent, savePodState } = require('./podStorageService');
 
 const DEFAULT_MQTT_USER = process.env.MQTT_USERNAME;
 const DEFAULT_MQTT_PASS = process.env.MQTT_PASSWORD;
@@ -106,7 +107,26 @@ async function recordActivityTransition(podState, stateValue, topic, rawPayload,
     recentActivityLogs.pop();
   }
 
-  // Persist into database asynchronously
+  // Record to Pod-Centric JSON-Lines daily file and update pod state
+  recordPodEvent({
+    podId: podState.id,
+    podName: podState.name,
+    eventType: 'OCCUPIED_CHANGE',
+    message: `Status kursi berganti menjadi ${stateLabel}`,
+    downtimeSeconds: durationSeconds,
+    data: { stateValue, stateLabel, durationSeconds, topic },
+    timestamp: timestamp.getTime()
+  });
+  savePodState(podState.id, {
+    name: podState.name,
+    host: podState.host,
+    stateValue,
+    stateText: stateLabel,
+    isOccupied: stateValue === 1,
+    lastSeenAt: timestamp.toISOString()
+  });
+
+  // Persist into database asynchronously (backup)
   try {
     await pool.query(`
       INSERT INTO pod_occupancy_logs 
@@ -259,7 +279,9 @@ function connectPodMqtt(pod) {
     }
 
     // Only process occupancy state if the topic is specifically mod_chair/pob_state
-    const isOccupancyTopic = topic.includes('mod_chair/pob_state') || topic === 'mod_chair/pob_state' || topic.endsWith('/pob_state') || topic === 'pob_state';
+    const isOccupancyTopic = topic === 'mod_chair/pob_state' || 
+                             topic.endsWith('/mod_chair/pob_state') || 
+                             topic === 'pob_state';
     if (!isOccupancyTopic) {
       return;
     }
