@@ -274,5 +274,8 @@ router.post('/pod-activity/reconnect', requireAuth, podActivityController.reconn
 router.get('/pod-activity/heartbeat-modules', optionalAuth, podActivityController.getHeartbeatModules);
 router.post('/pod-activity/heartbeat-modules', requireAuth, podActivityController.saveHeartbeatModules);
 router.post('/pod-activity/heartbeat-modules/reset', requireAuth, podActivityController.resetHeartbeatModules);
+router.get('/pod-activity/heartbeat-thresholds', optionalAuth, podActivityController.getHeartbeatThresholds);
+router.post('/pod-activity/heartbeat-thresholds', optionalAuth, podActivityController.saveHeartbeatThresholds);
+router.post('/pod-activity/heartbeat-thresholds/reset', optionalAuth, podActivityController.resetHeartbeatThresholds);
 
 module.exports = router;

@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const CONFIG_FILE_PATH = path.join(__dirname, '..', 'data', 'heartbeat_modules_config.json');
+const THRESHOLDS_CONFIG_FILE_PATH = path.join(__dirname, '..', 'data', 'heartbeat_thresholds_config.json');
 
 const DEFAULT_MODULES = [
   {
@@ -68,6 +69,12 @@ const DEFAULT_MODULES = [
     description: 'Sensor GSR, detak jantung, & biometrik'
   }
 ];
+
+const DEFAULT_THRESHOLDS = {
+  delaySec: 2,
+  frozenSec: 10,
+  deadSec: 30
+};
 
 /**
  * Ensure the data directory exists
@@ -144,9 +151,71 @@ function resetHeartbeatModulesConfig() {
   return DEFAULT_MODULES;
 }
 
+/**
+ * Read heartbeat thresholds configuration from JSON file
+ */
+function getHeartbeatThresholdsConfig() {
+  try {
+    ensureDataDirExists();
+    if (!fs.existsSync(THRESHOLDS_CONFIG_FILE_PATH)) {
+      fs.writeFileSync(THRESHOLDS_CONFIG_FILE_PATH, JSON.stringify(DEFAULT_THRESHOLDS, null, 2), 'utf-8');
+      return DEFAULT_THRESHOLDS;
+    }
+
+    const rawData = fs.readFileSync(THRESHOLDS_CONFIG_FILE_PATH, 'utf-8');
+    const parsed = JSON.parse(rawData);
+    if (parsed && typeof parsed === 'object') {
+      const delaySec = Number(parsed.delaySec) || DEFAULT_THRESHOLDS.delaySec;
+      const frozenSec = Number(parsed.frozenSec) || DEFAULT_THRESHOLDS.frozenSec;
+      const deadSec = Number(parsed.deadSec) || DEFAULT_THRESHOLDS.deadSec;
+      return { delaySec, frozenSec, deadSec };
+    }
+    return DEFAULT_THRESHOLDS;
+  } catch (err) {
+    console.error('Error reading heartbeat thresholds config:', err.message);
+    return DEFAULT_THRESHOLDS;
+  }
+}
+
+/**
+ * Save heartbeat thresholds configuration to JSON file
+ */
+function saveHeartbeatThresholdsConfig(thresholds) {
+  if (!thresholds || typeof thresholds !== 'object') {
+    throw new Error('Format data ambang batas harus berupa objek JSON.');
+  }
+
+  const delaySec = Math.max(1, parseInt(thresholds.delaySec, 10) || 2);
+  const frozenSec = Math.max(delaySec + 1, parseInt(thresholds.frozenSec, 10) || 10);
+  const deadSec = Math.max(frozenSec + 1, parseInt(thresholds.deadSec, 10) || 30);
+
+  const sanitized = {
+    delaySec,
+    frozenSec,
+    deadSec
+  };
+
+  ensureDataDirExists();
+  fs.writeFileSync(THRESHOLDS_CONFIG_FILE_PATH, JSON.stringify(sanitized, null, 2), 'utf-8');
+  return sanitized;
+}
+
+/**
+ * Reset heartbeat thresholds configuration to default
+ */
+function resetHeartbeatThresholdsConfig() {
+  ensureDataDirExists();
+  fs.writeFileSync(THRESHOLDS_CONFIG_FILE_PATH, JSON.stringify(DEFAULT_THRESHOLDS, null, 2), 'utf-8');
+  return DEFAULT_THRESHOLDS;
+}
+
 module.exports = {
   getHeartbeatModulesConfig,
   saveHeartbeatModulesConfig,
   resetHeartbeatModulesConfig,
-  DEFAULT_MODULES
+  getHeartbeatThresholdsConfig,
+  saveHeartbeatThresholdsConfig,
+  resetHeartbeatThresholdsConfig,
+  DEFAULT_MODULES,
+  DEFAULT_THRESHOLDS
 };

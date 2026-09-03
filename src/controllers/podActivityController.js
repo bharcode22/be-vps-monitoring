@@ -8,7 +8,10 @@ const {
 const {
   getHeartbeatModulesConfig,
   saveHeartbeatModulesConfig,
-  resetHeartbeatModulesConfig
+  resetHeartbeatModulesConfig,
+  getHeartbeatThresholdsConfig,
+  saveHeartbeatThresholdsConfig,
+  resetHeartbeatThresholdsConfig
 } = require('../services/podHeartbeatConfigService');
 
 /**
@@ -124,6 +127,49 @@ async function resetHeartbeatModules(req, res) {
   }
 }
 
+/**
+ * GET /api/pod-activity/heartbeat-thresholds
+ * Get heartbeat status thresholds config from JSON file
+ */
+async function getHeartbeatThresholds(req, res) {
+  try {
+    const data = getHeartbeatThresholdsConfig();
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('Error getting heartbeat thresholds:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * POST /api/pod-activity/heartbeat-thresholds
+ * Save heartbeat status thresholds config to JSON file
+ */
+async function saveHeartbeatThresholds(req, res) {
+  try {
+    const thresholds = req.body;
+    const saved = saveHeartbeatThresholdsConfig(thresholds);
+    res.json({ success: true, message: 'Konfigurasi ambang batas heartbeat berhasil disimpan ke file JSON!', data: saved });
+  } catch (err) {
+    console.error('Error saving heartbeat thresholds:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * POST /api/pod-activity/heartbeat-thresholds/reset
+ * Reset heartbeat status thresholds config to default in JSON file
+ */
+async function resetHeartbeatThresholds(req, res) {
+  try {
+    const data = resetHeartbeatThresholdsConfig();
+    res.json({ success: true, message: 'Konfigurasi ambang batas heartbeat berhasil direset ke default!', data });
+  } catch (err) {
+    console.error('Error resetting heartbeat thresholds:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 module.exports = {
   getStatus,
   getHistory,
@@ -131,5 +177,8 @@ module.exports = {
   reconnect,
   getHeartbeatModules,
   saveHeartbeatModules,
-  resetHeartbeatModules
+  resetHeartbeatModules,
+  getHeartbeatThresholds,
+  saveHeartbeatThresholds,
+  resetHeartbeatThresholds
 };
