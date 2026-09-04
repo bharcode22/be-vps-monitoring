@@ -264,7 +264,7 @@ async function sendDeadHeartbeatAlert(alertData) {
   // 1. Pod-Wide Outage (Aggregated All Modules DEAD)
   if (moduleId === 0 || /all modules/i.test(moduleName)) {
     messageHtml = [
-      '🔥 <b>[CRITICAL] SELURUH MODUL POD OFFLINE</b> 🔥',
+      `🔥 <b>[CRITICAL] SELURUH MODUL ${escapeHtml(serverName).toUpperCase()} OFFLINE</b> 🔥`,
       '',
       `🏢 <b>Pod:</b> <code>${escapeHtml(serverName)}</code>`,
       '🔌 <b>Cakupan:</b> Seluruh Modul Terputus Serentak',
@@ -277,8 +277,9 @@ async function sendDeadHeartbeatAlert(alertData) {
     ].join('\n');
   } else {
     // 2. Individual Module DEAD Outage
+    const modTitle = escapeHtml(moduleName).toUpperCase();
     messageHtml = [
-      '🚨 <b>[ALERT] MODUL HEARTBEAT DEAD</b> 🚨',
+      `🚨 <b>[ALERT] MODUL ${modTitle} DEAD</b> 🚨`,
       '',
       `🏢 <b>Pod:</b> <code>${escapeHtml(serverName)}</code>`,
       `🔌 <b>Modul:</b> <code>ID ${moduleId}</code> - <b>${escapeHtml(moduleName)}</b>`,
@@ -364,8 +365,13 @@ async function sendBatchDeadHeartbeatAlert({ serverId, serverName, modules = [],
     return `  ${idx + 1}. <b>${escapeHtml(modName)}</b> (<code>ID: ${modId}</code>) — Macet di <code>${hbVal}</code> [${durSec}s]`;
   }).join('\n');
 
+  const deadNames = eligibleModules.map(m => m.modName || m.moduleName || `Modul ${m.moduleId}`).join(', ');
+  const batchTitle = eligibleModules.length <= 2
+    ? `MODUL ${deadNames.toUpperCase()} DEAD`
+    : `${eligibleModules.length} MODUL DEAD (${deadNames.toUpperCase()})`;
+
   const messageHtml = [
-    `🚨 <b>[ALERT] ${eligibleModules.length} MODUL HEARTBEAT DEAD</b> 🚨`,
+    `🚨 <b>[ALERT] ${escapeHtml(batchTitle)}</b> 🚨`,
     '',
     `🏢 <b>Pod:</b> <code>${escapeHtml(sName)}</code>`,
     `⚠️ <b>Total Modul Mati:</b> ${eligibleModules.length} Modul Terputus Bersamaan`,
