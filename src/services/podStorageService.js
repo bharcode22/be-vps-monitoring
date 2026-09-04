@@ -3,33 +3,6 @@ const path = require('path');
 const readline = require('readline');
 const { dbAsync } = require('./db');
 
-// Domain services under ./podStorage/ (Storage Manager & Content Manager)
-const {
-  executeCommand,
-  getPodStorageSummary
-} = require('./podStorage/podDiskService');
-
-const {
-  scanPodPhysicalFiles,
-  detectPodJunkFiles,
-  cleanupPodJunkFiles,
-  checkCodeFilesOnSinglePod,
-  hardDeletePodCodeFiles,
-  detectPodRogueFiles,
-  downloadS3FilesToPod,
-  checkPodFileIntegrity
-} = require('./podStorage/podMediaScannerService');
-
-const {
-  getMimeType,
-  streamPodPhysicalFile
-} = require('./podStorage/podMediaStreamService');
-
-const {
-  inspectPodDockerStorage,
-  cleanPodDockerStorage
-} = require('./podStorage/podDockerStorageService');
-
 // Base directory for pod-centric storage
 const BASE_STORAGE_DIR = path.join(__dirname, '../data/pod_storage');
 const PODS_DIR = path.join(BASE_STORAGE_DIR, 'pods');
@@ -140,7 +113,7 @@ function initPodStorage() {
             }
           }
         })
-        .catch(() => {});
+        .catch(() => { });
     }
   } catch (err) {
     console.error('⚠️ Failed to initialize Pod Storage System:', err.message);
@@ -151,82 +124,117 @@ function initPodStorage() {
 initPodStorage();
 
 /**
- * Ensure directory for specific pod exists (events & heartbeats subdirectories)
+ * Ensure base directory for a specific pod exists
  */
 function ensurePodDir(podId, explicitName = null) {
   const podDir = getPodDir(podId, explicitName);
-  const eventsDir = path.join(podDir, 'events');
-  const hbDir = path.join(podDir, 'heartbeats');
-
-  if (!fs.existsSync(eventsDir)) {
-    fs.mkdirSync(eventsDir, { recursive: true });
+  if (!fs.existsSync(podDir)) {
+    fs.mkdirSync(podDir, { recursive: true });
   }
-  if (!fs.existsSync(hbDir)) {
-    fs.mkdirSync(hbDir, { recursive: true });
+  return { podDir };
+}
+
+/**
+ * Ensure date subfolder for a specific pod exists (e.g. pods/POD_36/2026-09-04/)
+ */
+function ensurePodDateDir(podId, dateStr = null, explicitName = null) {
+  const podDir = getPodDir(podId, explicitName);
+  const targetDate = dateStr || new Date().toISOString().split('T')[0];
+  const dateDir = path.join(podDir, targetDate);
+
+  if (!fs.existsSync(dateDir)) {
+    fs.mkdirSync(dateDir, { recursive: true });
   }
 
-  return { podDir, eventsDir, hbDir };
+  return { podDir, dateDir, targetDate };
 }
 
 /**
  * Get filepath for a pod's daily JSON-Lines event log
  */
 function getPodEventsLogPath(podId, dateStr = null, explicitName = null) {
-  const { eventsDir } = ensurePodDir(podId, explicitName);
   const targetDate = dateStr || new Date().toISOString().split('T')[0];
-  const targetFile = path.join(eventsDir, `${targetDate}.jsonl`);
+  const podDir = getPodDir(podId, explicitName);
 
-  // Fallback to legacy folder if file not yet in new folder and legacy folder strictly exists
-  if (!fs.existsSync(targetFile)) {
-    if (exactLegacyFolderExists(`pod_${podId}`)) {
-      const legacyPath = path.join(PODS_DIR, `pod_${podId}`, 'events', `${targetDate}.jsonl`);
-      if (fs.existsSync(legacyPath)) {
-        return legacyPath;
-      }
+  // 1. Check in date folder: pods/[pod_name]/[YYYY-MM-DD]/events_[YYYY-MM-DD].jsonl
+  const dateFolderFile = path.join(podDir, targetDate, `events_${targetDate}.jsonl`);
+  if (fs.existsSync(dateFolderFile)) {
+    return dateFolderFile;
+  }
+
+  // 2. Check legacy events folder: pods/[pod_name]/events/[YYYY-MM-DD].jsonl
+  const legacySubdirFile = path.join(podDir, 'events', `${targetDate}.jsonl`);
+  if (fs.existsSync(legacySubdirFile)) {
+    return legacySubdirFile;
+  }
+
+  // 3. Fallback to old naming: pods/pod_[id]/events/[YYYY-MM-DD].jsonl
+  if (exactLegacyFolderExists(`pod_${podId}`)) {
+    const legacyPath = path.join(PODS_DIR, `pod_${podId}`, 'events', `${targetDate}.jsonl`);
+    if (fs.existsSync(legacyPath)) {
+      return legacyPath;
     }
   }
 
-  return targetFile;
+  // Default target for new writes
+  return dateFolderFile;
 }
 
 /**
  * Get filepath for a pod's daily JSON-Lines raw heartbeat stream
+ * Supports per-module file (hb_[moduleId]_[date].jsonl) or legacy files
  */
-function getPodHeartbeatsLogPath(podId, dateStr = null, explicitName = null) {
-  const { hbDir } = ensurePodDir(podId, explicitName);
+function getPodHeartbeatsLogPath(podId, dateStr = null, moduleId = null, explicitName = null) {
   const targetDate = dateStr || new Date().toISOString().split('T')[0];
-  const targetFile = path.join(hbDir, `${targetDate}.jsonl`);
+  const podDir = getPodDir(podId, explicitName);
+  const modIdNum = (moduleId !== null && moduleId !== undefined && moduleId !== '' && moduleId !== 'ALL')
+    ? Number(moduleId)
+    : null;
 
-  // Fallback to legacy folder if file not yet in new folder and legacy folder strictly exists
-  if (!fs.existsSync(targetFile)) {
-    if (exactLegacyFolderExists(`pod_${podId}`)) {
-      const legacyPath = path.join(PODS_DIR, `pod_${podId}`, 'heartbeats', `${targetDate}.jsonl`);
-      if (fs.existsSync(legacyPath)) {
-        return legacyPath;
-      }
+  // 1. If moduleId provided, check for specific module file in date folder: hb_[id]_[date].jsonl
+  if (modIdNum !== null) {
+    const moduleFile = path.join(podDir, targetDate, `hb_${modIdNum}_${targetDate}.jsonl`);
+    if (fs.existsSync(moduleFile)) {
+      return moduleFile;
     }
   }
 
-  return targetFile;
+  // 2. Check legacy heartbeats subdirectory: pods/[pod_name]/heartbeats/[date].jsonl
+  const legacySubdirFile = path.join(podDir, 'heartbeats', `${targetDate}.jsonl`);
+  if (fs.existsSync(legacySubdirFile)) {
+    return legacySubdirFile;
+  }
+
+  // 3. Fallback to old naming: pods/pod_[id]/heartbeats/[date].jsonl
+  if (exactLegacyFolderExists(`pod_${podId}`)) {
+    const legacyPath = path.join(PODS_DIR, `pod_${podId}`, 'heartbeats', `${targetDate}.jsonl`);
+    if (fs.existsSync(legacyPath)) {
+      return legacyPath;
+    }
+  }
+
+  // Default target for new writes: module-specific if provided, otherwise date folder
+  if (modIdNum !== null) {
+    return path.join(podDir, targetDate, `hb_${modIdNum}_${targetDate}.jsonl`);
+  }
+  return path.join(podDir, targetDate);
 }
 
 /**
- * Get or create write stream for raw heartbeat logs
+ * Get or create write stream for raw heartbeat logs per module (hb_[moduleId]_[date].jsonl)
  */
-function getHbWriteStream(podId, dateStr, serverName = null) {
-  const key = `${podId}_${dateStr}`;
+function getHbModuleWriteStream(podId, moduleId, dateStr, serverName = null) {
+  const key = `${podId}_mod${moduleId}_${dateStr}`;
   if (!activeHbStreamMap.has(key)) {
-    // For writing new ticks, ensure new sanitized server directory is used
-    const { hbDir } = ensurePodDir(podId, serverName);
-    const targetDate = dateStr || new Date().toISOString().split('T')[0];
-    const filePath = path.join(hbDir, `${targetDate}.jsonl`);
+    const { dateDir, targetDate } = ensurePodDateDir(podId, dateStr, serverName);
+    const filePath = path.join(dateDir, `hb_${moduleId}_${targetDate}.jsonl`);
     const stream = fs.createWriteStream(filePath, { flags: 'a', encoding: 'utf8' });
     activeHbStreamMap.set(key, stream);
 
-    // Auto-clean stream map if it grows too large (e.g. across midnight date change)
-    if (activeHbStreamMap.size > 100) {
+    // Auto-clean stream map if it grows too large
+    if (activeHbStreamMap.size > 200) {
       for (const [k, s] of activeHbStreamMap.entries()) {
-        if (!k.endsWith(dateStr)) {
+        if (!k.endsWith(targetDate)) {
           s.end();
           activeHbStreamMap.delete(k);
         }
@@ -237,7 +245,7 @@ function getHbWriteStream(podId, dateStr, serverName = null) {
 }
 
 /**
- * Record a raw heartbeat tick from MQTT into daily JSON-Lines stream
+ * Record a raw heartbeat tick from MQTT into daily JSON-Lines stream per module (hb_[moduleId]_[date].jsonl)
  * @param {Object} tickObj { podId, serverName, moduleId, hb, port, timestamp }
  */
 function recordRawHeartbeatTick({ podId, serverName = null, moduleId, hb, port = null, timestamp = Date.now() }) {
@@ -269,11 +277,12 @@ function recordRawHeartbeatTick({ podId, serverName = null, moduleId, hb, port =
     buf.pop();
   }
 
-  // 2. High-performance non-blocking append to daily .jsonl file in pod folder
+  // 2. High-performance non-blocking append to module .jsonl file: pods/[pod_name]/[date]/hb_[moduleId]_[date].jsonl
   try {
-    const stream = getHbWriteStream(podId, dateStr, serverName);
-    if (stream && stream.writable) {
-      stream.write(JSON.stringify(rawTick) + '\n');
+    const jsonLine = JSON.stringify(rawTick) + '\n';
+    const modStream = getHbModuleWriteStream(podId, moduleId, dateStr, serverName);
+    if (modStream && modStream.writable) {
+      modStream.write(jsonLine);
     }
   } catch (err) {
     console.warn(`⚠️ Error streaming raw heartbeat tick for POD ${podId}:`, err.message);
@@ -283,7 +292,7 @@ function recordRawHeartbeatTick({ podId, serverName = null, moduleId, hb, port =
 }
 
 /**
- * Record a structured event into a Pod's daily .jsonl file
+ * Record a structured event into a Pod's daily date folder .jsonl file
  * @param {Object} eventObj
  * { podId, podName, moduleId, moduleName, eventType, message, lastHb, downtimeSeconds, data, timestamp }
  */
@@ -296,8 +305,8 @@ function recordPodEvent(eventObj) {
 
   const now = eventObj.timestamp || Date.now();
   const dateStr = new Date(now).toISOString().split('T')[0];
-  const { eventsDir } = ensurePodDir(eventObj.podId, eventObj.podName);
-  const filePath = path.join(eventsDir, `${dateStr}.jsonl`);
+  const { dateDir } = ensurePodDateDir(eventObj.podId, dateStr, eventObj.podName);
+  const filePath = path.join(dateDir, `events_${dateStr}.jsonl`);
 
   const entry = {
     id: `evt_${now}_${Math.random().toString(36).slice(2, 6)}`,
@@ -395,7 +404,7 @@ function getPodEvents(podId, dateStr = null) {
     for (const line of lines) {
       try {
         events.push(JSON.parse(line));
-      } catch (_) {}
+      } catch (_) { }
     }
 
     return events.reverse(); // Latest events first
@@ -435,7 +444,36 @@ function parseTimeToMs(timeVal, targetDate, isEnd = false) {
 }
 
 /**
- * Get raw heartbeat stream for a specific pod (parsed from heartbeats/YYYY-MM-DD.jsonl)
+ * Helper to read and parse ticks from a JSONL file
+ */
+function readTicksFromFile(filePath, modFilter = null, startMs = null, endMs = null) {
+  if (!fs.existsSync(filePath)) return Promise.resolve([]);
+  return new Promise((resolve) => {
+    try {
+      const fileStream = fs.createReadStream(filePath, { encoding: 'utf8' });
+      const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+      const items = [];
+      rl.on('line', (line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        try {
+          const tick = JSON.parse(trimmed);
+          if (modFilter !== null && tick.modId !== modFilter) return;
+          if (startMs !== null && tick.ts < startMs) return;
+          if (endMs !== null && tick.ts > endMs) return;
+          items.push(tick);
+        } catch (_) { }
+      });
+      rl.on('close', () => resolve(items));
+      rl.on('error', () => resolve(items));
+    } catch (_) {
+      resolve([]);
+    }
+  });
+}
+
+/**
+ * Get raw heartbeat stream for a specific pod (parsed from date folder or legacy file)
  * Supports pagination, module filtering, time window filtering, and memory/disk sources
  */
 async function getPodHeartbeatStream(podIdOrOptions, dateStr = null, limit = 500) {
@@ -474,64 +512,51 @@ async function getPodHeartbeatStream(podIdOrOptions, dateStr = null, limit = 500
     }
   }
 
-  // 2. Read from JSON-Lines file using readline stream
-  const filePath = getPodHeartbeatsLogPath(podId, targetDate);
-  if (!fs.existsSync(filePath)) return [];
-
   const startMs = parseTimeToMs(startTime, targetDate, false);
   const endMs = parseTimeToMs(endTime, targetDate, true);
+  const podDir = getPodDir(podId);
+  const dateDir = path.join(podDir, targetDate);
 
-  return new Promise((resolve) => {
-    try {
-      const fileStream = fs.createReadStream(filePath, { encoding: 'utf8' });
-      const rl = readline.createInterface({
-        input: fileStream,
-        crlfDelay: Infinity
-      });
-
-      const matches = [];
-
-      rl.on('line', (line) => {
-        const trimmed = line.trim();
-        if (!trimmed) return;
-        try {
-          const tick = JSON.parse(trimmed);
-
-          // Module filter
-          if (modIdNum !== null && tick.modId !== modIdNum) {
-            return;
-          }
-
-          // Time filter
-          if (startMs !== null && tick.ts < startMs) {
-            return;
-          }
-          if (endMs !== null && tick.ts > endMs) {
-            return;
-          }
-
-          matches.push(tick);
-          // Sliding window to avoid unbounded memory growth
-          if (matches.length > limit * 2) {
-            matches.splice(0, matches.length - limit);
-          }
-        } catch (_) {}
-      });
-
-      rl.on('close', () => {
-        // Return latest matching ticks first
-        resolve(matches.slice(-limit).reverse());
-      });
-
-      rl.on('error', (err) => {
-        console.warn(`⚠️ Error streaming raw heartbeats for POD ${podId}:`, err.message);
-        resolve(matches.slice(-limit).reverse());
-      });
-    } catch (err) {
-      console.warn(`⚠️ Error initiating heartbeat stream for POD ${podId}:`, err.message);
-      resolve([]);
+  // 2. If single module requested
+  if (modIdNum !== null) {
+    const moduleFile = path.join(dateDir, `hb_${modIdNum}_${targetDate}.jsonl`);
+    if (fs.existsSync(moduleFile)) {
+      const records = await readTicksFromFile(moduleFile, null, startMs, endMs);
+      return records.slice(-limit).reverse();
     }
-  });
+
+    // Fallback legacy file
+    const legacyPath = getPodHeartbeatsLogPath(podId, targetDate, modIdNum);
+    if (fs.existsSync(legacyPath) && !fs.statSync(legacyPath).isDirectory()) {
+      const records = await readTicksFromFile(legacyPath, modIdNum, startMs, endMs);
+      return records.slice(-limit).reverse();
+    }
+    return [];
+  }
+
+  // 3. If ALL modules requested: read all hb_*.jsonl files in date folder
+  if (fs.existsSync(dateDir) && fs.statSync(dateDir).isDirectory()) {
+    try {
+      const entries = fs.readdirSync(dateDir);
+      const hbFiles = entries.filter(f => f.startsWith('hb_') && f.endsWith('.jsonl'));
+      if (hbFiles.length > 0) {
+        const filePromises = hbFiles.map(f => readTicksFromFile(path.join(dateDir, f), null, startMs, endMs));
+        const results = await Promise.all(filePromises);
+        const combined = results.flat();
+        combined.sort((a, b) => b.ts - a.ts); // Latest first
+        return combined.slice(0, limit);
+      }
+    } catch (_) { }
+  }
+
+  // Fallback legacy file
+  const legacyPath = getPodHeartbeatsLogPath(podId, targetDate);
+  if (fs.existsSync(legacyPath) && !fs.statSync(legacyPath).isDirectory()) {
+    const records = await readTicksFromFile(legacyPath, null, startMs, endMs);
+    return records.slice(-limit).reverse();
+  }
+
+  return [];
 }
 
 /**
@@ -540,21 +565,46 @@ async function getPodHeartbeatStream(podIdOrOptions, dateStr = null, limit = 500
 function getPodLogDates(podId) {
   if (!podId) return [];
   try {
-    const { hbDir } = ensurePodDir(podId);
+    const { podDir } = ensurePodDir(podId);
     const dateSet = new Set();
 
-    // 1. Read from resolved dir
-    if (fs.existsSync(hbDir)) {
-      const files = fs.readdirSync(hbDir);
-      files.filter(f => f.endsWith('.jsonl')).forEach(f => dateSet.add(f.replace('.jsonl', '')));
+    // 1. Read date folders from resolved dir: e.g. '2026-09-04'
+    if (fs.existsSync(podDir)) {
+      const items = fs.readdirSync(podDir);
+      for (const item of items) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(item)) {
+          const itemPath = path.join(podDir, item);
+          try {
+            if (fs.statSync(itemPath).isDirectory()) {
+              dateSet.add(item);
+            }
+          } catch (_) { }
+        }
+      }
+
+      // Legacy files in heartbeats/ and events/
+      const legacyHbDir = path.join(podDir, 'heartbeats');
+      if (fs.existsSync(legacyHbDir)) {
+        const files = fs.readdirSync(legacyHbDir);
+        files.filter(f => f.endsWith('.jsonl')).forEach(f => dateSet.add(f.replace('.jsonl', '')));
+      }
     }
 
     // 2. Read from legacy dir if strictly exists
     if (exactLegacyFolderExists(`pod_${podId}`)) {
-      const legacyHbDir = path.join(PODS_DIR, `pod_${podId}`, 'heartbeats');
-      if (fs.existsSync(legacyHbDir)) {
-        const files = fs.readdirSync(legacyHbDir);
-        files.filter(f => f.endsWith('.jsonl')).forEach(f => dateSet.add(f.replace('.jsonl', '')));
+      const legacyDir = path.join(PODS_DIR, `pod_${podId}`);
+      if (fs.existsSync(legacyDir)) {
+        const items = fs.readdirSync(legacyDir);
+        for (const item of items) {
+          if (/^\d{4}-\d{2}-\d{2}$/.test(item)) {
+            dateSet.add(item);
+          }
+        }
+        const legacyHbDir = path.join(legacyDir, 'heartbeats');
+        if (fs.existsSync(legacyHbDir)) {
+          const files = fs.readdirSync(legacyHbDir);
+          files.filter(f => f.endsWith('.jsonl')).forEach(f => dateSet.add(f.replace('.jsonl', '')));
+        }
       }
     }
 
@@ -588,39 +638,91 @@ function getPodStorageFilesList(podId) {
   const rawName = podNameCache.get(id);
   const sanitized = sanitizeServerName(rawName) || `pod_${id}`;
 
-  function scanDirectory(dirPath, subCategory, type) {
-    if (!fs.existsSync(dirPath)) return;
+  function processFile(fullPath, filename, dateStr, customCategory = null, customType = null, moduleId = null) {
     try {
-      const items = fs.readdirSync(dirPath);
-      for (const item of items) {
-        if (!item.endsWith('.jsonl') && !item.endsWith('.json')) continue;
-        const fullPath = path.join(dirPath, item);
-        try {
-          const stat = fs.statSync(fullPath);
-          if (stat.isFile()) {
-            files.push({
-              name: item,
-              date: item.replace(/\.(jsonl|json)$/, ''),
-              type,
-              category: subCategory,
-              relativePath: path.relative(PODS_DIR, fullPath),
-              sizeBytes: stat.size,
-              sizeFormatted: formatBytes(stat.size),
-              modifiedAt: stat.mtime.toISOString()
-            });
+      const stat = fs.statSync(fullPath);
+      if (!stat.isFile()) return;
+
+      let type = customType || 'heartbeats';
+      let category = customCategory || 'Detak Modul (Raw Heartbeats)';
+      let modId = moduleId;
+
+      if (!customCategory) {
+        if (filename.startsWith('hb_')) {
+          const match = filename.match(/^hb_(\d+)_/);
+          if (match) {
+            modId = Number(match[1]);
+            category = `Detak Modul (ID: ${modId})`;
+          } else {
+            category = 'Detak Modul (Raw Heartbeats)';
           }
-        } catch (_) {}
+          type = 'heartbeats';
+        } else if (filename.startsWith('events_') || filename.includes('events')) {
+          category = 'Insiden & Peristiwa';
+          type = 'events';
+        } else if (filename.endsWith('.json')) {
+          category = 'Snapshot Status';
+          type = 'state';
+        }
       }
-    } catch (_) {}
+
+      files.push({
+        name: filename,
+        date: dateStr,
+        type,
+        category,
+        moduleId: modId,
+        relativePath: path.relative(PODS_DIR, fullPath),
+        sizeBytes: stat.size,
+        sizeFormatted: formatBytes(stat.size),
+        modifiedAt: stat.mtime.toISOString()
+      });
+    } catch (_) { }
   }
 
-  // Scan current resolved folder
+  // 1. Scan date directories in podDir (e.g. pods/POD_36/2026-09-04/)
+  if (fs.existsSync(podDir)) {
+    const items = fs.readdirSync(podDir);
+    for (const item of items) {
+      const itemPath = path.join(podDir, item);
+      try {
+        const stat = fs.statSync(itemPath);
+        if (stat.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(item)) {
+          const dateStr = item;
+          const subFiles = fs.readdirSync(itemPath);
+          for (const sub of subFiles) {
+            if (sub.endsWith('.jsonl') || sub.endsWith('.json')) {
+              processFile(path.join(itemPath, sub), sub, dateStr);
+            }
+          }
+        }
+      } catch (_) { }
+    }
+  }
+
+  // 2. Scan legacy subdirectories & files
   const currentHbDir = path.join(podDir, 'heartbeats');
   const currentEventsDir = path.join(podDir, 'events');
   const currentStateFile = path.join(podDir, 'state.json');
 
-  scanDirectory(currentHbDir, 'Detak Modul (Raw Heartbeats)', 'heartbeats');
-  scanDirectory(currentEventsDir, 'Insiden & Peristiwa', 'events');
+  if (fs.existsSync(currentHbDir)) {
+    const hbFiles = fs.readdirSync(currentHbDir);
+    for (const f of hbFiles) {
+      if (f.endsWith('.jsonl')) {
+        processFile(path.join(currentHbDir, f), f, f.replace('.jsonl', ''), 'Detak Modul (Legacy)', 'heartbeats');
+      }
+    }
+  }
+
+  if (fs.existsSync(currentEventsDir)) {
+    const evFiles = fs.readdirSync(currentEventsDir);
+    for (const f of evFiles) {
+      if (f.endsWith('.jsonl')) {
+        processFile(path.join(currentEventsDir, f), f, f.replace('.jsonl', ''), 'Insiden & Peristiwa (Legacy)', 'events');
+      }
+    }
+  }
+
   if (fs.existsSync(currentStateFile)) {
     try {
       const stat = fs.statSync(currentStateFile);
@@ -634,30 +736,38 @@ function getPodStorageFilesList(podId) {
         sizeFormatted: formatBytes(stat.size),
         modifiedAt: stat.mtime.toISOString()
       });
-    } catch (_) {}
+    } catch (_) { }
   }
 
-  // Scan legacy folder if different and strictly exists with exact casing
+  // 3. Scan legacy folder 'pod_${id}' if strictly exists
   const legacyFolderName = `pod_${id}`;
   if (exactLegacyFolderExists(legacyFolderName)) {
     const legacyDir = path.join(PODS_DIR, legacyFolderName);
-    scanDirectory(path.join(legacyDir, 'heartbeats'), 'Detak Modul (Legacy)', 'heartbeats');
-    scanDirectory(path.join(legacyDir, 'events'), 'Insiden & Peristiwa (Legacy)', 'events');
-    const legacyState = path.join(legacyDir, 'state.json');
-    if (fs.existsSync(legacyState) && !files.some(f => f.name === 'state.json')) {
-      try {
-        const stat = fs.statSync(legacyState);
-        files.push({
-          name: 'state.json (legacy)',
-          date: new Date(stat.mtime).toISOString().split('T')[0],
-          type: 'state',
-          category: 'Snapshot Status Terakhir (Legacy)',
-          relativePath: path.relative(PODS_DIR, legacyState),
-          sizeBytes: stat.size,
-          sizeFormatted: formatBytes(stat.size),
-          modifiedAt: stat.mtime.toISOString()
-        });
-      } catch (_) {}
+    if (fs.existsSync(legacyDir)) {
+      const subItems = fs.readdirSync(legacyDir);
+      for (const item of subItems) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(item)) {
+          const itemPath = path.join(legacyDir, item);
+          if (fs.statSync(itemPath).isDirectory()) {
+            const dateFiles = fs.readdirSync(itemPath);
+            for (const sub of dateFiles) {
+              if (sub.endsWith('.jsonl') || sub.endsWith('.json')) {
+                processFile(path.join(itemPath, sub), `${sub} (legacy)`, item);
+              }
+            }
+          }
+        }
+      }
+
+      const legacyHbDir = path.join(legacyDir, 'heartbeats');
+      if (fs.existsSync(legacyHbDir)) {
+        const legacyHbFiles = fs.readdirSync(legacyHbDir);
+        for (const f of legacyHbFiles) {
+          if (f.endsWith('.jsonl')) {
+            processFile(path.join(legacyHbDir, f), `${f} (legacy)`, f.replace('.jsonl', ''), 'Detak Modul (Legacy)', 'heartbeats');
+          }
+        }
+      }
     }
   }
 
@@ -682,7 +792,7 @@ function getPodStorageFilesList(podId) {
 /**
  * Stream heartbeats to HTTP response for direct file download
  */
-function streamPodHeartbeatsDownload({
+async function streamPodHeartbeatsDownload({
   podId,
   serverName = null,
   dateStr = null,
@@ -693,99 +803,77 @@ function streamPodHeartbeatsDownload({
   res
 }) {
   const targetDate = dateStr || new Date().toISOString().split('T')[0];
-  const filePath = getPodHeartbeatsLogPath(podId, targetDate);
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ success: false, error: `Berkas log detak tanggal ${targetDate} tidak ditemukan.` });
-  }
-
-  const safeServerName = (serverName || `server_${podId}`).replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
   const modIdNum = (moduleId !== null && moduleId !== undefined && moduleId !== '' && moduleId !== 'ALL')
     ? Number(moduleId)
     : null;
+  const safeServerName = (serverName || `server_${podId}`).replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+  const fileModSuffix = modIdNum ? `_hb${modIdNum}` : '';
   const startMs = parseTimeToMs(startTime, targetDate, false);
   const endMs = parseTimeToMs(endTime, targetDate, true);
-  const hasFilters = modIdNum !== null || startMs !== null || endMs !== null;
 
-  // Fast direct stream if format is jsonl and no filters
-  if (format === 'jsonl' && !hasFilters) {
-    return res.download(filePath, `${safeServerName}_raw_heartbeats_${targetDate}.jsonl`);
+  const podDir = getPodDir(podId, serverName);
+  const dateDir = path.join(podDir, targetDate);
+
+  // 1. Single module download
+  if (modIdNum !== null) {
+    const singleFile = path.join(dateDir, `hb_${modIdNum}_${targetDate}.jsonl`);
+    const fallbackPath = fs.existsSync(singleFile) ? singleFile : getPodHeartbeatsLogPath(podId, targetDate, modIdNum);
+
+    if (!fs.existsSync(fallbackPath) || fs.statSync(fallbackPath).isDirectory()) {
+      return res.status(404).json({ success: false, error: `Berkas log detak modul ${modIdNum} tanggal ${targetDate} tidak ditemukan.` });
+    }
+
+    if (format === 'jsonl' && startMs === null && endMs === null && path.basename(fallbackPath).startsWith('hb_')) {
+      return res.download(fallbackPath, `${safeServerName}${fileModSuffix}_raw_${targetDate}.jsonl`);
+    }
+
+    const records = await readTicksFromFile(fallbackPath, null, startMs, endMs);
+    if (format === 'json') {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeServerName}${fileModSuffix}_heartbeats_${targetDate}.json"`);
+      return res.send(JSON.stringify(records, null, 2));
+    } else {
+      res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeServerName}${fileModSuffix}_raw_${targetDate}.jsonl"`);
+      const body = records.map(r => JSON.stringify(r)).join('\n') + '\n';
+      return res.send(body);
+    }
   }
 
-  const fileStream = fs.createReadStream(filePath, { encoding: 'utf8' });
-  const rl = readline.createInterface({
-    input: fileStream,
-    crlfDelay: Infinity
-  });
+  // 2. All modules download: aggregate from hb_*.jsonl files in date folder
+  let allRecords = [];
+  if (fs.existsSync(dateDir) && fs.statSync(dateDir).isDirectory()) {
+    const entries = fs.readdirSync(dateDir);
+    const hbFiles = entries.filter(f => f.startsWith('hb_') && f.endsWith('.jsonl'));
+    if (hbFiles.length > 0) {
+      const filePromises = hbFiles.map(f => readTicksFromFile(path.join(dateDir, f), null, startMs, endMs));
+      const results = await Promise.all(filePromises);
+      allRecords = results.flat();
+      allRecords.sort((a, b) => a.ts - b.ts);
+    }
+  }
+
+  // Fallback legacy file
+  if (allRecords.length === 0) {
+    const legacyPath = getPodHeartbeatsLogPath(podId, targetDate);
+    if (fs.existsSync(legacyPath) && !fs.statSync(legacyPath).isDirectory()) {
+      allRecords = await readTicksFromFile(legacyPath, null, startMs, endMs);
+    }
+  }
+
+  if (allRecords.length === 0) {
+    return res.status(404).json({ success: false, error: `Berkas log detak tanggal ${targetDate} tidak ditemukan.` });
+  }
 
   if (format === 'json') {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${safeServerName}_heartbeats_${targetDate}.json"`);
-    res.write('[\n');
-
-    let isFirst = true;
-
-    rl.on('line', (line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      try {
-        const tick = JSON.parse(trimmed);
-        if (modIdNum !== null && tick.modId !== modIdNum) return;
-        if (startMs !== null && tick.ts < startMs) return;
-        if (endMs !== null && tick.ts > endMs) return;
-
-        if (!isFirst) {
-          res.write(',\n');
-        } else {
-          isFirst = false;
-        }
-        res.write(JSON.stringify(tick));
-      } catch (_) {}
-    });
-
-    rl.on('close', () => {
-      res.write('\n]\n');
-      res.end();
-    });
-
-    rl.on('error', (err) => {
-      console.warn(`⚠️ Error downloading heartbeats as JSON for POD ${podId}:`, err.message);
-      if (!res.headersSent) {
-        res.status(500).json({ success: false, error: err.message });
-      } else {
-        res.end();
-      }
-    });
+    return res.send(JSON.stringify(allRecords, null, 2));
   } else {
-    // format is jsonl with filters
     res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${safeServerName}_raw_heartbeats_${targetDate}.jsonl"`);
-
-    rl.on('line', (line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      try {
-        const tick = JSON.parse(trimmed);
-        if (modIdNum !== null && tick.modId !== modIdNum) return;
-        if (startMs !== null && tick.ts < startMs) return;
-        if (endMs !== null && tick.ts > endMs) return;
-
-        res.write(line + '\n');
-      } catch (_) {}
-    });
-
-    rl.on('close', () => {
-      res.end();
-    });
-
-    rl.on('error', (err) => {
-      console.warn(`⚠️ Error downloading heartbeats as JSONL for POD ${podId}:`, err.message);
-      if (!res.headersSent) {
-        res.status(500).json({ success: false, error: err.message });
-      } else {
-        res.end();
-      }
-    });
+    const body = allRecords.map(r => JSON.stringify(r)).join('\n') + '\n';
+    return res.send(body);
   }
 }
 
@@ -831,14 +919,32 @@ function autoPurgeOldLogs(retentionDays = 14) {
   try {
     if (!fs.existsSync(PODS_DIR)) return;
 
+    const cutoffDate = new Date(Date.now() - (retentionDays * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
     const cutoffTime = Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
     const podFolders = fs.readdirSync(PODS_DIR);
 
     let purgedCount = 0;
     for (const folder of podFolders) {
       const podDir = path.join(PODS_DIR, folder);
+      try {
+        if (!fs.statSync(podDir).isDirectory()) continue;
+      } catch (_) { continue; }
 
-      // Clean events/ and heartbeats/ subdirectories
+      // 1. Purge expired date directories (e.g. 2026-08-01 < cutoffDate)
+      try {
+        const subItems = fs.readdirSync(podDir);
+        for (const item of subItems) {
+          if (/^\d{4}-\d{2}-\d{2}$/.test(item)) {
+            if (item < cutoffDate) {
+              const dateDirPath = path.join(podDir, item);
+              fs.rmSync(dateDirPath, { recursive: true, force: true });
+              purgedCount++;
+            }
+          }
+        }
+      } catch (_) { }
+
+      // 2. Clean legacy events/ and heartbeats/ subdirectories
       for (const sub of ['events', 'heartbeats']) {
         const subDir = path.join(podDir, sub);
         if (fs.existsSync(subDir)) {
@@ -858,7 +964,7 @@ function autoPurgeOldLogs(retentionDays = 14) {
     }
 
     if (purgedCount > 0) {
-      console.log(`🧹 Purged ${purgedCount} expired JSONL log files older than ${retentionDays} days.`);
+      console.log(`🧹 Purged ${purgedCount} expired log folders/files older than ${retentionDays} days.`);
     }
   } catch (err) {
     console.warn('⚠️ Error running auto purge for pod logs:', err.message);
@@ -887,21 +993,5 @@ module.exports = {
   getRecentFleetIncidents,
   saveFleetSnapshot,
   getFleetSnapshot,
-  autoPurgeOldLogs,
-
-  // Storage Manager & Content Manager (Facade)
-  executeCommand,
-  getPodStorageSummary,
-  scanPodPhysicalFiles,
-  detectPodJunkFiles,
-  cleanupPodJunkFiles,
-  checkCodeFilesOnSinglePod,
-  hardDeletePodCodeFiles,
-  getMimeType,
-  streamPodPhysicalFile,
-  inspectPodDockerStorage,
-  cleanPodDockerStorage,
-  detectPodRogueFiles,
-  downloadS3FilesToPod,
-  checkPodFileIntegrity
+  autoPurgeOldLogs
 };

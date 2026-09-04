@@ -478,8 +478,8 @@ async function downloadS3FilesToPod(server, s3Code, filenames = [], onProgress =
     const prepCmd = rawPass
       ? `echo "${rawPass}" | sudo -S mkdir -p /home/pod/sounds /home/pod/videos /home/pod/images && echo "${rawPass}" | sudo -S chown -R ${targetUser}:${targetUser} /home/pod/sounds /home/pod/videos /home/pod/images && echo "${rawPass}" | sudo -S chmod 777 /home/pod/sounds /home/pod/videos /home/pod/images 2>/dev/null || true`
       : `mkdir -p /home/pod/sounds /home/pod/videos /home/pod/images && chmod 777 /home/pod/sounds /home/pod/videos /home/pod/images 2>/dev/null || true`;
-    await executeCommand(server, prepCmd, 8000).catch(() => {});
-  } catch (_) {}
+    await executeCommand(server, prepCmd, 8000).catch(() => { });
+  } catch (_) { }
 
   // Prepare file items with designated target folder
   const items = filenames.map(fn => {
@@ -650,7 +650,7 @@ print('DOWNLOAD_RESULT_JSON:' + json.dumps(results), flush=True)
             speed: parsed.speed,
             status: 'downloading'
           });
-        } catch (_) {}
+        } catch (_) { }
       }
     }
   };

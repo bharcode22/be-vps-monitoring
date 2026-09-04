@@ -15,7 +15,7 @@ const {
   detectPodRogueFiles,
   downloadS3FilesToPod,
   checkPodFileIntegrity
-} = require('../services/podStorageService');
+} = require('../services/podMediaStorageService');
 
 const { getMultimediaSoundScapes, getValidMultimediaFilenames, getMultimediaDetailBySoundScape, getAllMultimediaList } = require('../services/masterDbService');
 
@@ -859,15 +859,15 @@ const cleanupBatchPodsDocker = async (req, res) => {
 const scanAllPodsRogueFiles = async (req, res) => {
   try {
     const servers = await dbAsync.all("SELECT * FROM servers WHERE type='pod' AND pod_version='v3'");
-    
+
     // Fetch whitelist once
     const [s3Filenames, dbFilenames] = await Promise.all([
       listAllS3Filenames(),
       getValidMultimediaFilenames()
     ]);
-    
+
     const validFilenamesSet = new Set([...s3Filenames, ...dbFilenames]);
-    
+
     // Scan all pods concurrently
     const results = await Promise.all(
       servers.map(async server => {
@@ -879,7 +879,7 @@ const scanAllPodsRogueFiles = async (req, res) => {
         }
       })
     );
-    
+
     res.json({ success: true, data: results });
   } catch (err) {
     console.error('Error scanning rogue files:', err.message);
@@ -894,10 +894,10 @@ const cleanupRogueFiles = async (req, res) => {
   try {
     const { serverId, filePaths, isDryRun } = req.body;
     if (!serverId) return res.status(400).json({ success: false, error: 'serverId is required' });
-    
+
     const server = await dbAsync.get('SELECT * FROM servers WHERE id = ?', [serverId]);
     if (!server) return res.status(404).json({ success: false, error: 'Server not found' });
-    
+
     // Re-use cleanupPodJunkFiles as it safely deletes files via SSH
     const result = await cleanupPodJunkFiles(server, filePaths, isDryRun !== false);
     res.json(result);
