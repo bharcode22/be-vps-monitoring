@@ -26,6 +26,31 @@ let socketIoInstance = null;
 let isInitialized = false;
 const daemonStartTime = Date.now();
 
+// In-memory batch accumulator for fleet heartbeat updates (flushed 1x per second)
+let heartbeatBatchBuffer = {}; // { [podId]: { [modId]: { hb, port, timestamp } } }
+let batchFlushTimer = null;
+
+function queueHeartbeatBatchTick(podId, moduleId, hb, port) {
+  if (!heartbeatBatchBuffer[podId]) {
+    heartbeatBatchBuffer[podId] = {};
+  }
+  heartbeatBatchBuffer[podId][moduleId] = {
+    hb,
+    port: port || null,
+    timestamp: Date.now()
+  };
+}
+
+function startHeartbeatBatchFlusher() {
+  if (batchFlushTimer) return;
+  batchFlushTimer = setInterval(() => {
+    if (!socketIoInstance || Object.keys(heartbeatBatchBuffer).length === 0) return;
+    const batchToSend = heartbeatBatchBuffer;
+    heartbeatBatchBuffer = {};
+    socketIoInstance.emit('pod-heartbeat:batch-update', batchToSend);
+  }, 1000);
+}
+
 /**
  * Standardize and parse occupancy value from raw MQTT payload
  * Returns: 1 (Occupied), 0 (Vacant), or null (Unrecognized)
@@ -250,9 +275,9 @@ function connectPodMqtt(pod) {
 
     podState.lastSeenAt = new Date().toISOString();
 
-    // Emit raw MQTT log for the live activity feed in frontend
+    // Emit raw MQTT log ONLY to subscribers in room:mqtt-raw-feed (prevents tunnel & CPU flooding)
     if (socketIoInstance) {
-      socketIoInstance.emit('pod-activity:mqtt-log', {
+      socketIoInstance.to('room:mqtt-raw-feed').emit('pod-activity:mqtt-log', {
         serverId: pod.id,
         serverName: pod.name,
         topic,
@@ -261,7 +286,7 @@ function connectPodMqtt(pod) {
       });
     }
 
-    // Process and record module heartbeats into Watchdog
+    // Process and record module heartbeats into Watchdog & queue batch tick
     if (topic.includes('mod_server') || rawStr.includes('"hb"')) {
       try {
         let parsed = null;
@@ -281,6 +306,7 @@ function connectPodMqtt(pod) {
             port: parsed?.port || null,
             timestamp: Date.now()
           });
+          queueHeartbeatBatchTick(pod.id, modId, hbVal, parsed?.port || null);
         }
       } catch (_) {}
     }
@@ -411,6 +437,7 @@ async function initPodActivityService(io) {
   if (io) {
     socketIoInstance = io;
   }
+  startHeartbeatBatchFlusher();
 
   if (isInitialized) return;
   isInitialized = true;

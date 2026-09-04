@@ -60,8 +60,14 @@ io.on('connection', (socket) => {
     socket.emit('pod-activity:initial', activityData);
   }).catch(() => { });
 
-  // Trigger fresh collection
-  collectAllServerMetrics(io);
+  // Register selective subscription for high-frequency raw MQTT stream (prevents tunnel flooding)
+  socket.on('subscribe:mqtt-feed', () => {
+    socket.join('room:mqtt-raw-feed');
+  });
+
+  socket.on('unsubscribe:mqtt-feed', () => {
+    socket.leave('room:mqtt-raw-feed');
+  });
 
   // Register real-time Docker Log Streaming handlers
   registerDockerStreamHandlers(socket, io);
