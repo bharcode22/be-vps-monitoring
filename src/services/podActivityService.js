@@ -2,6 +2,11 @@ const mqtt = require('mqtt');
 const { dbAsync, pool } = require('./db');
 const { recordHeartbeatPacket, getHeartbeatSnapshot } = require('./podHeartbeatWatchdogService');
 const { recordPodEvent, savePodState } = require('./podStorageService');
+const {
+  getHeartbeatModulesConfig,
+  getHeartbeatThresholdsConfig
+} = require('./podHeartbeatConfigService');
+
 
 const DEFAULT_MQTT_USER = process.env.MQTT_USERNAME;
 const DEFAULT_MQTT_PASS = process.env.MQTT_PASSWORD;
@@ -485,9 +490,12 @@ async function getPodActivityStatus() {
     summary: getSummaryStats(),
     pods,
     recentLogs: recentActivityLogs.slice(0, 50),
-    heartbeatSnapshot: getHeartbeatSnapshot()
+    heartbeatSnapshot: getHeartbeatSnapshot(),
+    modulesConfig: getHeartbeatModulesConfig(),
+    thresholdsConfig: getHeartbeatThresholdsConfig()
   };
 }
+
 
 /**
  * Get historical occupancy logs with pagination

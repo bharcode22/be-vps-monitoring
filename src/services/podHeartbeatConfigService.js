@@ -4,77 +4,35 @@ const path = require('path');
 const CONFIG_FILE_PATH = path.join(__dirname, '..', 'data', 'heartbeat_modules_config.json');
 const THRESHOLDS_CONFIG_FILE_PATH = path.join(__dirname, '..', 'data', 'heartbeat_thresholds_config.json');
 
-const DEFAULT_MODULES = [
-  {
-    id: 501,
-    name: 'Manual Control',
-    topic: 'mod_server/501/data',
-    defaultPort: 'ttyUSB0',
-    description: 'Kontrol manual dan override input perangkat'
-  },
-  {
-    id: 502,
-    name: 'Chair Module',
-    topic: 'mod_server/502/data',
-    defaultPort: 'ttyUSB1',
-    description: 'Sensor kursi (POB), PEMF, & Schumann'
-  },
-  {
-    id: 503,
-    name: 'Lighting Module',
-    topic: 'mod_server/503/data',
-    defaultPort: 'ttyUSB4',
-    description: 'Kontrol RGB, UVC/UVB/UVA, & Strobo'
-  },
-  {
-    id: 504,
-    name: 'Olfactory Module',
-    topic: 'mod_server/504/data',
-    defaultPort: 'ttyUSB5',
-    description: 'Modul aroma wewangian & difusi'
-  },
-  {
-    id: 505,
-    name: 'Door Module',
-    topic: 'mod_server/505/data',
-    defaultPort: null,
-    description: 'Sensor status pintu & magnetic lock'
-  },
-  {
-    id: 506,
-    name: 'AirCon Module',
-    topic: 'mod_server/506/data',
-    defaultPort: null,
-    description: 'Kontrol suhu & ventilasi udara'
-  },
-  {
-    id: 507,
-    name: 'Audio Module',
-    topic: 'mod_server/507/data',
-    defaultPort: 'ttyUSB2',
-    description: 'Soundscape, voice guide, & haptic amplifier'
-  },
-  {
-    id: 508,
-    name: 'Power Module',
-    topic: 'mod_server/508/data',
-    defaultPort: 'ttyUSB3',
-    description: 'Distribusi daya, relay baterai, & proteksi'
-  },
-  {
-    id: 509,
-    name: 'Biofeedback Module',
-    topic: 'mod_server/509/data',
-    defaultPort: null,
-    description: 'Sensor GSR, detak jantung, & biometrik'
+/**
+ * Load default modules directly from the JSON file
+ */
+function loadModulesFromJson() {
+  try {
+    if (fs.existsSync(CONFIG_FILE_PATH)) {
+      const rawData = fs.readFileSync(CONFIG_FILE_PATH, 'utf-8');
+      const parsed = JSON.parse(rawData);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.error('Error loading modules from JSON:', err.message);
   }
-];
+  return [];
+}
+
+const DEFAULT_MODULES = loadModulesFromJson();
+
 
 const DEFAULT_THRESHOLDS = {
   delaySec: 2,
   frozenSec: 10,
   deadSec: 30
 };
+
+let cachedModules = null;
+let cachedThresholds = null;
 
 /**
  * Ensure the data directory exists
@@ -87,26 +45,44 @@ function ensureDataDirExists() {
 }
 
 /**
- * Read the heartbeat modules list from JSON file
+ * Read the heartbeat modules list from cache or JSON file
  */
 function getHeartbeatModulesConfig() {
+  if (cachedModules && Array.isArray(cachedModules)) {
+    return cachedModules;
+  }
+
   try {
     ensureDataDirExists();
     if (!fs.existsSync(CONFIG_FILE_PATH)) {
       fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify(DEFAULT_MODULES, null, 2), 'utf-8');
+      cachedModules = DEFAULT_MODULES;
       return DEFAULT_MODULES;
     }
 
     const rawData = fs.readFileSync(CONFIG_FILE_PATH, 'utf-8');
     const parsed = JSON.parse(rawData);
     if (Array.isArray(parsed) && parsed.length > 0) {
+      cachedModules = parsed;
       return parsed;
     }
+    cachedModules = DEFAULT_MODULES;
     return DEFAULT_MODULES;
   } catch (err) {
     console.error('Error reading heartbeat modules config:', err.message);
+    cachedModules = DEFAULT_MODULES;
     return DEFAULT_MODULES;
   }
+}
+
+/**
+ * Helper to get friendly module name by ID (e.g. 501 -> "Manual Control")
+ */
+function getModuleNameById(moduleId) {
+  const modIdNum = Number(moduleId);
+  const list = getHeartbeatModulesConfig();
+  const found = list.find(m => Number(m.id) === modIdNum);
+  return found ? found.name : `Module ${moduleId}`;
 }
 
 /**
@@ -139,6 +115,7 @@ function saveHeartbeatModulesConfig(modules) {
 
   ensureDataDirExists();
   fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify(sanitized, null, 2), 'utf-8');
+  cachedModules = sanitized;
   return sanitized;
 }
 
@@ -148,18 +125,24 @@ function saveHeartbeatModulesConfig(modules) {
 function resetHeartbeatModulesConfig() {
   ensureDataDirExists();
   fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify(DEFAULT_MODULES, null, 2), 'utf-8');
+  cachedModules = DEFAULT_MODULES;
   return DEFAULT_MODULES;
 }
 
 /**
- * Read heartbeat thresholds configuration from JSON file
+ * Read heartbeat thresholds configuration from cache or JSON file
  */
 function getHeartbeatThresholdsConfig() {
+  if (cachedThresholds && typeof cachedThresholds === 'object') {
+    return cachedThresholds;
+  }
+
   try {
     ensureDataDirExists();
     if (!fs.existsSync(THRESHOLDS_CONFIG_FILE_PATH)) {
       fs.writeFileSync(THRESHOLDS_CONFIG_FILE_PATH, JSON.stringify(DEFAULT_THRESHOLDS, null, 2), 'utf-8');
-      return DEFAULT_THRESHOLDS;
+      cachedThresholds = { ...DEFAULT_THRESHOLDS };
+      return cachedThresholds;
     }
 
     const rawData = fs.readFileSync(THRESHOLDS_CONFIG_FILE_PATH, 'utf-8');
@@ -168,12 +151,15 @@ function getHeartbeatThresholdsConfig() {
       const delaySec = Number(parsed.delaySec) || DEFAULT_THRESHOLDS.delaySec;
       const frozenSec = Number(parsed.frozenSec) || DEFAULT_THRESHOLDS.frozenSec;
       const deadSec = Number(parsed.deadSec) || DEFAULT_THRESHOLDS.deadSec;
-      return { delaySec, frozenSec, deadSec };
+      cachedThresholds = { delaySec, frozenSec, deadSec };
+      return cachedThresholds;
     }
-    return DEFAULT_THRESHOLDS;
+    cachedThresholds = { ...DEFAULT_THRESHOLDS };
+    return cachedThresholds;
   } catch (err) {
     console.error('Error reading heartbeat thresholds config:', err.message);
-    return DEFAULT_THRESHOLDS;
+    cachedThresholds = { ...DEFAULT_THRESHOLDS };
+    return cachedThresholds;
   }
 }
 
@@ -197,6 +183,7 @@ function saveHeartbeatThresholdsConfig(thresholds) {
 
   ensureDataDirExists();
   fs.writeFileSync(THRESHOLDS_CONFIG_FILE_PATH, JSON.stringify(sanitized, null, 2), 'utf-8');
+  cachedThresholds = sanitized;
   return sanitized;
 }
 
@@ -206,11 +193,13 @@ function saveHeartbeatThresholdsConfig(thresholds) {
 function resetHeartbeatThresholdsConfig() {
   ensureDataDirExists();
   fs.writeFileSync(THRESHOLDS_CONFIG_FILE_PATH, JSON.stringify(DEFAULT_THRESHOLDS, null, 2), 'utf-8');
-  return DEFAULT_THRESHOLDS;
+  cachedThresholds = { ...DEFAULT_THRESHOLDS };
+  return cachedThresholds;
 }
 
 module.exports = {
   getHeartbeatModulesConfig,
+  getModuleNameById,
   saveHeartbeatModulesConfig,
   resetHeartbeatModulesConfig,
   getHeartbeatThresholdsConfig,
@@ -219,3 +208,4 @@ module.exports = {
   DEFAULT_MODULES,
   DEFAULT_THRESHOLDS
 };
+

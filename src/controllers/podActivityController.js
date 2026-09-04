@@ -120,6 +120,13 @@ async function saveHeartbeatModules(req, res) {
     }
 
     const saved = saveHeartbeatModulesConfig(modules);
+
+    // Broadcast updated modules to all connected dashboard clients
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('pod-heartbeat:modules-updated', saved);
+    }
+
     res.json({ success: true, message: 'Konfigurasi modul heartbeat berhasil disimpan ke file JSON!', data: saved });
   } catch (err) {
     console.error('Error saving heartbeat modules:', err.message);
@@ -129,12 +136,18 @@ async function saveHeartbeatModules(req, res) {
 
 /**
  * POST /api/pod-activity/heartbeat-modules/reset
- * Reset heartbeat modules config to default 9 modules in JSON file
+ * Reset heartbeat modules config to default in JSON file
  */
 async function resetHeartbeatModules(req, res) {
   try {
     const data = resetHeartbeatModulesConfig();
-    res.json({ success: true, message: 'Konfigurasi modul heartbeat berhasil direset ke default 9 modul!', data });
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('pod-heartbeat:modules-updated', data);
+    }
+
+    res.json({ success: true, message: 'Konfigurasi modul heartbeat berhasil direset ke default!', data });
   } catch (err) {
     console.error('Error resetting heartbeat modules:', err.message);
     res.status(500).json({ success: false, error: err.message });
@@ -163,6 +176,12 @@ async function saveHeartbeatThresholds(req, res) {
   try {
     const thresholds = req.body;
     const saved = saveHeartbeatThresholdsConfig(thresholds);
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('pod-heartbeat:thresholds-updated', saved);
+    }
+
     res.json({ success: true, message: 'Konfigurasi ambang batas heartbeat berhasil disimpan ke file JSON!', data: saved });
   } catch (err) {
     console.error('Error saving heartbeat thresholds:', err.message);
@@ -177,12 +196,19 @@ async function saveHeartbeatThresholds(req, res) {
 async function resetHeartbeatThresholds(req, res) {
   try {
     const data = resetHeartbeatThresholdsConfig();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('pod-heartbeat:thresholds-updated', data);
+    }
+
     res.json({ success: true, message: 'Konfigurasi ambang batas heartbeat berhasil direset ke default!', data });
   } catch (err) {
     console.error('Error resetting heartbeat thresholds:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 }
+
 
 /**
  * GET /api/pod-activity/pods/:id/events

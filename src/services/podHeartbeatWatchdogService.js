@@ -8,8 +8,13 @@ const {
   savePodState
 } = require('./podStorageService');
 
+const {
+  getHeartbeatThresholdsConfig,
+  getModuleNameById
+} = require('./podHeartbeatConfigService');
+
 // In-memory registry of latest heartbeat status per pod & module
-// Map<podId, Map<moduleId, { hb, lastSeenAt, isAlive, previousHb, lastHbChangeAt, port, totalPackets }>>
+// Map<podId, Map<moduleId, { hb, lastSeenAt, isAlive, previousHb, lastHbChangeAt, port, totalPackets, deadAlertSent, frozenAlertSent }>>
 const heartbeatRegistry = new Map();
 
 // Alert history log ring buffer
@@ -19,9 +24,6 @@ const MAX_ALERTS = 100;
 let socketIoInstance = null;
 let watchdogInterval = null;
 let snapshotInterval = null;
-
-const TIMEOUT_DEAD_SECONDS = 30; // Modul dianggap mati jika tidak kirim hb >= 30 detik
-const TIMEOUT_WARNING_SECONDS = 3; // Modul dianggap pulih jika delay < 3 detik
 
 /**
  * Initialize Postgres schema for heartbeat incident logs (optional backward compatibility)
@@ -51,6 +53,7 @@ async function initAlertsSchema() {
 
 /**
  * Update incoming packet in registry and stream to raw JSONL file
+ * Dynamically evaluates FROZEN and RECOVERED states based on configured thresholds
  */
 function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null, timestamp = Date.now() }) {
   if (!serverId || !moduleId) return;
@@ -62,30 +65,87 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
   const podModules = heartbeatRegistry.get(serverId);
   const now = timestamp || Date.now();
   const prevRecord = podModules.get(moduleId);
-
-  let isFrozen = false;
-  let lastHbChangeAt = now;
+  const thresholds = getHeartbeatThresholdsConfig();
+  const moduleName = getModuleNameById(moduleId);
 
   const currentHbNum = (hb !== null && hb !== undefined && !isNaN(Number(hb))) ? Number(hb) : null;
   const prevHbNum = (prevRecord?.hb !== null && prevRecord?.hb !== undefined && !isNaN(Number(prevRecord.hb))) ? Number(prevRecord.hb) : null;
 
+  let isFrozen = false;
+  let lastHbChangeAt = now;
+
   if (prevRecord) {
     if (prevHbNum !== null && currentHbNum !== null && prevHbNum === currentHbNum) {
       lastHbChangeAt = prevRecord.lastHbChangeAt || now;
-      if (now - lastHbChangeAt >= 10000) {
+      if (now - lastHbChangeAt >= thresholds.frozenSec * 1000) {
         isFrozen = true;
       }
     } else {
       lastHbChangeAt = now;
+      isFrozen = false;
     }
   }
 
   const effectivePort = port || prevRecord?.port || null;
+  const sName = serverName || prevRecord?.serverName || `Pod ${serverId}`;
+
+  // Check state transitions for immediate packet-driven alert/recovery
+  let deadAlertSent = prevRecord?.deadAlertSent || false;
+  let frozenAlertSent = prevRecord?.frozenAlertSent || false;
+  const wasDead = prevRecord?.isDead || false;
+  const wasFrozen = prevRecord?.isFrozen || false;
+
+  // 1. Module recovered from DEAD
+  if (wasDead) {
+    deadAlertSent = false;
+    logIncidentAlert({
+      serverId,
+      serverName: sName,
+      moduleId,
+      moduleName,
+      alertType: 'RECOVERED',
+      message: `Modul ID ${moduleId} (${moduleName}) pulih kembali (berdetak normal).`,
+      lastHb: currentHbNum,
+      durationSeconds: prevRecord?.lastSeenAt ? Math.floor((now - prevRecord.lastSeenAt) / 1000) : 0
+    });
+  }
+
+  // 2. Module recovered from FROZEN (counter resumed incrementing)
+  if (wasFrozen && !isFrozen && frozenAlertSent) {
+    frozenAlertSent = false;
+    logIncidentAlert({
+      serverId,
+      serverName: sName,
+      moduleId,
+      moduleName,
+      alertType: 'RECOVERED',
+      message: `Modul ID ${moduleId} (${moduleName}) kembali berdetak normal (sebelumnya macet di #${prevHbNum}).`,
+      lastHb: currentHbNum,
+      durationSeconds: 0
+    });
+  }
+
+  // 3. Module just became FROZEN upon packet arrival
+  if (isFrozen && !frozenAlertSent && !wasDead) {
+    frozenAlertSent = true;
+    const stuckDurationSec = Math.floor((now - lastHbChangeAt) / 1000);
+    logIncidentAlert({
+      serverId,
+      serverName: sName,
+      moduleId,
+      moduleName,
+      alertType: 'FROZEN',
+      message: `Modul ID ${moduleId} (${moduleName}) macet / nilai heartbeat tidak bergerak selama ${stuckDurationSec} detik (tetap di #${currentHbNum})!`,
+      lastHb: currentHbNum,
+      durationSeconds: stuckDurationSec
+    });
+  }
 
   const record = {
     serverId,
-    serverName: serverName || `Pod ${serverId}`,
+    serverName: sName,
     moduleId: Number(moduleId),
+    moduleName,
     hb: currentHbNum,
     lastSeenAt: now,
     previousHb: prevHbNum,
@@ -94,7 +154,9 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
     isDead: false,
     port: effectivePort,
     totalPackets: (prevRecord?.totalPackets || 0) + 1,
-    alertSent: false
+    deadAlertSent,
+    frozenAlertSent,
+    lastAlertAt: prevRecord?.lastAlertAt || 0
   };
 
   podModules.set(moduleId, record);
@@ -102,7 +164,7 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
   // Stream raw heartbeat value directly to Pod's daily JSON-Lines file
   recordRawHeartbeatTick({
     podId: serverId,
-    serverName,
+    serverName: sName,
     moduleId,
     hb: currentHbNum,
     port: effectivePort,
@@ -112,7 +174,7 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
 
 /**
  * Return in-memory snapshot of all pod heartbeat states
- * Format: { [serverId]: { [moduleId]: { id, hb, lastSeenAt, lastHbChangeAt, isFrozen, port, totalPackets } } }
+ * Format: { [serverId]: { [moduleId]: { id, name, hb, lastSeenAt, lastHbChangeAt, isFrozen, isDead, port, totalPackets } } }
  */
 function getHeartbeatSnapshot() {
   const snapshot = {};
@@ -121,6 +183,7 @@ function getHeartbeatSnapshot() {
     for (const [moduleId, record] of podModules.entries()) {
       snapshot[serverId][moduleId] = {
         id: record.moduleId,
+        name: record.moduleName,
         hb: record.hb,
         lastSeenAt: record.lastSeenAt,
         lastHbChangeAt: record.lastHbChangeAt,
@@ -138,11 +201,24 @@ function getHeartbeatSnapshot() {
  * Record incident alert into Pod-Centric JSON-Lines log file, DB, and ring buffer
  */
 async function logIncidentAlert(alert) {
+  const moduleFriendlyName = alert.moduleName || getModuleNameById(alert.moduleId);
   const entry = {
     id: `alt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     ...alert,
+    moduleName: moduleFriendlyName,
     createdAt: new Date().toISOString()
   };
+
+  // Anti-Spam Check: Prevent duplicate identical alerts within 3 seconds
+  const recentDuplicate = recentAlerts.find(a =>
+    a.serverId === alert.serverId &&
+    a.moduleId === alert.moduleId &&
+    a.alertType === alert.alertType &&
+    Math.abs(Date.now() - new Date(a.createdAt).getTime()) < 3000
+  );
+  if (recentDuplicate) {
+    return recentDuplicate;
+  }
 
   recentAlerts.unshift(entry);
   if (recentAlerts.length > MAX_ALERTS) recentAlerts.pop();
@@ -152,7 +228,7 @@ async function logIncidentAlert(alert) {
     podId: alert.serverId,
     podName: alert.serverName,
     moduleId: alert.moduleId,
-    moduleName: alert.moduleName,
+    moduleName: moduleFriendlyName,
     eventType: alert.alertType, // 'DEAD', 'FROZEN', 'RECOVERED'
     message: alert.message,
     lastHb: alert.lastHb || 0,
@@ -170,13 +246,13 @@ async function logIncidentAlert(alert) {
       alert.serverId,
       alert.serverName,
       alert.moduleId,
-      alert.moduleName || `Module ${alert.moduleId}`,
+      moduleFriendlyName,
       alert.alertType,
       alert.message,
       alert.lastHb || 0,
       alert.durationSeconds || 0
     ]);
-  } catch (_) {}
+  } catch (_) { }
 
   // 3. Broadcast via Socket.io
   if (socketIoInstance) {
@@ -188,41 +264,82 @@ async function logIncidentAlert(alert) {
 
 /**
  * Watchdog Periodic Check (Every 4 seconds)
+ * Evaluates dynamically based on thresholds:
+ * - DEAD: elapsedSec >= thresholds.deadSec
+ * - FROZEN: hb unchanged >= thresholds.frozenSec
+ * - Anti-spam pod aggregation: suppresses 9 separate alerts if whole pod dies simultaneously
  */
 function runWatchdogCheck() {
   const now = Date.now();
+  const thresholds = getHeartbeatThresholdsConfig();
 
   for (const [serverId, podModules] of heartbeatRegistry.entries()) {
+    let serverName = `Pod ${serverId}`;
+    const newlyDeadModules = [];
+    const activeModuleCount = podModules.size;
+
     for (const [moduleId, record] of podModules.entries()) {
+      if (record.serverName) serverName = record.serverName;
       const elapsedSec = Math.floor((now - record.lastSeenAt) / 1000);
+      const hbElapsedSec = record.lastHbChangeAt ? Math.floor((now - record.lastHbChangeAt) / 1000) : null;
+      const modName = record.moduleName || getModuleNameById(moduleId);
 
       // Check for DEAD timeout
-      if (elapsedSec >= TIMEOUT_DEAD_SECONDS && !record.isDead) {
+      if (elapsedSec >= thresholds.deadSec && !record.isDead) {
         record.isDead = true;
+        record.isFrozen = false;
+        record.frozenAlertSent = false;
+        newlyDeadModules.push({ moduleId, modName, record, elapsedSec });
+      }
+      // Check for FROZEN timeout via timer (packets may still be arriving with static hb)
+      else if (!record.isDead && !record.frozenAlertSent && hbElapsedSec !== null && hbElapsedSec >= thresholds.frozenSec) {
+        record.isFrozen = true;
+        record.frozenAlertSent = true;
         logIncidentAlert({
           serverId,
-          serverName: record.serverName,
+          serverName,
           moduleId,
-          moduleName: `Module ${moduleId}`,
-          alertType: 'DEAD',
-          message: `Modul ID ${moduleId} mati / tidak ada heartbeat selama ${elapsedSec} detik!`,
+          moduleName: modName,
+          alertType: 'FROZEN',
+          message: `Modul ID ${moduleId} (${modName}) macet / nilai heartbeat tidak bergerak selama ${hbElapsedSec} detik (tetap di #${record.hb})!`,
           lastHb: record.hb,
-          durationSeconds: elapsedSec
+          durationSeconds: hbElapsedSec
         });
       }
-      // Check for RECOVERED
-      else if (elapsedSec < TIMEOUT_WARNING_SECONDS && record.isDead) {
-        record.isDead = false;
+    }
+
+    // Process DEAD alerts: Fleet Aggregation vs Individual Modules
+    if (newlyDeadModules.length > 0) {
+      // If 3 or more modules (and >= 70% of pod modules) went DEAD simultaneously, log single aggregated POD alert
+      if (newlyDeadModules.length >= 3 && newlyDeadModules.length >= activeModuleCount * 0.7) {
         logIncidentAlert({
           serverId,
-          serverName: record.serverName,
-          moduleId,
-          moduleName: `Module ${moduleId}`,
-          alertType: 'RECOVERED',
-          message: `Modul ID ${moduleId} pulih kembali (berdetak normal).`,
-          lastHb: record.hb,
-          durationSeconds: 0
+          serverName,
+          moduleId: 0,
+          moduleName: 'All Modules',
+          alertType: 'DEAD',
+          message: `⚠️ PERINGATAN ARMADA: ${serverName} OFFLINE / Terputus total (${newlyDeadModules.length} modul serentak tidak ada heartbeat)!`,
+          lastHb: 0,
+          durationSeconds: Math.max(...newlyDeadModules.map(m => m.elapsedSec))
         });
+        for (const item of newlyDeadModules) {
+          item.record.deadAlertSent = true;
+        }
+      } else {
+        // Individual module DEAD alerts
+        for (const item of newlyDeadModules) {
+          item.record.deadAlertSent = true;
+          logIncidentAlert({
+            serverId,
+            serverName,
+            moduleId: item.moduleId,
+            moduleName: item.modName,
+            alertType: 'DEAD',
+            message: `Modul ID ${item.moduleId} (${item.modName}) mati / tidak ada heartbeat selama ${item.elapsedSec} detik!`,
+            lastHb: item.record.hb,
+            durationSeconds: item.elapsedSec
+          });
+        }
       }
     }
   }
@@ -250,6 +367,7 @@ function initHeartbeatWatchdog(io) {
             serverId: Number(podId),
             serverName: `Pod ${podId}`,
             moduleId: Number(modId),
+            moduleName: modData.name || getModuleNameById(modId),
             hb: modData.hb,
             lastSeenAt: modData.lastSeenAt,
             previousHb: null,
@@ -258,13 +376,15 @@ function initHeartbeatWatchdog(io) {
             isDead: modData.isDead || false,
             port: modData.port || null,
             totalPackets: modData.totalPackets || 1,
-            alertSent: false
+            deadAlertSent: modData.isDead || false,
+            frozenAlertSent: modData.isFrozen || false,
+            lastAlertAt: 0
           });
         }
       }
       console.log('⚡ Loaded previous fleet snapshot into Watchdog Registry.');
     }
-  } catch (_) {}
+  } catch (_) { }
 
   if (watchdogInterval) clearInterval(watchdogInterval);
   watchdogInterval = setInterval(runWatchdogCheck, 4000);
@@ -288,5 +408,7 @@ module.exports = {
   recordHeartbeatPacket,
   getHeartbeatSnapshot,
   getRecentIncidentAlerts,
-  logIncidentAlert
+  logIncidentAlert,
+  runWatchdogCheck
 };
+
