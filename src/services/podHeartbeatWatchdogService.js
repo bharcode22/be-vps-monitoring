@@ -14,7 +14,9 @@ const {
 } = require('./podHeartbeatConfigService');
 
 const {
-  sendDeadHeartbeatAlert
+  sendDeadHeartbeatAlert,
+  sendBatchDeadHeartbeatAlert,
+  clearDeadAlertCooldown
 } = require('./telegramAlertService');
 
 // In-memory registry of latest heartbeat status per pod & module
@@ -102,6 +104,7 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
   // 1. Module recovered from DEAD
   if (wasDead) {
     deadAlertSent = false;
+    clearDeadAlertCooldown(serverId, moduleId);
     logIncidentAlert({
       serverId,
       serverName: sName,
@@ -263,8 +266,8 @@ async function logIncidentAlert(alert) {
     socketIoInstance.emit('pod-heartbeat:alert', entry);
   }
 
-  // 4. Send Telegram Notification strictly when status is DEAD
-  if (alert.alertType === 'DEAD') {
+  // 4. Send Telegram Notification strictly when status is DEAD (unless skipTelegram is specified)
+  if (alert.alertType === 'DEAD' && !alert.skipTelegram) {
     sendDeadHeartbeatAlert(alert).catch(err => {
       console.warn('[Watchdog] Gagal mengirim alert Telegram:', err.message);
     });
@@ -319,9 +322,9 @@ function runWatchdogCheck() {
       }
     }
 
-    // Process DEAD alerts: Fleet Aggregation vs Individual Modules
+    // Process DEAD alerts: Fleet Aggregation vs Batch vs Individual Modules
     if (newlyDeadModules.length > 0) {
-      // If 3 or more modules (and >= 70% of pod modules) went DEAD simultaneously, log single aggregated POD alert
+      // 1. If 3 or more modules (and >= 70% of pod modules) went DEAD simultaneously, log single aggregated POD alert
       if (newlyDeadModules.length >= 3 && newlyDeadModules.length >= activeModuleCount * 0.7) {
         logIncidentAlert({
           serverId,
@@ -336,8 +339,32 @@ function runWatchdogCheck() {
         for (const item of newlyDeadModules) {
           item.record.deadAlertSent = true;
         }
+      } else if (newlyDeadModules.length >= 2) {
+        // 2. Batch alert for 2+ modules in the same Pod dying together (e.g. user turned off 2 modules at once)
+        for (const item of newlyDeadModules) {
+          item.record.deadAlertSent = true;
+          logIncidentAlert({
+            serverId,
+            serverName,
+            moduleId: item.moduleId,
+            moduleName: item.modName,
+            alertType: 'DEAD',
+            message: `Modul ID ${item.moduleId} (${item.modName}) mati / tidak ada heartbeat selama ${item.elapsedSec} detik!`,
+            lastHb: item.record.hb,
+            durationSeconds: item.elapsedSec,
+            skipTelegram: true // Telegram receives consolidated batch alert below
+          });
+        }
+        sendBatchDeadHeartbeatAlert({
+          serverId,
+          serverName,
+          modules: newlyDeadModules,
+          durationSeconds: Math.max(...newlyDeadModules.map(m => m.elapsedSec))
+        }).catch(err => {
+          console.warn('[Watchdog] Gagal mengirim batch alert Telegram:', err.message);
+        });
       } else {
-        // Individual module DEAD alerts
+        // 3. Single individual module DEAD alert
         for (const item of newlyDeadModules) {
           item.record.deadAlertSent = true;
           logIncidentAlert({
