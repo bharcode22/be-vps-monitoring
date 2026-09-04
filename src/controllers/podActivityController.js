@@ -28,6 +28,12 @@ const {
   getPodHeartbeatsLogPath
 } = require('../services/podStorageService');
 
+const {
+  getTelegramAlertConfig,
+  saveTelegramAlertConfig,
+  sendTestTelegramMessage
+} = require('../services/telegramAlertService');
+
 /**
  * GET /api/pod-activity/status
  * Get current real-time status of all POD V3 units, summary counts, and recent logs
@@ -376,6 +382,54 @@ function getDaemonStatusHandler(req, res) {
   }
 }
 
+/**
+ * GET /api/pod-activity/telegram/config
+ * Get Telegram alert settings
+ */
+function getTelegramConfigHandler(req, res) {
+  try {
+    const config = getTelegramAlertConfig();
+    res.json({ success: true, data: config });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * POST /api/pod-activity/telegram/config
+ * Update Telegram alert settings
+ */
+function saveTelegramConfigHandler(req, res) {
+  try {
+    const updated = saveTelegramAlertConfig(req.body);
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('pod-heartbeat:telegram-config-updated', updated);
+    }
+    res.json({ success: true, message: 'Pengaturan Telegram berhasil disimpan!', data: updated });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * POST /api/pod-activity/telegram/test
+ * Send a test notification to Telegram supergroup
+ */
+async function testTelegramAlertHandler(req, res) {
+  try {
+    const sender = req.user?.name || req.body?.sender || 'Admin Dashboard';
+    const result = await sendTestTelegramMessage(sender);
+    if (result.sent) {
+      res.json({ success: true, message: 'Pesan tes berhasil dikirim ke grup Telegram HB monitor!', data: result.data });
+    } else {
+      res.status(400).json({ success: false, error: result.error || result.reason });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 module.exports = {
   getStatus,
   getHistory,
@@ -394,5 +448,8 @@ module.exports = {
   downloadPodHeartbeatsHandler,
   getPodLogDatesHandler,
   getPodStorageFilesHandler,
-  getDaemonStatusHandler
+  getDaemonStatusHandler,
+  getTelegramConfigHandler,
+  saveTelegramConfigHandler,
+  testTelegramAlertHandler
 };

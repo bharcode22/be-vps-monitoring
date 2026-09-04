@@ -6,6 +6,7 @@ const {
   getHeartbeatModulesConfig,
   getHeartbeatThresholdsConfig
 } = require('./podHeartbeatConfigService');
+const { getTelegramAlertConfig } = require('./telegramAlertService');
 
 
 const DEFAULT_MQTT_USER = process.env.MQTT_USERNAME;
@@ -492,7 +493,8 @@ async function getPodActivityStatus() {
     recentLogs: recentActivityLogs.slice(0, 50),
     heartbeatSnapshot: getHeartbeatSnapshot(),
     modulesConfig: getHeartbeatModulesConfig(),
-    thresholdsConfig: getHeartbeatThresholdsConfig()
+    thresholdsConfig: getHeartbeatThresholdsConfig(),
+    telegramConfig: getTelegramAlertConfig()
   };
 }
 

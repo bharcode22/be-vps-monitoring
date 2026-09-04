@@ -13,6 +13,10 @@ const {
   getModuleNameById
 } = require('./podHeartbeatConfigService');
 
+const {
+  sendDeadHeartbeatAlert
+} = require('./telegramAlertService');
+
 // In-memory registry of latest heartbeat status per pod & module
 // Map<podId, Map<moduleId, { hb, lastSeenAt, isAlive, previousHb, lastHbChangeAt, port, totalPackets, deadAlertSent, frozenAlertSent }>>
 const heartbeatRegistry = new Map();
@@ -257,6 +261,13 @@ async function logIncidentAlert(alert) {
   // 3. Broadcast via Socket.io
   if (socketIoInstance) {
     socketIoInstance.emit('pod-heartbeat:alert', entry);
+  }
+
+  // 4. Send Telegram Notification strictly when status is DEAD
+  if (alert.alertType === 'DEAD') {
+    sendDeadHeartbeatAlert(alert).catch(err => {
+      console.warn('[Watchdog] Gagal mengirim alert Telegram:', err.message);
+    });
   }
 
   return entry;

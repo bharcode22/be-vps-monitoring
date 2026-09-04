@@ -287,4 +287,9 @@ router.get('/pod-activity/incidents/recent', optionalAuth, podActivityController
 router.post('/pod-activity/heartbeat-thresholds', optionalAuth, podActivityController.saveHeartbeatThresholds);
 router.post('/pod-activity/heartbeat-thresholds/reset', optionalAuth, podActivityController.resetHeartbeatThresholds);
 
+// Telegram Heartbeat Alert Settings & Testing
+router.get('/pod-activity/telegram/config', optionalAuth, podActivityController.getTelegramConfigHandler);
+router.post('/pod-activity/telegram/config', optionalAuth, podActivityController.saveTelegramConfigHandler);
+router.post('/pod-activity/telegram/test', optionalAuth, podActivityController.testTelegramAlertHandler);
+
 module.exports = router;
