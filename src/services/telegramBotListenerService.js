@@ -84,7 +84,7 @@ async function answerTelegramCallbackQuery(callbackQueryId, text = '') {
       callback_query_id: callbackQueryId,
       text: text || undefined
     }, { timeout: 5000 });
-  } catch (_) {}
+  } catch (_) { }
 }
 
 /**
@@ -356,7 +356,7 @@ async function processTelegramUpdates(updates = []) {
  */
 async function pollTelegramUpdates() {
   const config = getTelegramAlertConfig();
-  if (!config.enabled || !config.botToken) {
+  if (!config.botToken) {
     return;
   }
 
