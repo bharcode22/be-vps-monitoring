@@ -421,13 +421,18 @@ function stopTelegramPollingLoop() {
  */
 function initTelegramBotListener() {
   const config = getTelegramAlertConfig();
-  const pollingEnabled = process.env.TELEGRAM_BOT_POLLING !== 'false';
+  const isDev = process.env.NODE_ENV === 'development';
+  const pollingExplicitlySet = process.env.TELEGRAM_BOT_POLLING !== undefined;
+  const pollingEnabled = pollingExplicitlySet
+    ? (process.env.TELEGRAM_BOT_POLLING === 'true' || process.env.TELEGRAM_BOT_POLLING === '1')
+    : !isDev;
+
   if (config.botToken && pollingEnabled) {
     startTelegramPollingLoop().catch(err => {
       console.error('[Telegram Bot Listener] Gagal memulai listener:', err.message);
     });
   } else if (!pollingEnabled) {
-    console.log('ℹ️ [Telegram Bot Listener] Bot polling listener dinonaktifkan via TELEGRAM_BOT_POLLING=false.');
+    console.log('ℹ️ [Telegram Bot Listener] Bot polling listener dinonaktifkan di environment development (hanya aktif di production atau jika TELEGRAM_BOT_POLLING=true).');
   } else {
     console.log('ℹ️ [Telegram Bot Listener] Bot token belum diset, listener standby.');
   }
