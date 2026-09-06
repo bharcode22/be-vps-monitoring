@@ -101,8 +101,38 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
   const wasDead = prevRecord?.isDead || false;
   const wasFrozen = prevRecord?.isFrozen || false;
 
-  // 1. Module recovered from DEAD
+  // Anti-Flapping Protection:
+  // Heartbeat is considered genuinely advancing if:
+  // 1) Current value is a valid positive number (> 0)
+  // 2) Counter has moved (different from previous record)
+  const isAdvancing = currentHbNum !== null && currentHbNum > 0 && (prevHbNum === null || currentHbNum !== prevHbNum);
+
+  // Track consecutive healthy, advancing ticks
+  let consecutiveHealthyTicks = prevRecord?.consecutiveHealthyTicks || 0;
+  if (isAdvancing && !isFrozen) {
+    consecutiveHealthyTicks++;
+  } else {
+    consecutiveHealthyTicks = 0;
+  }
+
+  // Module is confirmed recovered only if advancing, not frozen, and has at least 2 consecutive ticks
+  // (Prevents sporadic dummy packets like #0 every 60s from tricking watchdog into RECOVERED state)
+  const isConfirmedRecovered = wasDead && isAdvancing && !isFrozen && consecutiveHealthyTicks >= 2;
+
+  // Determine isDead state:
+  // If previously dead, remain dead unless confirmed recovered or actively advancing
+  let isDead = false;
   if (wasDead) {
+    if (isConfirmedRecovered || (isAdvancing && !isFrozen)) {
+      isDead = false;
+    } else {
+      // Dummy #0 or frozen packet arriving while DEAD: module remains DEAD!
+      isDead = true;
+    }
+  }
+
+  // 1. Module recovered from DEAD
+  if (isConfirmedRecovered) {
     deadAlertSent = false;
     clearDeadAlertCooldown(serverId, moduleId);
     logIncidentAlert({
@@ -118,7 +148,7 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
   }
 
   // 2. Module recovered from FROZEN (counter resumed incrementing)
-  if (wasFrozen && !isFrozen && frozenAlertSent) {
+  if (wasFrozen && !isFrozen && frozenAlertSent && isAdvancing) {
     frozenAlertSent = false;
     logIncidentAlert({
       serverId,
@@ -133,7 +163,7 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
   }
 
   // 3. Module just became FROZEN upon packet arrival
-  if (isFrozen && !frozenAlertSent && !wasDead) {
+  if (isFrozen && !frozenAlertSent && !wasDead && !isDead) {
     frozenAlertSent = true;
     const stuckDurationSec = Math.floor((now - lastHbChangeAt) / 1000);
     logIncidentAlert({
@@ -158,11 +188,12 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
     previousHb: prevHbNum,
     lastHbChangeAt,
     isFrozen,
-    isDead: false,
+    isDead,
     port: effectivePort,
     totalPackets: (prevRecord?.totalPackets || 0) + 1,
     deadAlertSent,
     frozenAlertSent,
+    consecutiveHealthyTicks,
     lastAlertAt: prevRecord?.lastAlertAt || 0
   };
 
@@ -303,12 +334,14 @@ function runWatchdogCheck() {
         record.isDead = true;
         record.isFrozen = false;
         record.frozenAlertSent = false;
+        record.consecutiveHealthyTicks = 0;
         newlyDeadModules.push({ moduleId, modName, record, elapsedSec });
       }
       // Check for FROZEN timeout via timer (packets may still be arriving with static hb)
       else if (!record.isDead && !record.frozenAlertSent && hbElapsedSec !== null && hbElapsedSec >= thresholds.frozenSec) {
         record.isFrozen = true;
         record.frozenAlertSent = true;
+        record.consecutiveHealthyTicks = 0;
         logIncidentAlert({
           serverId,
           serverName,
