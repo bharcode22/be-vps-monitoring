@@ -26,9 +26,10 @@ let socketIoInstance = null;
 let isInitialized = false;
 const daemonStartTime = Date.now();
 
-// In-memory batch accumulator for fleet heartbeat updates (flushed 1x per second)
+// In-memory batch accumulator for fleet heartbeat updates (dynamic flush interval)
 let heartbeatBatchBuffer = {}; // { [podId]: { [modId]: { hb, port, timestamp } } }
 let batchFlushTimer = null;
+let currentStreamIntervalMs = 1000; // default 1000ms / data
 
 function queueHeartbeatBatchTick(podId, moduleId, hb, port) {
   if (!heartbeatBatchBuffer[podId]) {
@@ -41,14 +42,36 @@ function queueHeartbeatBatchTick(podId, moduleId, hb, port) {
   };
 }
 
-function startHeartbeatBatchFlusher() {
-  if (batchFlushTimer) return;
-  batchFlushTimer = setInterval(() => {
-    if (!socketIoInstance || Object.keys(heartbeatBatchBuffer).length === 0) return;
-    const batchToSend = heartbeatBatchBuffer;
-    heartbeatBatchBuffer = {};
-    socketIoInstance.emit('pod-heartbeat:batch-update', batchToSend);
-  }, 1000);
+function flushHeartbeatBatch() {
+  if (!socketIoInstance || Object.keys(heartbeatBatchBuffer).length === 0) return;
+  const batchToSend = heartbeatBatchBuffer;
+  heartbeatBatchBuffer = {};
+  socketIoInstance.emit('pod-heartbeat:batch-update', batchToSend);
+}
+
+function startHeartbeatBatchFlusher(intervalMs = null) {
+  if (intervalMs !== null && intervalMs !== undefined) {
+    currentStreamIntervalMs = Math.max(100, Math.min(10000, Number(intervalMs) || 1000));
+  }
+  if (batchFlushTimer) {
+    clearInterval(batchFlushTimer);
+    batchFlushTimer = null;
+  }
+  batchFlushTimer = setInterval(flushHeartbeatBatch, currentStreamIntervalMs);
+  console.log(`⚡ [Heartbeat Stream] Batch flusher interval disetel ke: ${currentStreamIntervalMs}ms / data`);
+  return currentStreamIntervalMs;
+}
+
+function setStreamFlushInterval(intervalMs) {
+  const newInterval = startHeartbeatBatchFlusher(intervalMs);
+  if (socketIoInstance) {
+    socketIoInstance.emit('pod-heartbeat:stream-config', { intervalMs: newInterval });
+  }
+  return newInterval;
+}
+
+function getStreamFlushInterval() {
+  return currentStreamIntervalMs;
 }
 
 /**
@@ -436,8 +459,15 @@ function getSummaryStats() {
 async function initPodActivityService(io) {
   if (io) {
     socketIoInstance = io;
+    io.on('connection', (socket) => {
+      // Send current stream interval to newly connected socket
+      socket.emit('pod-heartbeat:stream-config', { intervalMs: currentStreamIntervalMs });
+      socket.on('set:stream-frequency', (intervalMs) => {
+        setStreamFlushInterval(intervalMs);
+      });
+    });
   }
-  startHeartbeatBatchFlusher();
+  startHeartbeatBatchFlusher(currentStreamIntervalMs);
 
   if (isInitialized) return;
   isInitialized = true;
@@ -619,5 +649,7 @@ module.exports = {
   getOccupancyHistory,
   simulatePodActivity,
   syncAndConnectAllV3Pods,
-  getIngestionDaemonStatus
+  getIngestionDaemonStatus,
+  setStreamFlushInterval,
+  getStreamFlushInterval
 };

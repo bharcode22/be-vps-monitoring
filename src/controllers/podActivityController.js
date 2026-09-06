@@ -3,7 +3,9 @@ const {
   getOccupancyHistory,
   simulatePodActivity,
   syncAndConnectAllV3Pods,
-  getIngestionDaemonStatus
+  getIngestionDaemonStatus,
+  setStreamFlushInterval,
+  getStreamFlushInterval
 } = require('../services/podActivityService');
 const { dbAsync } = require('../services/db');
 
@@ -318,7 +320,7 @@ async function downloadPodHeartbeatsHandler(req, res) {
       if (server && server.name) {
         serverName = server.name;
       }
-    } catch (_) {}
+    } catch (_) { }
 
     streamPodHeartbeatsDownload({
       podId,
@@ -447,9 +449,62 @@ module.exports = {
   getPodHeartbeatsHandler,
   downloadPodHeartbeatsHandler,
   getPodLogDatesHandler,
+}
+
+/**
+ * GET /api/pod-activity/stream-frequency
+ */
+async function getStreamFrequencyHandler(req, res) {
+  try {
+    const intervalMs = getStreamFlushInterval();
+    res.json({ success: true, intervalMs });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * POST /api/pod-activity/stream-frequency
+ */
+async function setStreamFrequencyHandler(req, res) {
+  try {
+    const { intervalMs } = req.body;
+    if (!intervalMs || isNaN(Number(intervalMs))) {
+      return res.status(400).json({ success: false, error: 'intervalMs harus berupa angka (ms).' });
+    }
+    const updated = setStreamFlushInterval(Number(intervalMs));
+    res.json({
+      success: true,
+      message: `Frekuensi stream data disetel ke ${updated}ms / data`,
+      intervalMs: updated
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+module.exports = {
+  getStatus,
+  getHistory,
+  simulate,
+  reconnect,
+  getHeartbeatModules,
+  saveHeartbeatModules,
+  resetHeartbeatModules,
+  getHeartbeatThresholds,
+  saveHeartbeatThresholds,
+  resetHeartbeatThresholds,
+  getPodEventsHandler,
+  getPodStateHandler,
+  getRecentIncidentsHandler,
+  getPodHeartbeatsHandler,
+  downloadPodHeartbeatsHandler,
+  getPodLogDatesHandler,
   getPodStorageFilesHandler,
   getDaemonStatusHandler,
   getTelegramConfigHandler,
   saveTelegramConfigHandler,
-  testTelegramAlertHandler
+  testTelegramAlertHandler,
+  getStreamFrequencyHandler,
+  setStreamFrequencyHandler
 };

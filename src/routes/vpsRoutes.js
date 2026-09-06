@@ -292,6 +292,10 @@ router.get('/pod-activity/telegram/config', optionalAuth, podActivityController.
 router.post('/pod-activity/telegram/config', optionalAuth, podActivityController.saveTelegramConfigHandler);
 router.post('/pod-activity/telegram/test', optionalAuth, podActivityController.testTelegramAlertHandler);
 
+// Dynamic Heartbeat Data Stream Frequency Control
+router.get('/pod-activity/stream-frequency', optionalAuth, podActivityController.getStreamFrequencyHandler);
+router.post('/pod-activity/stream-frequency', optionalAuth, podActivityController.setStreamFrequencyHandler);
+
 // POD Diagnostic PDF Report Routes (On-Demand & Telegram Integration)
 const podReportController = require('../controllers/podReportController');
 router.post('/reports/generate/:serverId', optionalAuth, podReportController.generateReportHandler);
