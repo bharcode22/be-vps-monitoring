@@ -421,10 +421,13 @@ function stopTelegramPollingLoop() {
  */
 function initTelegramBotListener() {
   const config = getTelegramAlertConfig();
-  if (config.botToken) {
+  const pollingEnabled = process.env.TELEGRAM_BOT_POLLING !== 'false';
+  if (config.botToken && pollingEnabled) {
     startTelegramPollingLoop().catch(err => {
       console.error('[Telegram Bot Listener] Gagal memulai listener:', err.message);
     });
+  } else if (!pollingEnabled) {
+    console.log('ℹ️ [Telegram Bot Listener] Bot polling listener dinonaktifkan via TELEGRAM_BOT_POLLING=false.');
   } else {
     console.log('ℹ️ [Telegram Bot Listener] Bot token belum diset, listener standby.');
   }
