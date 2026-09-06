@@ -292,4 +292,12 @@ router.get('/pod-activity/telegram/config', optionalAuth, podActivityController.
 router.post('/pod-activity/telegram/config', optionalAuth, podActivityController.saveTelegramConfigHandler);
 router.post('/pod-activity/telegram/test', optionalAuth, podActivityController.testTelegramAlertHandler);
 
+// POD Diagnostic PDF Report Routes (On-Demand & Telegram Integration)
+const podReportController = require('../controllers/podReportController');
+router.post('/reports/generate/:serverId', optionalAuth, podReportController.generateReportHandler);
+router.get('/reports/download/:filename', podReportController.downloadReportHandler);
+router.get('/reports/list', optionalAuth, podReportController.listReportsHandler);
+router.delete('/reports/:filename', optionalAuth, podReportController.deleteReportHandler);
+
 module.exports = router;
+

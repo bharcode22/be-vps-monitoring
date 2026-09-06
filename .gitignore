@@ -10,7 +10,9 @@ envoirment/
 
 # SQLite Database Data directory (Contains VPS credentials & performance history)
 data/
+src/data/
 *.db
+
 *.db-journal
 *.sqlite
 *.sqlite3

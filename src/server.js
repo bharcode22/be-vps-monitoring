@@ -18,6 +18,8 @@ const { initPodActivityService, getPodActivityStatus } = require('./services/pod
 const { initHeartbeatWatchdog } = require('./services/podHeartbeatWatchdogService');
 const { setActivitySocketIo } = require('./services/activityLoggerService');
 const { registerUserPresenceHandlers } = require('./services/userPresenceService');
+const { initTelegramBotListener } = require('./services/telegramBotListenerService');
+
 
 const app = express();
 const server = http.createServer(app);
@@ -112,6 +114,7 @@ async function runPollingLoop() {
 // Initialize real-time POD Activity MQTT service & Heartbeat Watchdog
 initPodActivityService(io);
 initHeartbeatWatchdog(io);
+initTelegramBotListener();
 
 // Start continuous polling loop
 setTimeout(runPollingLoop, 1000);

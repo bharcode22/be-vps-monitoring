@@ -99,7 +99,6 @@ function initPodStorage() {
     if (!fs.existsSync(CONFIG_DIR)) {
       fs.mkdirSync(CONFIG_DIR, { recursive: true });
     }
-    console.log('📁 Pod Storage System initialized at:', BASE_STORAGE_DIR);
 
     // Populate server names from database asynchronously
     if (dbAsync && typeof dbAsync.all === 'function') {

@@ -24,6 +24,7 @@
     "google-auth-library": "^10.9.1",
     "jsonwebtoken": "^9.0.3",
     "mqtt": "^5.15.2",
+    "pdfkit": "^0.20.2",
     "pg": "^8.22.0",
     "socket.io": "^4.8.3",
     "ssh2": "^1.17.0",
