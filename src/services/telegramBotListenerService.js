@@ -230,8 +230,8 @@ async function handleReportCommand(message) {
   parts.shift(); // Remove command
   const queryArg = parts.join(' ').trim();
 
-  // Fetch all POD servers
-  const allPods = await dbAsync.all("SELECT id, name, code, host, pod_version FROM servers WHERE type = 'pod' ORDER BY id ASC");
+  // Fetch all POD servers with full credentials
+  const allPods = await dbAsync.all("SELECT * FROM servers WHERE type = 'pod' ORDER BY id ASC");
   const podV3List = allPods.filter(s => {
     const ver = (s.pod_version || '').toLowerCase();
     const nameStr = (s.name || '').toLowerCase();
