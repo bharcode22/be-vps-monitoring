@@ -27,7 +27,9 @@ const {
   streamPodHeartbeatsDownload,
   getRecentFleetIncidents,
   getPodEventsLogPath,
-  getPodHeartbeatsLogPath
+  getPodHeartbeatsLogPath,
+  hasPodName,
+  registerPodName
 } = require('../services/podStorageService');
 
 const {
@@ -278,6 +280,13 @@ async function getPodHeartbeatsHandler(req, res) {
     const endTime = req.query.endTime || null;
     const source = req.query.source || 'auto';
 
+    if (!hasPodName(podId)) {
+      try {
+        const srv = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
+        if (srv && srv.name) registerPodName(podId, srv.name);
+      } catch (_) { }
+    }
+
     const heartbeats = await getPodHeartbeatStream({
       podId,
       dateStr,
@@ -319,6 +328,7 @@ async function downloadPodHeartbeatsHandler(req, res) {
       const server = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
       if (server && server.name) {
         serverName = server.name;
+        registerPodName(podId, server.name);
       }
     } catch (_) { }
 
@@ -347,6 +357,12 @@ async function downloadPodHeartbeatsHandler(req, res) {
 async function getPodLogDatesHandler(req, res) {
   try {
     const podId = parseInt(req.params.id, 10);
+    if (!hasPodName(podId)) {
+      try {
+        const srv = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
+        if (srv && srv.name) registerPodName(podId, srv.name);
+      } catch (_) { }
+    }
     const dates = getPodLogDates(podId);
     res.json({ success: true, podId, dates });
   } catch (err) {
@@ -359,10 +375,17 @@ async function getPodLogDatesHandler(req, res) {
  * GET /api/pod-activity/pods/:id/storage-files
  * Return list of physical files in pod_storage for a pod
  */
-function getPodStorageFilesHandler(req, res) {
+async function getPodStorageFilesHandler(req, res) {
   try {
     const podId = parseInt(req.params.id, 10);
-    const result = getPodStorageFilesList(podId);
+    const dateFilter = req.query.date || null;
+    if (!hasPodName(podId)) {
+      try {
+        const srv = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
+        if (srv && srv.name) registerPodName(podId, srv.name);
+      } catch (_) { }
+    }
+    const result = getPodStorageFilesList(podId, dateFilter);
     res.json(result);
   } catch (err) {
     console.error('Error fetching pod storage files:', err.message);

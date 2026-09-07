@@ -91,6 +91,10 @@ function registerPodName(podId, name) {
   podNameCache.set(Number(podId), String(name).trim());
 }
 
+function hasPodName(podId) {
+  return podNameCache.has(Number(podId));
+}
+
 /**
  * Resolve folder directory for a podId:
  * Uses sanitized server name (e.g. POD_36) from cache/DB.
@@ -222,7 +226,7 @@ function getPodEventsLogPath(podId, dateStr = null, explicitName = null) {
  * Supports per-module file (hb_[moduleId]_[date].jsonl) or legacy files
  */
 function getPodHeartbeatsLogPath(podId, dateStr = null, moduleId = null, explicitName = null) {
-  const targetDate = dateStr || new Date().toISOString().split('T')[0];
+  const targetDate = dateStr || formatLocalDate(Date.now());
   const podDir = getPodDir(podId, explicitName);
   const modIdNum = (moduleId !== null && moduleId !== undefined && moduleId !== '' && moduleId !== 'ALL')
     ? Number(moduleId)
@@ -549,8 +553,9 @@ async function getPodHeartbeatStream(podIdOrOptions, dateStr = null, limit = 500
 
   if (!podId) return [];
 
-  const targetDate = dateStr || new Date().toISOString().split('T')[0];
-  const today = new Date().toISOString().split('T')[0];
+  const localToday = formatLocalDate(Date.now());
+  const targetDate = dateStr || localToday;
+  const today = localToday;
   const isToday = targetDate === today;
   const modIdNum = (moduleId !== null && moduleId !== undefined && moduleId !== '' && moduleId !== 'ALL')
     ? Number(moduleId)
@@ -685,7 +690,7 @@ function formatBytes(bytes) {
 /**
  * Get full list of physical files in pod_storage for a given pod
  */
-function getPodStorageFilesList(podId) {
+function getPodStorageFilesList(podId, targetDateFilter = null) {
   if (!podId) return { success: false, error: 'podId required' };
   const id = Number(podId);
   const { podDir } = ensurePodDir(id);
@@ -784,7 +789,7 @@ function getPodStorageFilesList(podId) {
       const stat = fs.statSync(currentStateFile);
       files.push({
         name: 'state.json',
-        date: new Date(stat.mtime).toISOString().split('T')[0],
+        date: formatLocalDate(stat.mtime),
         type: 'state',
         category: 'Snapshot Status Terakhir',
         relativePath: path.relative(PODS_DIR, currentStateFile),
@@ -827,10 +832,37 @@ function getPodStorageFilesList(podId) {
     }
   }
 
-  // Sort by date/mtime descending
+  // Sort all files by date/mtime descending
   files.sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
 
+  // Aggregate files into date folders summary
+  const folderMap = new Map();
+  for (const f of files) {
+    const d = f.date || 'other';
+    if (!folderMap.has(d)) {
+      folderMap.set(d, { date: d, count: 0, totalBytes: 0 });
+    }
+    const item = folderMap.get(d);
+    item.count++;
+    item.totalBytes += (f.sizeBytes || 0);
+  }
+
+  const dateFolders = Array.from(folderMap.values())
+    .map(df => ({
+      date: df.date,
+      count: df.count,
+      sizeFormatted: formatBytes(df.totalBytes),
+      sizeBytes: df.totalBytes
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  // If a specific date filter is requested (and not 'ALL'), filter files
+  const filteredFiles = (targetDateFilter && targetDateFilter !== 'ALL')
+    ? files.filter(f => f.date === targetDateFilter || f.name === 'state.json')
+    : files;
+
   const totalSize = files.reduce((acc, f) => acc + (f.sizeBytes || 0), 0);
+  const filteredSize = filteredFiles.reduce((acc, f) => acc + (f.sizeBytes || 0), 0);
 
   return {
     success: true,
@@ -838,10 +870,14 @@ function getPodStorageFilesList(podId) {
     serverName: rawName || `POD ${id}`,
     folderName: sanitized,
     storagePath: `pods/${sanitized}`,
+    selectedDate: targetDateFilter || null,
     totalFiles: files.length,
+    filteredFilesCount: filteredFiles.length,
     totalSizeBytes: totalSize,
     totalSizeFormatted: formatBytes(totalSize),
-    files
+    filteredSizeFormatted: formatBytes(filteredSize),
+    dateFolders,
+    files: filteredFiles
   };
 }
 
@@ -858,7 +894,7 @@ async function streamPodHeartbeatsDownload({
   endTime = null,
   res
 }) {
-  const targetDate = dateStr || new Date().toISOString().split('T')[0];
+  const targetDate = dateStr || formatLocalDate(Date.now());
   const modIdNum = (moduleId !== null && moduleId !== undefined && moduleId !== '' && moduleId !== 'ALL')
     ? Number(moduleId)
     : null;
@@ -1034,6 +1070,7 @@ module.exports = {
   // Heartbeat & Incident Logging Storage
   initPodStorage,
   registerPodName,
+  hasPodName,
   sanitizeServerName,
   recordRawHeartbeatTick,
   recordPodEvent,
