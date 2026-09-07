@@ -122,7 +122,26 @@ function getPodDir(podId, explicitName = null) {
     return path.join(PODS_DIR, sanitized);
   }
 
-  // 3. Fallback check for old naming: 'pod_15'
+  // 3. Fallback scan: check existing pod folders in PODS_DIR for state.json with matching podId
+  if (fs.existsSync(PODS_DIR)) {
+    try {
+      const folders = fs.readdirSync(PODS_DIR);
+      for (const folder of folders) {
+        const stateFile = path.join(PODS_DIR, folder, 'state.json');
+        if (fs.existsSync(stateFile)) {
+          try {
+            const stateData = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+            if (Number(stateData.podId) === id) {
+              registerPodName(id, stateData.name || folder);
+              return path.join(PODS_DIR, folder);
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 4. Fallback check for old naming: 'pod_15'
   const legacyDir = path.join(PODS_DIR, `pod_${id}`);
   return legacyDir;
 }
@@ -262,13 +281,18 @@ function getPodHeartbeatsLogPath(podId, dateStr = null, moduleId = null, explici
 }
 
 /**
- * Get or create write stream for raw heartbeat logs per module (hb_[moduleId]_[date].jsonl)
+/**
+ * Get or create write stream for raw module logs:
+ * - current_[moduleId]_[date].jsonl (for packets with 'current', e.g. PEMF_CUR, HM_CUR, EE_12V)
+ * - hb_[moduleId]_[date].jsonl (for non-current packets, e.g. heartbeat ticks, pob_raw, temp, humi)
  */
-function getHbModuleWriteStream(podId, moduleId, dateStr, serverName = null) {
-  const key = `${podId}_mod${moduleId}_${dateStr}`;
+function getModuleWriteStream(podId, moduleId, dateStr, isCurrent = false, serverName = null) {
+  const prefix = isCurrent ? 'current' : 'hb';
+  const targetDate = dateStr || formatLocalDate();
+  const key = `${podId}_${prefix}_mod${moduleId}_${targetDate}`;
   if (!activeHbStreamMap.has(key)) {
-    const { dateDir, targetDate } = ensurePodDateDir(podId, dateStr, serverName);
-    const filePath = path.join(dateDir, `hb_${moduleId}_${targetDate}.jsonl`);
+    const { dateDir } = ensurePodDateDir(podId, dateStr, serverName);
+    const filePath = path.join(dateDir, `${prefix}_${moduleId}_${targetDate}.jsonl`);
     const stream = fs.createWriteStream(filePath, { flags: 'a', encoding: 'utf8' });
     activeHbStreamMap.set(key, stream);
 
@@ -285,8 +309,18 @@ function getHbModuleWriteStream(podId, moduleId, dateStr, serverName = null) {
   return activeHbStreamMap.get(key);
 }
 
+function getHbModuleWriteStream(podId, moduleId, dateStr, serverName = null) {
+  return getModuleWriteStream(podId, moduleId, dateStr, false, serverName);
+}
+
+function getCurrentModuleWriteStream(podId, moduleId, dateStr, serverName = null) {
+  return getModuleWriteStream(podId, moduleId, dateStr, true, serverName);
+}
+
 /**
- * Record a raw heartbeat tick from MQTT into daily JSON-Lines stream per module (hb_[moduleId]_[date].jsonl)
+ * Record a raw heartbeat / telemetry tick from MQTT into daily JSON-Lines stream per module:
+ * - Packets containing 'current' are stored in: current_[moduleId]_[date].jsonl
+ * - Packets without 'current' are stored in: hb_[moduleId]_[date].jsonl
  * @param {Object} tickObj { podId, serverName, moduleId, hb, port, timestamp }
  */
 function recordRawHeartbeatTick({ podId, serverName = null, moduleId, hb, port = null, timestamp = Date.now(), payload = null, ...extraFields }) {
@@ -310,6 +344,10 @@ function recordRawHeartbeatTick({ podId, serverName = null, moduleId, hb, port =
   const dateStr = formatLocalDate(now);
   const localDateTimeStr = formatLocalDateTime(now);
 
+  // Check if packet contains current telemetry (e.g. { id: 502, name: "PEMF_CUR", current: 0 })
+  const hasCurrent = (payloadObj && payloadObj.current !== undefined && payloadObj.current !== null) ||
+                     (extraFields && extraFields.current !== undefined && extraFields.current !== null);
+
   const rawTick = {
     ts: now,
     date: localDateTimeStr,
@@ -331,10 +369,14 @@ function recordRawHeartbeatTick({ podId, serverName = null, moduleId, hb, port =
     buf.pop();
   }
 
-  // 2. High-performance non-blocking append to module .jsonl file: pods/[pod_name]/[date]/hb_[moduleId]_[date].jsonl
+  // 2. High-performance non-blocking append to module .jsonl file:
+  // - current_[moduleId]_[date].jsonl if hasCurrent
+  // - hb_[moduleId]_[date].jsonl if !hasCurrent
   try {
     const jsonLine = JSON.stringify(rawTick) + '\n';
-    const modStream = getHbModuleWriteStream(podId, moduleId, dateStr, serverName);
+    const modStream = hasCurrent
+      ? getCurrentModuleWriteStream(podId, moduleId, dateStr, serverName)
+      : getHbModuleWriteStream(podId, moduleId, dateStr, serverName);
     if (modStream && modStream.writable) {
       modStream.write(jsonLine);
     }
@@ -578,12 +620,18 @@ async function getPodHeartbeatStream(podIdOrOptions, dateStr = null, limit = 500
   const podDir = getPodDir(podId);
   const dateDir = path.join(podDir, targetDate);
 
-  // 2. If single module requested
+  // 2. If single module requested: check both current_[id]_[date].jsonl and hb_[id]_[date].jsonl
   if (modIdNum !== null) {
     const moduleFile = path.join(dateDir, `hb_${modIdNum}_${targetDate}.jsonl`);
-    if (fs.existsSync(moduleFile)) {
-      const records = await readTicksFromFile(moduleFile, null, startMs, endMs);
-      return records.slice(-limit).reverse();
+    const currentFile = path.join(dateDir, `current_${modIdNum}_${targetDate}.jsonl`);
+    const promises = [];
+    if (fs.existsSync(moduleFile)) promises.push(readTicksFromFile(moduleFile, null, startMs, endMs));
+    if (fs.existsSync(currentFile)) promises.push(readTicksFromFile(currentFile, null, startMs, endMs));
+    if (promises.length > 0) {
+      const results = await Promise.all(promises);
+      const combined = results.flat();
+      combined.sort((a, b) => b.ts - a.ts);
+      return combined.slice(0, limit);
     }
 
     // Fallback legacy file
@@ -595,11 +643,11 @@ async function getPodHeartbeatStream(podIdOrOptions, dateStr = null, limit = 500
     return [];
   }
 
-  // 3. If ALL modules requested: read all hb_*.jsonl files in date folder
+  // 3. If ALL modules requested: read all hb_*.jsonl and current_*.jsonl files in date folder
   if (fs.existsSync(dateDir) && fs.statSync(dateDir).isDirectory()) {
     try {
       const entries = fs.readdirSync(dateDir);
-      const hbFiles = entries.filter(f => f.startsWith('hb_') && f.endsWith('.jsonl'));
+      const hbFiles = entries.filter(f => (f.startsWith('hb_') || f.startsWith('current_')) && f.endsWith('.jsonl'));
       if (hbFiles.length > 0) {
         const filePromises = hbFiles.map(f => readTicksFromFile(path.join(dateDir, f), null, startMs, endMs));
         const results = await Promise.all(filePromises);
@@ -709,7 +757,16 @@ function getPodStorageFilesList(podId, targetDateFilter = null) {
       let modId = moduleId;
 
       if (!customCategory) {
-        if (filename.startsWith('hb_')) {
+        if (filename.startsWith('current_')) {
+          const match = filename.match(/^current_(\d+)_/);
+          if (match) {
+            modId = Number(match[1]);
+            category = `Telemetri Arus (Modul ${modId})`;
+          } else {
+            category = 'Telemetri Arus (Current)';
+          }
+          type = 'current';
+        } else if (filename.startsWith('hb_')) {
           const match = filename.match(/^hb_(\d+)_/);
           if (match) {
             modId = Number(match[1]);
@@ -1014,7 +1071,7 @@ async function getPodFileMetrics(podId, fileName, dateStr = null, interval = '5m
     const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
 
     let totalLines = 0;
-    let detectedType = 'generic';
+    let detectedType = safeBase.startsWith('current_') ? 'channel_current' : 'generic';
     const channelSet = new Set();
     const bucketsMap = new Map();
 
@@ -1070,10 +1127,10 @@ async function getPodFileMetrics(podId, fileName, dateStr = null, interval = '5m
       const bucket = getBucket(bucketTime, dStr);
       bucket.ticksCount++;
 
-      // Case A: Mod 508 / Named Channel Current (EE_12V, EE_5V, VAC_220, etc.)
-      if (item.name && item.current !== undefined && item.voltage === undefined && item.power === undefined) {
+      // Case A: Current Telemetry File (current_*.jsonl) or Item with named current (EE_12V, PEMF_CUR, HM_CUR, OLFA, etc.)
+      if (item.current !== undefined && (safeBase.startsWith('current_') || (item.name && item.voltage === undefined && item.power === undefined))) {
         detectedType = 'channel_current';
-        const ch = String(item.name);
+        const ch = String(item.name || 'current');
         channelSet.add(ch);
         const val = parseFloat(item.current) || 0;
 
@@ -1266,11 +1323,11 @@ async function streamPodHeartbeatsDownload({
     }
   }
 
-  // 2. All modules download: aggregate from hb_*.jsonl files in date folder
+  // 2. All modules download: aggregate from hb_*.jsonl and current_*.jsonl files in date folder
   let allRecords = [];
   if (fs.existsSync(dateDir) && fs.statSync(dateDir).isDirectory()) {
     const entries = fs.readdirSync(dateDir);
-    const hbFiles = entries.filter(f => f.startsWith('hb_') && f.endsWith('.jsonl'));
+    const hbFiles = entries.filter(f => (f.startsWith('hb_') || f.startsWith('current_')) && f.endsWith('.jsonl'));
     if (hbFiles.length > 0) {
       const filePromises = hbFiles.map(f => readTicksFromFile(path.join(dateDir, f), null, startMs, endMs));
       const results = await Promise.all(filePromises);

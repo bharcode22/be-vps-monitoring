@@ -27,19 +27,62 @@ let isInitialized = false;
 const daemonStartTime = Date.now();
 
 // In-memory batch accumulator for fleet heartbeat updates (dynamic flush interval)
-let heartbeatBatchBuffer = {}; // { [podId]: { [modId]: { hb, port, timestamp } } }
+let heartbeatBatchBuffer = {}; // { [podId]: { [modId]: { hb, port, timestamp, channels, telemetry } } }
 let batchFlushTimer = null;
 let currentStreamIntervalMs = 1000; // default 1000ms / data
 
-function queueHeartbeatBatchTick(podId, moduleId, hb, port) {
-  if (!heartbeatBatchBuffer[podId]) {
-    heartbeatBatchBuffer[podId] = {};
+// In-memory cache for latest telemetry values per pod and module
+const liveTelemetryMap = new Map();
+
+function queueHeartbeatBatchTick(podId, moduleId, hb, port, payload = null) {
+  const pId = Number(podId);
+  const mId = Number(moduleId);
+  if (!pId || !mId) return;
+
+  const key = `${pId}_${mId}`;
+  if (!liveTelemetryMap.has(key)) {
+    liveTelemetryMap.set(key, { channels: {}, telemetry: {} });
   }
-  heartbeatBatchBuffer[podId][moduleId] = {
-    hb,
-    port: port || null,
-    timestamp: Date.now()
-  };
+  const cachedTel = liveTelemetryMap.get(key);
+
+  if (payload && typeof payload === 'object') {
+    // 1. Channel currents (name + current) across any module (e.g. Mod 508, 504, 503, 502)
+    if (payload.name && payload.current !== undefined) {
+      const ch = String(payload.name);
+      cachedTel.channels[ch] = parseFloat(payload.current) || 0;
+    }
+    // 2. Multimetric electrical measurements (voltage, power, current)
+    if (payload.voltage !== undefined) cachedTel.telemetry.voltage = parseFloat(payload.voltage) || 0;
+    if (payload.power !== undefined) cachedTel.telemetry.power = parseFloat(payload.power) || 0;
+    if (payload.current !== undefined && !payload.name) cachedTel.telemetry.current = parseFloat(payload.current) || 0;
+    // 3. Environmental & sensors
+    if (payload.pob_raw !== undefined && Number(mId) !== 502) cachedTel.telemetry.pob_raw = parseFloat(payload.pob_raw) || 0;
+    if (payload.temp !== undefined) cachedTel.telemetry.temp = parseFloat(payload.temp) || 0;
+    if (payload.humi !== undefined) cachedTel.telemetry.humi = parseFloat(payload.humi) || 0;
+  }
+
+  if (!heartbeatBatchBuffer[pId]) {
+    heartbeatBatchBuffer[pId] = {};
+  }
+  if (!heartbeatBatchBuffer[pId][mId]) {
+    heartbeatBatchBuffer[pId][mId] = {
+      hb: null,
+      port: port || null,
+      timestamp: Date.now(),
+      channels: {},
+      telemetry: {}
+    };
+  }
+
+  const modEntry = heartbeatBatchBuffer[pId][mId];
+  if (hb !== null && hb !== undefined) {
+    modEntry.hb = hb;
+  }
+  if (port) modEntry.port = port;
+  modEntry.timestamp = Date.now();
+  modEntry.channels = { ...cachedTel.channels };
+  modEntry.telemetry = { ...cachedTel.telemetry };
+  if (payload) modEntry.payload = payload;
 }
 
 function flushHeartbeatBatch() {
@@ -338,9 +381,7 @@ function connectPodMqtt(pod) {
               timestamp: Date.now()
             });
 
-            if (hbVal !== null) {
-              queueHeartbeatBatchTick(pod.id, modId, hbVal, parsed?.port || null);
-            }
+            queueHeartbeatBatchTick(pod.id, modId, hbVal, parsed?.port || null, parsed);
           }
         }
       } catch (_) { }
@@ -476,6 +517,11 @@ async function initPodActivityService(io) {
       socket.emit('pod-heartbeat:stream-config', { intervalMs: currentStreamIntervalMs });
       socket.on('set:stream-frequency', (intervalMs) => {
         setStreamFlushInterval(intervalMs);
+      });
+      socket.on('request:pod-heartbeat-snapshot', () => {
+        try {
+          socket.emit('pod-heartbeat:snapshot', getHeartbeatSnapshot());
+        } catch (_) { }
       });
     });
   }
