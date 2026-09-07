@@ -966,6 +966,256 @@ async function getPodFileRawContent(podId, fileName, dateStr = null, limit = 500
 }
 
 /**
+ * Compute time-series downsampled metric buckets for charting
+ * @param {number|string} podId
+ * @param {string} fileName
+ * @param {string|null} dateStr
+ * @param {string} interval - '1m' | '5m' | '15m' | '1h'
+ */
+async function getPodFileMetrics(podId, fileName, dateStr = null, interval = '5m') {
+  if (!podId || !fileName) return { success: false, error: 'podId and fileName required' };
+
+  const id = Number(podId);
+  const { podDir } = ensurePodDir(id);
+  const safeBase = path.basename(fileName);
+  let resolvedPath = null;
+
+  if (safeBase === 'state.json') {
+    resolvedPath = path.join(podDir, 'state.json');
+  } else if (dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    resolvedPath = path.join(podDir, dateStr, safeBase);
+  } else {
+    if (fs.existsSync(podDir)) {
+      const items = fs.readdirSync(podDir);
+      for (const item of items) {
+        const itemPath = path.join(podDir, item, safeBase);
+        if (fs.existsSync(itemPath)) {
+          resolvedPath = itemPath;
+          break;
+        }
+      }
+      if (!resolvedPath && fs.existsSync(path.join(podDir, safeBase))) {
+        resolvedPath = path.join(podDir, safeBase);
+      }
+    }
+  }
+
+  if (!resolvedPath || !fs.existsSync(resolvedPath)) {
+    return { success: false, error: `Berkas "${safeBase}" tidak ditemukan.` };
+  }
+
+  let intervalMinutes = 5;
+  if (interval === '1m') intervalMinutes = 1;
+  else if (interval === '15m') intervalMinutes = 15;
+  else if (interval === '1h' || interval === '60m') intervalMinutes = 60;
+
+  try {
+    const fileStream = fs.createReadStream(resolvedPath, { encoding: 'utf8' });
+    const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+
+    let totalLines = 0;
+    let detectedType = 'generic';
+    const channelSet = new Set();
+    const bucketsMap = new Map();
+
+    const getBucket = (bucketTime, fullDate) => {
+      if (!bucketsMap.has(bucketTime)) {
+        bucketsMap.set(bucketTime, {
+          time: bucketTime,
+          date: fullDate,
+          channels: {},
+          metrics: {},
+          ticksCount: 0
+        });
+      }
+      return bucketsMap.get(bucketTime);
+    };
+
+    let overallPeak = { value: -Infinity, time: null, channel: null };
+    let overallMin = { value: Infinity, time: null, channel: null };
+
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      totalLines++;
+
+      let item;
+      try {
+        item = JSON.parse(trimmed);
+      } catch (_) {
+        continue;
+      }
+
+      let dStr = item.date || dateStr || '';
+      let timePart = '';
+      if (dStr.includes(' ')) {
+        timePart = dStr.split(' ')[1] || '';
+      } else if (item.isoTime) {
+        timePart = item.isoTime.substring(11, 19);
+      } else if (item.ts) {
+        const d = new Date(item.ts);
+        if (!isNaN(d.getTime())) {
+          timePart = d.toTimeString().slice(0, 8);
+        }
+      }
+
+      if (!timePart) continue;
+
+      const [hh, mm] = timePart.split(':');
+      if (hh === undefined || mm === undefined) continue;
+
+      const minuteNum = parseInt(mm, 10);
+      const bucketMin = Math.floor(minuteNum / intervalMinutes) * intervalMinutes;
+      const bucketTime = `${hh.padStart(2, '0')}:${String(bucketMin).padStart(2, '0')}`;
+      const bucket = getBucket(bucketTime, dStr);
+      bucket.ticksCount++;
+
+      // Case A: Mod 508 / Named Channel Current (EE_12V, EE_5V, VAC_220, etc.)
+      if (item.name && item.current !== undefined && item.voltage === undefined && item.power === undefined) {
+        detectedType = 'channel_current';
+        const ch = String(item.name);
+        channelSet.add(ch);
+        const val = parseFloat(item.current) || 0;
+
+        if (!bucket.channels[ch]) {
+          bucket.channels[ch] = { sum: 0, count: 0, max: -Infinity, min: Infinity };
+        }
+        bucket.channels[ch].sum += val;
+        bucket.channels[ch].count++;
+        if (val > bucket.channels[ch].max) bucket.channels[ch].max = val;
+        if (val < bucket.channels[ch].min) bucket.channels[ch].min = val;
+
+        if (val > overallPeak.value) {
+          overallPeak = { value: val, time: `${dStr.split(' ')[0] || ''} ${bucketTime}`, channel: ch };
+        }
+        if (val < overallMin.value) {
+          overallMin = { value: val, time: `${dStr.split(' ')[0] || ''} ${bucketTime}`, channel: ch };
+        }
+      }
+      // Case B: Mod 503 (multimetric: voltage, current, power)
+      else if (item.voltage !== undefined || item.power !== undefined) {
+        detectedType = 'multimetric';
+        ['voltage', 'current', 'power'].forEach((mKey) => {
+          if (item[mKey] !== undefined) {
+            channelSet.add(mKey);
+            const val = parseFloat(item[mKey]) || 0;
+            if (!bucket.metrics[mKey]) {
+              bucket.metrics[mKey] = { sum: 0, count: 0, max: -Infinity, min: Infinity };
+            }
+            bucket.metrics[mKey].sum += val;
+            bucket.metrics[mKey].count++;
+            if (val > bucket.metrics[mKey].max) bucket.metrics[mKey].max = val;
+            if (val < bucket.metrics[mKey].min) bucket.metrics[mKey].min = val;
+
+            if (val > overallPeak.value) {
+              overallPeak = { value: val, time: bucketTime, channel: mKey };
+            }
+            if (val < overallMin.value) {
+              overallMin = { value: val, time: bucketTime, channel: mKey };
+            }
+          }
+        });
+      }
+      // Case C: Mod 502 (pob_raw pressure)
+      else if (item.pob_raw !== undefined) {
+        detectedType = 'pob_raw';
+        channelSet.add('pob_raw');
+        const val = parseFloat(item.pob_raw) || 0;
+        if (!bucket.metrics['pob_raw']) {
+          bucket.metrics['pob_raw'] = { sum: 0, count: 0, max: -Infinity, min: Infinity };
+        }
+        bucket.metrics['pob_raw'].sum += val;
+        bucket.metrics['pob_raw'].count++;
+        if (val > bucket.metrics['pob_raw'].max) bucket.metrics['pob_raw'].max = val;
+        if (val < bucket.metrics['pob_raw'].min) bucket.metrics['pob_raw'].min = val;
+
+        if (val > overallPeak.value) overallPeak = { value: val, time: bucketTime, channel: 'pob_raw' };
+        if (val < overallMin.value) overallMin = { value: val, time: bucketTime, channel: 'pob_raw' };
+      }
+      // Case D: Modul Counter / Heartbeat sequence (hb)
+      else if (item.hb !== undefined) {
+        if (detectedType === 'generic') {
+          detectedType = 'hb_counter';
+          channelSet.add('hb');
+        }
+        const val = parseFloat(item.hb) || 0;
+        if (!bucket.metrics['hb']) {
+          bucket.metrics['hb'] = { sum: 0, count: 0, max: -Infinity, min: Infinity };
+        }
+        bucket.metrics['hb'].sum += val;
+        bucket.metrics['hb'].count++;
+        if (val > bucket.metrics['hb'].max) bucket.metrics['hb'].max = val;
+        if (val < bucket.metrics['hb'].min) bucket.metrics['hb'].min = val;
+
+        if (detectedType === 'hb_counter') {
+          if (val > overallPeak.value) overallPeak = { value: val, time: bucketTime, channel: 'hb' };
+          if (val < overallMin.value) overallMin = { value: val, time: bucketTime, channel: 'hb' };
+        }
+      }
+    }
+
+    const sortedBucketKeys = Array.from(bucketsMap.keys()).sort();
+
+    const points = sortedBucketKeys.map((key) => {
+      const b = bucketsMap.get(key);
+      const point = {
+        time: b.time,
+        date: b.date,
+        ticks: b.ticksCount
+      };
+
+      if (detectedType === 'channel_current') {
+        for (const [ch, stat] of Object.entries(b.channels)) {
+          point[ch] = Math.round((stat.sum / stat.count) * 100) / 100;
+          point[`${ch}_max`] = Math.round(stat.max * 100) / 100;
+          point[`${ch}_min`] = Math.round(stat.min * 100) / 100;
+        }
+      } else {
+        for (const [m, stat] of Object.entries(b.metrics)) {
+          point[m] = Math.round((stat.sum / stat.count) * 100) / 100;
+          point[`${m}_max`] = Math.round(stat.max * 100) / 100;
+          point[`${m}_min`] = Math.round(stat.min * 100) / 100;
+        }
+      }
+
+      return point;
+    });
+
+    const channels = Array.from(channelSet);
+    const unit = detectedType === 'channel_current' ? 'mA'
+               : detectedType === 'pob_raw' ? 'Raw'
+               : detectedType === 'multimetric' ? 'V/A/W'
+               : 'Ticks';
+
+    return {
+      success: true,
+      podId: id,
+      fileName: safeBase,
+      date: dateStr,
+      interval,
+      intervalMinutes,
+      totalLines,
+      bucketsCount: points.length,
+      detectedType,
+      unit,
+      channels,
+      kpi: {
+        peakValue: overallPeak.value === -Infinity ? 0 : Math.round(overallPeak.value * 100) / 100,
+        peakTime: overallPeak.time,
+        peakChannel: overallPeak.channel,
+        minValue: overallMin.value === Infinity ? 0 : Math.round(overallMin.value * 100) / 100,
+        minTime: overallMin.time,
+        minChannel: overallMin.channel,
+        totalDataPoints: totalLines
+      },
+      points
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
  * Stream heartbeats to HTTP response for direct file download
  */
 async function streamPodHeartbeatsDownload({
@@ -1165,6 +1415,7 @@ module.exports = {
   getPodLogDates,
   getPodStorageFilesList,
   getPodFileRawContent,
+  getPodFileMetrics,
   streamPodHeartbeatsDownload,
   getPodEventsLogPath,
   getPodHeartbeatsLogPath,

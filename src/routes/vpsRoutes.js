@@ -283,6 +283,7 @@ router.get('/pod-activity/pods/:id/log-dates', optionalAuth, podActivityControll
 router.get('/pod-activity/pods/:id/state', optionalAuth, podActivityController.getPodStateHandler);
 router.get('/pod-activity/pods/:id/storage-files', optionalAuth, podActivityController.getPodStorageFilesHandler);
 router.get('/pod-activity/pods/:id/file-content', optionalAuth, podActivityController.getPodFileContentHandler);
+router.get('/pod-activity/pods/:id/file-metrics', optionalAuth, podActivityController.getPodFileMetricsHandler);
 router.get('/pod-activity/daemon-status', optionalAuth, podActivityController.getDaemonStatusHandler);
 router.get('/pod-activity/incidents/recent', optionalAuth, podActivityController.getRecentIncidentsHandler);
 router.post('/pod-activity/heartbeat-thresholds', optionalAuth, podActivityController.saveHeartbeatThresholds);

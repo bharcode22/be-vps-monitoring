@@ -25,6 +25,7 @@ const {
   getPodLogDates,
   getPodStorageFilesList,
   getPodFileRawContent,
+  getPodFileMetrics,
   streamPodHeartbeatsDownload,
   getRecentFleetIncidents,
   getPodEventsLogPath,
@@ -429,6 +430,40 @@ async function getPodFileContentHandler(req, res) {
 }
 
 /**
+ * GET /api/pod-activity/pods/:id/file-metrics
+ * Compute downsampled time-series metrics from a physical file for charting
+ */
+async function getPodFileMetricsHandler(req, res) {
+  try {
+    const podId = parseInt(req.params.id, 10);
+    const fileName = req.query.file || req.query.filename || null;
+    const dateStr = req.query.date || null;
+    const interval = req.query.interval || '5m';
+
+    if (!fileName) {
+      return res.status(400).json({ success: false, error: 'Query param "file" is required.' });
+    }
+
+    if (!hasPodName(podId)) {
+      try {
+        const srv = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
+        if (srv && srv.name) registerPodName(podId, srv.name);
+      } catch (_) { }
+    }
+
+    const result = await getPodFileMetrics(podId, fileName, dateStr, interval);
+    if (!result.success) {
+      return res.status(404).json(result);
+    }
+
+    res.json(result);
+  } catch (err) {
+    console.error('Error fetching file metrics:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
  * GET /api/pod-activity/daemon-status
  * Return health and status of background heartbeat ingestion daemon
  */
@@ -541,6 +576,7 @@ module.exports = {
   getPodLogDatesHandler,
   getPodStorageFilesHandler,
   getPodFileContentHandler,
+  getPodFileMetricsHandler,
   getDaemonStatusHandler,
   getTelegramConfigHandler,
   saveTelegramConfigHandler,
