@@ -113,6 +113,7 @@ async function collectHourlyHeartbeatTelemetry(podServer) {
     const modFile = path.join(dateDir, `hb_${modId}_${activeLogDate}.jsonl`);
     const hourlyTicks = [];
     let latestTick = null;
+    let latestHbTick = null;
     let totalTicksToday = 0;
 
     if (fs.existsSync(modFile)) {
@@ -127,6 +128,9 @@ async function collectHourlyHeartbeatTelemetry(podServer) {
             const tick = JSON.parse(trimmed);
             totalTicksToday++;
             latestTick = tick;
+            if (tick.hb !== undefined && tick.hb !== null && !isNaN(Number(tick.hb))) {
+              latestHbTick = tick;
+            }
             if (tick.ts >= oneHourAgo && tick.ts <= now) {
               hourlyTicks.push(tick);
             }
@@ -212,7 +216,7 @@ async function collectHourlyHeartbeatTelemetry(podServer) {
       topic: mod.topic,
       totalPackets1h: hourlyTicks.length,
       totalPacketsToday: totalTicksToday,
-      latestHb: latestTick ? latestTick.hb : null,
+      latestHb: latestHbTick ? Number(latestHbTick.hb) : (latestTick && latestTick.hb !== undefined && latestTick.hb !== null ? Number(latestTick.hb) : null),
       latestSeenAgoSec: latestTick ? Math.round((now - latestTick.ts) / 1000) : null,
       latestSeenIso: latestTick ? latestTick.isoTime : null,
       isLive,

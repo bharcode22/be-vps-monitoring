@@ -116,7 +116,9 @@ function renderHeartbeatSection(doc, reportData) {
 
     drawBadge(doc, margin + 6 + hbColW1 + hbColW2, rY + 1, mod.status, badgeType);
 
-    const hbText = mod.latestHb !== null ? `#${mod.latestHb.toLocaleString()}` : '—';
+    const hbText = (mod.latestHb !== null && mod.latestHb !== undefined && !isNaN(Number(mod.latestHb)))
+      ? `#${Number(mod.latestHb).toLocaleString()}`
+      : '—';
     doc.text(hbText, margin + 6 + hbColW1 + hbColW2 + hbColW3, rY + 2, { width: hbColW4 });
 
     const pktText = `${(mod.totalPackets1h || 0).toLocaleString()} pkt`;
