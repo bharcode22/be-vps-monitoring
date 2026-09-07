@@ -882,6 +882,90 @@ function getPodStorageFilesList(podId, targetDateFilter = null) {
 }
 
 /**
+ * Read raw content of a specific physical file in pod_storage for a given pod
+ */
+async function getPodFileRawContent(podId, fileName, dateStr = null, limit = 500) {
+  if (!podId || !fileName) return { success: false, error: 'podId and fileName required' };
+
+  const id = Number(podId);
+  const { podDir } = ensurePodDir(id);
+
+  const safeBase = path.basename(fileName);
+  let resolvedPath = null;
+
+  if (safeBase === 'state.json') {
+    resolvedPath = path.join(podDir, 'state.json');
+  } else if (dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    resolvedPath = path.join(podDir, dateStr, safeBase);
+  } else {
+    // Try in date subfolders
+    if (fs.existsSync(podDir)) {
+      const items = fs.readdirSync(podDir);
+      for (const item of items) {
+        const itemPath = path.join(podDir, item, safeBase);
+        if (fs.existsSync(itemPath)) {
+          resolvedPath = itemPath;
+          break;
+        }
+      }
+      if (!resolvedPath && fs.existsSync(path.join(podDir, safeBase))) {
+        resolvedPath = path.join(podDir, safeBase);
+      }
+    }
+  }
+
+  if (!resolvedPath || !fs.existsSync(resolvedPath)) {
+    return { success: false, error: `Berkas "${safeBase}" tidak ditemukan.` };
+  }
+
+  try {
+    const stat = fs.statSync(resolvedPath);
+    if (!stat.isFile()) {
+      return { success: false, error: 'Bukan sebuah berkas valid.' };
+    }
+
+    if (safeBase.endsWith('.json')) {
+      const rawText = fs.readFileSync(resolvedPath, 'utf8');
+      return {
+        success: true,
+        podId: id,
+        fileName: safeBase,
+        fileType: 'json',
+        sizeFormatted: formatBytes(stat.size),
+        modifiedAt: stat.mtime.toISOString(),
+        totalLines: rawText.split('\n').length,
+        content: rawText
+      };
+    }
+
+    // For .jsonl files, read lines
+    const fileStream = fs.createReadStream(resolvedPath, { encoding: 'utf8' });
+    const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+    const lines = [];
+    for await (const line of rl) {
+      if (line.trim()) lines.push(line.trim());
+    }
+
+    const maxLimit = parseInt(limit, 10) || 500;
+    const limitedLines = lines.slice(-maxLimit);
+
+    return {
+      success: true,
+      podId: id,
+      fileName: safeBase,
+      fileType: 'jsonl',
+      sizeFormatted: formatBytes(stat.size),
+      modifiedAt: stat.mtime.toISOString(),
+      totalLines: lines.length,
+      returnedLines: limitedLines.length,
+      content: limitedLines.join('\n')
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
  * Stream heartbeats to HTTP response for direct file download
  */
 async function streamPodHeartbeatsDownload({
@@ -1080,6 +1164,7 @@ module.exports = {
   getPodHeartbeatStream,
   getPodLogDates,
   getPodStorageFilesList,
+  getPodFileRawContent,
   streamPodHeartbeatsDownload,
   getPodEventsLogPath,
   getPodHeartbeatsLogPath,

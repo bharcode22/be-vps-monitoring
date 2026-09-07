@@ -24,6 +24,7 @@ const {
   getPodHeartbeatStream,
   getPodLogDates,
   getPodStorageFilesList,
+  getPodFileRawContent,
   streamPodHeartbeatsDownload,
   getRecentFleetIncidents,
   getPodEventsLogPath,
@@ -394,6 +395,40 @@ async function getPodStorageFilesHandler(req, res) {
 }
 
 /**
+ * GET /api/pod-activity/pods/:id/file-content
+ * Read raw content of a specific physical file in pod_storage on-demand
+ */
+async function getPodFileContentHandler(req, res) {
+  try {
+    const podId = parseInt(req.params.id, 10);
+    const fileName = req.query.file || req.query.filename || null;
+    const dateStr = req.query.date || null;
+    const limit = parseInt(req.query.limit, 10) || 500;
+
+    if (!fileName) {
+      return res.status(400).json({ success: false, error: 'Query param "file" is required.' });
+    }
+
+    if (!hasPodName(podId)) {
+      try {
+        const srv = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
+        if (srv && srv.name) registerPodName(podId, srv.name);
+      } catch (_) { }
+    }
+
+    const result = await getPodFileRawContent(podId, fileName, dateStr, limit);
+    if (!result.success) {
+      return res.status(404).json(result);
+    }
+
+    res.json(result);
+  } catch (err) {
+    console.error('Error fetching file content:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
  * GET /api/pod-activity/daemon-status
  * Return health and status of background heartbeat ingestion daemon
  */
@@ -455,25 +490,6 @@ async function testTelegramAlertHandler(req, res) {
   }
 }
 
-module.exports = {
-  getStatus,
-  getHistory,
-  simulate,
-  reconnect,
-  getHeartbeatModules,
-  saveHeartbeatModules,
-  resetHeartbeatModules,
-  getHeartbeatThresholds,
-  saveHeartbeatThresholds,
-  resetHeartbeatThresholds,
-  getPodEventsHandler,
-  getPodStateHandler,
-  getRecentIncidentsHandler,
-  getPodHeartbeatsHandler,
-  downloadPodHeartbeatsHandler,
-  getPodLogDatesHandler,
-}
-
 /**
  * GET /api/pod-activity/stream-frequency
  */
@@ -524,6 +540,7 @@ module.exports = {
   downloadPodHeartbeatsHandler,
   getPodLogDatesHandler,
   getPodStorageFilesHandler,
+  getPodFileContentHandler,
   getDaemonStatusHandler,
   getTelegramConfigHandler,
   saveTelegramConfigHandler,
