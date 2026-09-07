@@ -61,7 +61,7 @@ async function initAlertsSchema() {
  * Update incoming packet in registry and stream to raw JSONL file
  * Dynamically evaluates FROZEN and RECOVERED states based on configured thresholds
  */
-function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null, timestamp = Date.now() }) {
+function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null, payload = null, timestamp = Date.now() }) {
   if (!serverId || !moduleId) return;
 
   if (!heartbeatRegistry.has(serverId)) {
@@ -86,9 +86,12 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
       if (now - lastHbChangeAt >= thresholds.frozenSec * 1000) {
         isFrozen = true;
       }
-    } else {
+    } else if (currentHbNum !== null) {
       lastHbChangeAt = now;
       isFrozen = false;
+    } else {
+      lastHbChangeAt = prevRecord.lastHbChangeAt || now;
+      isFrozen = prevRecord.isFrozen || false;
     }
   }
 
@@ -178,12 +181,29 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
     });
   }
 
+  const effectiveHbNum = currentHbNum !== null ? currentHbNum : (prevHbNum !== null ? prevHbNum : null);
+
+  const values = { ...(prevRecord?.values || {}) };
+  if (payload && typeof payload === 'object') {
+    if (payload.name && payload.current !== undefined) {
+      values[payload.name] = {
+        current: payload.current,
+        updatedAt: now
+      };
+    } else if (payload.name) {
+      values[payload.name] = {
+        ...payload,
+        updatedAt: now
+      };
+    }
+  }
+
   const record = {
     serverId,
     serverName: sName,
     moduleId: Number(moduleId),
     moduleName,
-    hb: currentHbNum,
+    hb: effectiveHbNum,
     lastSeenAt: now,
     previousHb: prevHbNum,
     lastHbChangeAt,
@@ -194,7 +214,8 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
     deadAlertSent,
     frozenAlertSent,
     consecutiveHealthyTicks,
-    lastAlertAt: prevRecord?.lastAlertAt || 0
+    lastAlertAt: prevRecord?.lastAlertAt || 0,
+    values
   };
 
   podModules.set(moduleId, record);
@@ -206,6 +227,7 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
     moduleId,
     hb: currentHbNum,
     port: effectivePort,
+    payload,
     timestamp: now
   });
 }
@@ -228,7 +250,8 @@ function getHeartbeatSnapshot() {
         isFrozen: record.isFrozen,
         isDead: record.isDead,
         port: record.port || null,
-        totalPackets: record.totalPackets || 1
+        totalPackets: record.totalPackets || 1,
+        ...(record.values && Object.keys(record.values).length > 0 ? { values: record.values } : {})
       };
     }
   }

@@ -23,6 +23,44 @@ const activeHbStreamMap = new Map();
 // Memory cache for pod server name mapping: Map<podId, serverName>
 const podNameCache = new Map();
 
+// Local timezone configuration for human-readable timestamps
+const APP_TIMEZONE = process.env.TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Makassar';
+
+/**
+ * Format timestamp into local calendar date (YYYY-MM-DD)
+ */
+function formatLocalDate(dateOrMs = Date.now(), timeZone = APP_TIMEZONE) {
+  const d = typeof dateOrMs === 'number' ? new Date(dateOrMs) : (dateOrMs instanceof Date ? dateOrMs : new Date(dateOrMs || Date.now()));
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(d);
+}
+
+/**
+ * Format timestamp into local date-time string (YYYY-MM-DD HH:mm:ss)
+ */
+function formatLocalDateTime(dateOrMs = Date.now(), timeZone = APP_TIMEZONE) {
+  const d = typeof dateOrMs === 'number' ? new Date(dateOrMs) : (dateOrMs instanceof Date ? dateOrMs : new Date(dateOrMs || Date.now()));
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(d);
+  const p = {};
+  for (const part of parts) {
+    p[part.type] = part.value;
+  }
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
+}
+
 /**
  * Sanitize server name for directory naming (e.g. "POD 36" -> "POD_36")
  */
@@ -138,7 +176,7 @@ function ensurePodDir(podId, explicitName = null) {
  */
 function ensurePodDateDir(podId, dateStr = null, explicitName = null) {
   const podDir = getPodDir(podId, explicitName);
-  const targetDate = dateStr || new Date().toISOString().split('T')[0];
+  const targetDate = dateStr || formatLocalDate(Date.now());
   const dateDir = path.join(podDir, targetDate);
 
   if (!fs.existsSync(dateDir)) {
@@ -152,7 +190,7 @@ function ensurePodDateDir(podId, dateStr = null, explicitName = null) {
  * Get filepath for a pod's daily JSON-Lines event log
  */
 function getPodEventsLogPath(podId, dateStr = null, explicitName = null) {
-  const targetDate = dateStr || new Date().toISOString().split('T')[0];
+  const targetDate = dateStr || formatLocalDate(Date.now());
   const podDir = getPodDir(podId, explicitName);
 
   // 1. Check in date folder: pods/[pod_name]/[YYYY-MM-DD]/events_[YYYY-MM-DD].jsonl
@@ -247,23 +285,36 @@ function getHbModuleWriteStream(podId, moduleId, dateStr, serverName = null) {
  * Record a raw heartbeat tick from MQTT into daily JSON-Lines stream per module (hb_[moduleId]_[date].jsonl)
  * @param {Object} tickObj { podId, serverName, moduleId, hb, port, timestamp }
  */
-function recordRawHeartbeatTick({ podId, serverName = null, moduleId, hb, port = null, timestamp = Date.now() }) {
+function recordRawHeartbeatTick({ podId, serverName = null, moduleId, hb, port = null, timestamp = Date.now(), payload = null, ...extraFields }) {
   if (!podId || !moduleId) return;
 
   if (serverName) {
     registerPodName(podId, serverName);
   }
 
-  const now = timestamp || Date.now();
-  const dateStr = new Date(now).toISOString().split('T')[0];
+  // Resolve payload data object (supports explicit payload property or spreading)
+  const payloadObj = (payload && typeof payload === 'object')
+    ? payload
+    : (extraFields.payload && typeof extraFields.payload === 'object' ? extraFields.payload : (Object.keys(extraFields).length > 0 ? extraFields : null));
+
+  // Determine creation time: use timestamp/time from device payload if available, otherwise server timestamp
+  const rawCreationTime = payloadObj?.timestamp || payloadObj?.ts || payloadObj?.time || payloadObj?.created_at || timestamp || Date.now();
+  const now = typeof rawCreationTime === 'number'
+    ? rawCreationTime
+    : (!isNaN(Number(rawCreationTime)) ? Number(rawCreationTime) : (new Date(rawCreationTime).getTime() || Date.now()));
+
+  const dateStr = formatLocalDate(now);
+  const localDateTimeStr = formatLocalDateTime(now);
 
   const rawTick = {
     ts: now,
+    date: localDateTimeStr,
     isoTime: new Date(now).toISOString(),
     podId: Number(podId),
     modId: Number(moduleId),
-    hb: (hb !== null && hb !== undefined && !isNaN(Number(hb))) ? Number(hb) : null,
-    port: port || null
+    ...(hb !== null && hb !== undefined && !isNaN(Number(hb)) ? { hb: Number(hb) } : {}),
+    port: port || null,
+    ...(payloadObj && typeof payloadObj === 'object' ? payloadObj : {})
   };
 
   // 1. In-memory buffer for real-time live inspection
@@ -302,8 +353,13 @@ function recordPodEvent(eventObj) {
     registerPodName(eventObj.podId, eventObj.podName);
   }
 
-  const now = eventObj.timestamp || Date.now();
-  const dateStr = new Date(now).toISOString().split('T')[0];
+  const rawCreationTime = eventObj.timestamp || eventObj.data?.timestamp || eventObj.data?.time || Date.now();
+  const now = typeof rawCreationTime === 'number'
+    ? rawCreationTime
+    : (!isNaN(Number(rawCreationTime)) ? Number(rawCreationTime) : (new Date(rawCreationTime).getTime() || Date.now()));
+
+  const dateStr = formatLocalDate(now);
+  const localDateTimeStr = formatLocalDateTime(now);
   const { dateDir } = ensurePodDateDir(eventObj.podId, dateStr, eventObj.podName);
   const filePath = path.join(dateDir, `events_${dateStr}.jsonl`);
 
@@ -319,6 +375,7 @@ function recordPodEvent(eventObj) {
     downtimeSeconds: eventObj.downtimeSeconds || 0,
     data: eventObj.data || null,
     timestamp: now,
+    date: localDateTimeStr,
     isoTime: new Date(now).toISOString()
   };
 

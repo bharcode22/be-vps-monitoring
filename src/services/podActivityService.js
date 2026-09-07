@@ -309,7 +309,7 @@ function connectPodMqtt(pod) {
       });
     }
 
-    // Process and record module heartbeats into Watchdog & queue batch tick
+    // Process and record module heartbeats & telemetry data into Watchdog & queue batch tick
     if (topic.includes('mod_server') || rawStr.includes('"hb"')) {
       try {
         let parsed = null;
@@ -319,25 +319,37 @@ function connectPodMqtt(pod) {
         if (match) modId = parseInt(match[1], 10);
         else if (parsed?.id) modId = parseInt(parsed.id, 10);
 
-        if (modId && (parsed?.hb !== undefined || !isNaN(Number(rawStr)))) {
-          const hbVal = parsed?.hb !== undefined ? parsed.hb : Number(rawStr);
-          recordHeartbeatPacket({
-            serverId: pod.id,
-            serverName: pod.name,
-            moduleId: modId,
-            hb: hbVal,
-            port: parsed?.port || null,
-            timestamp: Date.now()
-          });
-          queueHeartbeatBatchTick(pod.id, modId, hbVal, parsed?.port || null);
+        const isControlTopic = topic.endsWith('/status') || topic.endsWith('/port') || topic.endsWith('/cmd') || topic.endsWith('/req');
+
+        if (modId && !isControlTopic) {
+          const hasHb = parsed?.hb !== undefined;
+          const isNumericStr = !isNaN(Number(rawStr)) && rawStr.trim() !== '';
+          const hbVal = hasHb ? parsed.hb : (isNumericStr ? Number(rawStr) : null);
+
+          // Record if it is a heartbeat tick, or a JSON object carrying telemetry values (e.g. { id: 508, name: "EE_12V", current: "23328.51" })
+          if (hbVal !== null || (parsed && typeof parsed === 'object')) {
+            recordHeartbeatPacket({
+              serverId: pod.id,
+              serverName: pod.name,
+              moduleId: modId,
+              hb: hbVal,
+              port: parsed?.port || null,
+              payload: parsed,
+              timestamp: Date.now()
+            });
+
+            if (hbVal !== null) {
+              queueHeartbeatBatchTick(pod.id, modId, hbVal, parsed?.port || null);
+            }
+          }
         }
-      } catch (_) {}
+      } catch (_) { }
     }
 
     // Only process occupancy state if the topic is specifically mod_chair/pob_state
-    const isOccupancyTopic = topic === 'mod_chair/pob_state' || 
-                             topic.endsWith('/mod_chair/pob_state') || 
-                             topic === 'pob_state';
+    const isOccupancyTopic = topic === 'mod_chair/pob_state' ||
+      topic.endsWith('/mod_chair/pob_state') ||
+      topic === 'pob_state';
     if (!isOccupancyTopic) {
       return;
     }
@@ -485,7 +497,7 @@ async function initPodActivityService(io) {
       if (client && !client.connected && !client.reconnecting) {
         try {
           client.reconnect();
-        } catch (_) {}
+        } catch (_) { }
       }
     }
   }, 25000);
