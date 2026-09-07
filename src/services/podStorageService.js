@@ -1457,6 +1457,223 @@ function autoPurgeOldLogs(retentionDays = 14) {
 // Run auto purge once every 24 hours
 setInterval(() => autoPurgeOldLogs(14), 24 * 60 * 60 * 1000);
 
+/**
+ * Fast-path backfill for live telemetry streaming:
+ * Reads recent ticks from today's saved JSONL files
+ * and formats them into continuous time-series points for Recharts.
+ *
+ * @param {Object} params
+ * @param {number|string} params.podId
+ * @param {number|string} params.moduleId
+ * @param {string|null} params.dateStr - 'YYYY-MM-DD'
+ * @param {number} params.windowSeconds - Duration in seconds (e.g. 300 = 5 min)
+ * @param {string} params.type - 'current' | 'hb' | 'all'
+ */
+async function getPodLiveBackfillPoints({
+  podId,
+  moduleId,
+  dateStr = null,
+  windowSeconds = 300,
+  type = 'current'
+}) {
+  if (!podId || !moduleId) {
+    return { success: false, error: 'podId and moduleId required' };
+  }
+
+  const pId = Number(podId);
+  const mId = Number(moduleId);
+  const localToday = formatLocalDate(Date.now());
+  const targetDate = dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? dateStr : localToday;
+
+  const podDir = getPodDir(pId);
+  const dateDir = path.join(podDir, targetDate);
+  if (!fs.existsSync(dateDir)) {
+    return { success: true, points: [], channels: [], latestValues: {}, windowSeconds: Number(windowSeconds) };
+  }
+
+  const currentFile = path.join(dateDir, `current_${mId}_${targetDate}.jsonl`);
+  const hbFile = path.join(dateDir, `hb_${mId}_${targetDate}.jsonl`);
+
+  // Choose primary file based on type preference & file availability
+  let targetFile = null;
+  let detectedType = type;
+
+  if (type === 'current' && fs.existsSync(currentFile)) {
+    targetFile = currentFile;
+    detectedType = 'current';
+  } else if (fs.existsSync(hbFile)) {
+    targetFile = hbFile;
+    detectedType = 'hb';
+  } else if (fs.existsSync(currentFile)) {
+    targetFile = currentFile;
+    detectedType = 'current';
+  }
+
+  if (!targetFile || !fs.existsSync(targetFile)) {
+    return { success: true, points: [], channels: [], latestValues: {}, windowSeconds: Number(windowSeconds) };
+  }
+
+  const durationSec = Math.max(10, Math.min(21600, Number(windowSeconds) || 300));
+  const now = Date.now();
+
+  try {
+    const stat = fs.statSync(targetFile);
+    if (stat.size === 0) {
+      return { success: true, points: [], channels: [], latestValues: {}, windowSeconds: durationSec, stepSec: 1 };
+    }
+
+    // Determine adaptive downsampling step in seconds to keep response light (~300 - 900 points)
+    let stepSec = 1;
+    if (durationSec > 10800) {
+      stepSec = 30; // > 3h up to 6h
+    } else if (durationSec > 3600) {
+      stepSec = 15; // > 1h up to 3h
+    } else if (durationSec > 1800) {
+      stepSec = 5;  // > 30m up to 1h
+    } else if (durationSec > 300) {
+      stepSec = 2;  // > 5m up to 30m
+    }
+
+    // Read efficiently from tail chunk (allocate ~3KB per second of window, min 512KB, max 64MB or file size)
+    const chunkBytes = Math.min(stat.size, Math.max(512 * 1024, Math.min(64 * 1024 * 1024, durationSec * 3072)));
+    const startPos = Math.max(0, stat.size - chunkBytes);
+
+    const stream = fs.createReadStream(targetFile, { start: startPos, encoding: 'utf8' });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+    let isFirst = startPos > 0;
+    const rawTicks = [];
+
+    await new Promise((resolve) => {
+      rl.on('line', (line) => {
+        if (isFirst) {
+          isFirst = false; // drop slice-in-middle line
+          return;
+        }
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        try {
+          const tick = JSON.parse(trimmed);
+          if (tick.ts) {
+            rawTicks.push(tick);
+          }
+        } catch (_) {}
+      });
+      rl.on('close', resolve);
+      rl.on('error', resolve);
+    });
+
+    if (rawTicks.length === 0) {
+      return { success: true, points: [], channels: [], latestValues: {}, windowSeconds: durationSec, stepSec };
+    }
+
+    // Anchor to latest recorded timestamp if file has been idle, or now if actively streaming
+    const lastTickTs = rawTicks[rawTicks.length - 1].ts || now;
+    const effectiveNow = (now - lastTickTs < durationSec * 1000) ? now : lastTickTs;
+    const cutoffTs = effectiveNow - durationSec * 1000;
+
+    const relevantTicks = rawTicks.filter((t) => t.ts >= cutoffTs);
+
+    // Aggregate into continuous points with carry-forward and step downsampling
+    const pointsMap = new Map();
+    const latestChannels = {};
+    const channelSet = new Set();
+    const stepMs = stepSec * 1000;
+
+    for (const t of relevantTicks) {
+      // 1. Current channels (e.g. PEMF_CUR, HM_CUR, EE_12V, etc.)
+      if (t.name && t.current !== undefined) {
+        const val = parseFloat(t.current);
+        if (!isNaN(val)) {
+          latestChannels[t.name] = val;
+          channelSet.add(t.name);
+        }
+      } else if (t.current !== undefined && !t.name) {
+        const val = parseFloat(t.current);
+        if (!isNaN(val)) {
+          latestChannels.current = val;
+          channelSet.add('current');
+        }
+      }
+
+      // 2. Multimetric measurements (voltage, power)
+      if (t.voltage !== undefined) {
+        const val = parseFloat(t.voltage);
+        if (!isNaN(val)) {
+          latestChannels.voltage = val;
+          channelSet.add('voltage');
+        }
+      }
+      if (t.power !== undefined) {
+        const val = parseFloat(t.power);
+        if (!isNaN(val)) {
+          latestChannels.power = val;
+          channelSet.add('power');
+        }
+      }
+
+      // 3. Environmental & sensors (excluding pob_raw for 502!)
+      if (mId !== 502 && t.pob_raw !== undefined) {
+        const val = parseFloat(t.pob_raw);
+        if (!isNaN(val)) {
+          latestChannels.pob_raw = val;
+          channelSet.add('pob_raw');
+        }
+      }
+      if (t.temp !== undefined) {
+        const val = parseFloat(t.temp);
+        if (!isNaN(val)) {
+          latestChannels.temp = val;
+          channelSet.add('temp');
+        }
+      }
+      if (t.humi !== undefined) {
+        const val = parseFloat(t.humi);
+        if (!isNaN(val)) {
+          latestChannels.humi = val;
+          channelSet.add('humi');
+        }
+      }
+
+      // 4. Heartbeat counter
+      if (t.hb !== undefined && t.hb !== null) {
+        latestChannels.hb = Number(t.hb);
+        channelSet.add('hb');
+      }
+
+      // Format time string for this downsampled step
+      const bucketTs = Math.floor(t.ts / stepMs) * stepMs;
+      const d = new Date(bucketTs);
+      const timeStr = d.toLocaleTimeString('id-ID', { hour12: false });
+
+      pointsMap.set(bucketTs, {
+        time: timeStr,
+        timestamp: bucketTs,
+        ...latestChannels
+      });
+    }
+
+    const points = Array.from(pointsMap.values());
+
+    return {
+      success: true,
+      podId: pId,
+      moduleId: mId,
+      date: targetDate,
+      detectedType,
+      windowSeconds: durationSec,
+      stepSec,
+      totalPoints: points.length,
+      channels: Array.from(channelSet),
+      latestValues: { ...latestChannels },
+      points
+    };
+  } catch (err) {
+    console.warn('⚠️ Error getting live backfill points:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
 module.exports = {
   // Heartbeat & Incident Logging Storage
   initPodStorage,
@@ -1473,6 +1690,7 @@ module.exports = {
   getPodStorageFilesList,
   getPodFileRawContent,
   getPodFileMetrics,
+  getPodLiveBackfillPoints,
   streamPodHeartbeatsDownload,
   getPodEventsLogPath,
   getPodHeartbeatsLogPath,

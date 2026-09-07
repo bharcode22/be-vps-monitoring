@@ -26,6 +26,7 @@ const {
   getPodStorageFilesList,
   getPodFileRawContent,
   getPodFileMetrics,
+  getPodLiveBackfillPoints,
   streamPodHeartbeatsDownload,
   getRecentFleetIncidents,
   getPodEventsLogPath,
@@ -464,6 +465,45 @@ async function getPodFileMetricsHandler(req, res) {
 }
 
 /**
+ * GET /api/pod-activity/pods/:id/live-backfill
+ * Returns pre-formatted continuous time-series points from saved JSONL files
+ * to populate the Live Telemetry Stream chart immediately without cold start.
+ */
+async function getPodLiveBackfillHandler(req, res) {
+  try {
+    const podId = parseInt(req.params.id, 10);
+    const moduleId = req.query.moduleId || req.query.module || null;
+    const windowSeconds = parseInt(req.query.windowSeconds || req.query.window, 10) || 300;
+    const dateStr = req.query.date || null;
+    const type = req.query.type || 'current';
+
+    if (!podId || !moduleId) {
+      return res.status(400).json({ success: false, error: 'Query param "moduleId" is required.' });
+    }
+
+    if (!hasPodName(podId)) {
+      try {
+        const srv = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
+        if (srv && srv.name) registerPodName(podId, srv.name);
+      } catch (_) { }
+    }
+
+    const result = await getPodLiveBackfillPoints({
+      podId,
+      moduleId,
+      dateStr,
+      windowSeconds,
+      type
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error('Error fetching live backfill points:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
  * GET /api/pod-activity/daemon-status
  * Return health and status of background heartbeat ingestion daemon
  */
@@ -577,6 +617,7 @@ module.exports = {
   getPodStorageFilesHandler,
   getPodFileContentHandler,
   getPodFileMetricsHandler,
+  getPodLiveBackfillHandler,
   getDaemonStatusHandler,
   getTelegramConfigHandler,
   saveTelegramConfigHandler,
