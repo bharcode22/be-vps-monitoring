@@ -483,7 +483,9 @@ async function downloadS3FilesToPod(server, s3Code, filenames = [], onProgress =
 
   // Prepare file items with designated target folder
   const items = filenames.map(fn => {
-    const filename = String(fn).trim();
+    const raw = typeof fn === 'object' && fn !== null ? (fn.filename || fn.name || '') : fn;
+    const filename = String(raw || '').trim();
+    if (!filename) return null;
     const category = categorizeFile(filename);
     let folderType = 'sounds';
     if (category === 'video') folderType = 'videos';
@@ -496,7 +498,7 @@ async function downloadS3FilesToPod(server, s3Code, filenames = [], onProgress =
       folderType,
       category
     };
-  });
+  }).filter(Boolean);
 
   const payload = {
     baseUrl,
