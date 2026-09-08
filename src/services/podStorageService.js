@@ -1677,6 +1677,9 @@ async function getPodLiveBackfillPoints({
 module.exports = {
   // Heartbeat & Incident Logging Storage
   initPodStorage,
+  getPodDir,
+  formatLocalDate,
+  formatLocalDateTime,
   registerPodName,
   hasPodName,
   sanitizeServerName,

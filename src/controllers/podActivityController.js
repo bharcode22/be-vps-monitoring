@@ -36,6 +36,11 @@ const {
 } = require('../services/podStorageService');
 
 const {
+  analyzeHeartbeatPattern,
+  getRecentIncidentList
+} = require('../services/podHeartbeatAnalyzerService');
+
+const {
   getTelegramAlertConfig,
   saveTelegramAlertConfig,
   sendTestTelegramMessage
@@ -256,15 +261,53 @@ async function getPodStateHandler(req, res) {
 
 /**
  * GET /api/pod-activity/incidents/recent
- * Get recent incidents across all fleet pods
+ * Get recent incidents across all fleet pods from memory & persistent DB
  */
 async function getRecentIncidentsHandler(req, res) {
   try {
     const limit = parseInt(req.query.limit, 10) || 50;
-    const incidents = getRecentFleetIncidents(limit);
+    const incidents = await getRecentIncidentList(limit);
     res.json({ success: true, data: incidents });
   } catch (err) {
     console.error('Error fetching recent fleet incidents:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * GET /api/pod-activity/pods/:id/hb-analysis
+ * Analyze heartbeat interval pattern, counter continuity, and diagnostic heuristics
+ */
+async function analyzePodHeartbeatHandler(req, res) {
+  try {
+    const podId = parseInt(req.params.id, 10);
+    const moduleId = req.query.moduleId ? parseInt(req.query.moduleId, 10) : 507;
+    const targetTime = req.query.targetTime || req.query.time || req.query.ts || null;
+    const dateStr = req.query.date || null;
+    const windowMinutes = req.query.windowMinutes ? parseInt(req.query.windowMinutes, 10) : 5;
+
+    if (!podId) {
+      return res.status(400).json({ success: false, error: 'Parameter podId wajib diisi.' });
+    }
+
+    if (!hasPodName(podId)) {
+      try {
+        const srv = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
+        if (srv && srv.name) registerPodName(podId, srv.name);
+      } catch (_) { }
+    }
+
+    const result = await analyzeHeartbeatPattern({
+      podId,
+      moduleId,
+      targetTime,
+      dateStr,
+      windowMinutes
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error('Error analyzing pod heartbeat pattern:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 }
@@ -611,6 +654,7 @@ module.exports = {
   getPodEventsHandler,
   getPodStateHandler,
   getRecentIncidentsHandler,
+  analyzePodHeartbeatHandler,
   getPodHeartbeatsHandler,
   downloadPodHeartbeatsHandler,
   getPodLogDatesHandler,
