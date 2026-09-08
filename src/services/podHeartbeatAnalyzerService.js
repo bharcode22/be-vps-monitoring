@@ -276,10 +276,12 @@ function classifyRootCauseHeuristic({
     };
   }
 
-  // Find the most relevant gap near targetMs
+  // Find the most relevant gap near targetMs (prioritize gaps exceeding deadThresholdSec)
   let primaryGap = null;
-  if (gaps.length > 0) {
-    // Gap closest to targetMs
+  const deadGaps = (gaps || []).filter(g => g.durationSec >= deadThresholdSec);
+  if (deadGaps.length > 0) {
+    primaryGap = [...deadGaps].sort((a, b) => Math.abs(a.endTs - targetMs) - Math.abs(b.endTs - targetMs))[0];
+  } else if (gaps && gaps.length > 0) {
     primaryGap = [...gaps].sort((a, b) => Math.abs(a.endTs - targetMs) - Math.abs(b.endTs - targetMs))[0];
   }
 
@@ -290,59 +292,87 @@ function classifyRootCauseHeuristic({
     const beforeTime = new Date(startTs).toLocaleTimeString('id-ID');
     const afterTime = new Date(endTs).toLocaleTimeString('id-ID');
 
-    // Pola 1A: Counter did NOT reset (incremented smoothly or jumped slightly, <= 3)
-    if (beforeHb !== null && afterHb !== null && afterHb >= beforeHb && hbDiff <= 3) {
-      return {
-        patternType: 'TRANSIENT_IO_LAG',
-        severity: 'WARNING',
-        patternTitle: 'Jeda Komunikasi Sementara (Serial / OS Lag Spike)',
-        summary: `Modul berhenti mengirim paket selama ${gapDurationStr} (melebihi batas DEAD ${deadThresholdSec}s), namun counter langsung menyambung dari #${beforeHb} ke #${afterHb} tanpa reset.`,
-        rootCauseDetails: `Modul hardware fisik TIDAK mati ataupun restart. Counter tetap berjalan di memori perangkat. Penyebabnya adalah terhambatnya pengiriman data dari ${port || 'port serial'} ke broker MQTT—misalnya buffer serial tersendat, thread OS di pod sempat sibuk (CPU spike), atau transmisi jaringan mengalami jitter.`,
-        recommendedAction: `1. Periksa kestabilan kabel USB (${port || 'serial'}) pada pod agar tidak kendur.
-2. Periksa utilitas CPU / thread audio di POD pada jam tersebut.
-3. Pertimbangkan untuk menaikkan Dead Threshold sedikit jika latensi serial berkisar di ~${Math.ceil(durationSec)} detik.`,
-        gapDetails: primaryGap
-      };
-    }
+    // Check if counter reset to 0/1 or dropped significantly -> RESET
+    const isReset = (afterHb !== null && afterHb !== undefined && afterHb <= 2) ||
+      (beforeHb !== null && afterHb !== null && afterHb < beforeHb);
 
-    // Pola 1B: Counter Reset to <= 1 or dropped significantly -> Hardware / Driver Restart
-    if (beforeHb !== null && afterHb !== null && (afterHb <= 2 || afterHb < beforeHb)) {
+    // Pola 1B: Counter Reset -> RESET
+    if (isReset) {
       return {
         patternType: 'HARDWARE_REBOOT',
+        postDeadType: 'RESET',
+        postDeadLabel: 'RESET (MULAI DARI 0)',
         severity: 'CRITICAL',
-        patternTitle: 'Modul Restart / Reset Catu Daya (Counter Reset)',
-        summary: `Setelah jeda ${gapDurationStr}, counter detak ter-reset dari #${beforeHb} kembali ke #${afterHb}. Modul perangkat keras atau proses driver mengalami restart.`,
-        rootCauseDetails: `Counter detak dimulai kembali dari angka awal, mengindikasikan modul microcontroller (MCU) kehilangan catu daya sesaat (brownout/power dip) atau daemon proses driver modul di pod mengalami crash lalu di-spawn ulang oleh supervisor.`,
+        patternTitle: 'RESET (Modul Restart / Catu Daya Drop)',
+        summary: `Setelah jeda mati ${gapDurationStr}, counter detak mengalami RESET dari #${beforeHb ?? '—'} kembali ke #${afterHb ?? '0'}. Modul perangkat keras atau proses driver mengalami restart dari awal (0).`,
+        rootCauseDetails: `Counter detak dimulai kembali dari angka awal (0/1), mengindikasikan modul microcontroller (MCU) kehilangan catu daya sesaat (brownout/power dip) atau daemon proses driver modul di pod mengalami crash lalu di-spawn ulang oleh supervisor.`,
         recommendedAction: `1. Periksa kabel daya 5V/12V dan koneksi terminal modul.
 2. Cek log sistem OS di POD (/var/log/syslog atau journalctl) untuk mencari indikasi USB disconnect/re-enumerate.
 3. Pastikan tidak ada lonjakan beban arus yang memicu proteksi power relay.`,
-        gapDetails: primaryGap
+        gapDetails: {
+          ...primaryGap,
+          postDeadType: 'RESET',
+          postDeadLabel: 'RESET (MULAI DARI 0)'
+        }
       };
     }
 
-    // Pola 1C: Counter jumped significantly (> 3 ticks missed) -> Network/Broker packet drop
-    if (beforeHb !== null && afterHb !== null && afterHb > beforeHb && hbDiff > 3) {
+    // Pola 1A: Counter did NOT reset (incremented smoothly or <= 5) -> BERLANJUT
+    if (beforeHb !== null && afterHb !== null && afterHb >= beforeHb && (hbDiff <= 5 || hbDiff === null)) {
+      return {
+        patternType: 'TRANSIENT_IO_LAG',
+        postDeadType: 'BERLANJUT',
+        postDeadLabel: 'BERLANJUT (KONTINU)',
+        severity: 'WARNING',
+        patternTitle: 'BERLANJUT (Jeda Komunikasi Sementara / OS Lag Spike)',
+        summary: `Modul sempat berhenti mengirim paket selama ${gapDurationStr} (melebihi batas DEAD ${deadThresholdSec}s), namun counter detak langsung BERLANJUT dari #${beforeHb} ke #${afterHb} tanpa reset. Hardware fisik TIDAK mati.`,
+        rootCauseDetails: `Modul microcontroller (MCU) fisik TIDAK mati ataupun restart. Counter tetap berjalan di memori perangkat. Penyebabnya adalah terhambatnya transmisi data dari ${port || 'port serial'} ke broker MQTT—misalnya buffer serial tersendat, thread OS di pod sempat sibuk (CPU spike), atau transmisi jaringan mengalami jitter.`,
+        recommendedAction: `1. Periksa kestabilan kabel USB (${port || 'serial'}) pada pod agar tidak kendur.
+2. Periksa utilitas CPU / thread OS di POD pada jam tersebut.
+3. Pertimbangkan untuk menaikkan Dead Threshold sedikit jika latensi serial berkisar di ~${Math.ceil(durationSec)} detik.`,
+        gapDetails: {
+          ...primaryGap,
+          postDeadType: 'BERLANJUT',
+          postDeadLabel: 'BERLANJUT (KONTINU)'
+        }
+      };
+    }
+
+    // Pola 1C: Counter jumped significantly (> 5 ticks missed) -> LONCAT / PACKET DROP
+    if (beforeHb !== null && afterHb !== null && afterHb > beforeHb && hbDiff > 5) {
       return {
         patternType: 'PACKET_DROP',
+        postDeadType: 'LONCAT',
+        postDeadLabel: `LONCAT (+${hbDiff} Detak Terlewat)`,
         severity: 'WARNING',
-        patternTitle: 'Paket Hilang di Jalur Transport (Network / MQTT Drop)',
+        patternTitle: 'LONCAT (Paket Hilang di Jalur Transport / Network Drop)',
         summary: `Terjadi jeda ${gapDurationStr}, dan counter melompat dari #${beforeHb} ke #${afterHb} (+${hbDiff} detak hilang di perjalanan).`,
         rootCauseDetails: `Modul hardware tetap berdetak secara normal di pod, namun paket-paket di antara #${beforeHb} dan #${afterHb} tidak pernah sampai ke server backend. Masalah terletak pada konektivitas jaringan (WiFi/LAN jitter) atau broker MQTT yang men-drop paket QoS 0.`,
         recommendedAction: `1. Periksa ping latency dan packet loss antara POD dan broker MQTT.
 2. Cek koneksi router / access point yang menghubungkan pod ke server.`,
-        gapDetails: primaryGap
+        gapDetails: {
+          ...primaryGap,
+          postDeadType: 'LONCAT',
+          postDeadLabel: `LONCAT (+${hbDiff} Detak Terlewat)`
+        }
       };
     }
 
-    // General gap
+    // General gap (default to BERLANJUT if counter didn't reset)
     return {
       patternType: 'COMMUNICATION_DROPOUT',
+      postDeadType: 'BERLANJUT',
+      postDeadLabel: 'BERLANJUT',
       severity: 'WARNING',
-      patternTitle: 'Koneksi Terputus Sementara',
-      summary: `Terjadi jeda hening selama ${gapDurationStr} antara ${beforeTime} dan ${afterTime}.`,
+      patternTitle: 'Koneksi Terputus Sementara (BERLANJUT)',
+      summary: `Terjadi jeda hening selama ${gapDurationStr} antara ${beforeTime} dan ${afterTime}, counter kemudian berlanjut.`,
       rootCauseDetails: `Tidak ada paket yang diterima selama ${gapDurationStr}. Setelah jeda tersebut, transmisi kembali pulih.`,
       recommendedAction: 'Periksa fisik port USB dan log koneksi serial pod.',
-      gapDetails: primaryGap
+      gapDetails: {
+        ...primaryGap,
+        postDeadType: 'BERLANJUT',
+        postDeadLabel: 'BERLANJUT'
+      }
     };
   }
 
@@ -484,6 +514,8 @@ async function analyzeHeartbeatPattern({
     let deltaSec = null;
     let deltaHb = null;
     let status = 'NORMAL';
+    let postDeadType = null;
+    let postDeadLabel = null;
 
     if (i > 0) {
       const prev = rawTicks[i - 1];
@@ -495,13 +527,32 @@ async function analyzeHeartbeatPattern({
 
       if (deltaSec >= deadSec) {
         status = 'GAP_DEAD';
+        const isReset = (curr.hb !== null && curr.hb !== undefined && curr.hb <= 2) ||
+          (prev.hb !== null && prev.hb !== undefined && curr.hb !== null && curr.hb !== undefined && curr.hb < prev.hb);
+        const isResumed = !isReset && (deltaHb !== null && deltaHb >= 0 && deltaHb <= 5);
+        const isJumped = !isReset && deltaHb !== null && deltaHb > 5;
+
+        postDeadType = isReset ? 'RESET' : isResumed ? 'BERLANJUT' : isJumped ? 'LONCAT' : 'BERLANJUT';
+        postDeadLabel = isReset
+          ? 'RESET (Mulai Dari 0)'
+          : isResumed
+            ? 'BERLANJUT (Kontinu)'
+            : isJumped
+              ? `LONCAT (+${deltaHb} Detak)`
+              : 'BERLANJUT';
+
         gaps.push({
+          id: `gap_${prev.ts}_${curr.ts}`,
           startTs: prev.ts,
           endTs: curr.ts,
+          startTime: new Date(prev.ts).toLocaleTimeString('id-ID', { hour12: false }),
+          endTime: new Date(curr.ts).toLocaleTimeString('id-ID', { hour12: false }),
           durationSec: deltaSec,
           beforeHb: prev.hb !== undefined ? prev.hb : null,
           afterHb: curr.hb !== undefined ? curr.hb : null,
           hbDiff: deltaHb,
+          postDeadType,
+          postDeadLabel,
           port: curr.port || prev.port || detectedPort
         });
       } else if (deltaSec >= 3.0) {
@@ -520,6 +571,8 @@ async function analyzeHeartbeatPattern({
       deltaSec,
       deltaHb,
       status,
+      postDeadType,
+      postDeadLabel,
       port: curr.port || detectedPort || null,
       payload: curr.payload || null
     });
