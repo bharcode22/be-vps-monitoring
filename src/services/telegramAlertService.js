@@ -247,9 +247,9 @@ async function sendDeadHeartbeatAlert(alertData) {
   const lastHb = alertData.lastHb;
   const thresholds = getHeartbeatThresholdsConfig();
 
-  // Format time in WIB (Jakarta)
+  // Format time in WITA (Makassar)
   const timeStr = new Date().toLocaleString('id-ID', {
-    timeZone: 'Asia/Jakarta',
+    timeZone: 'Asia/Makassar',
     day: '2-digit',
     month: 'short',
     year: 'numeric',
@@ -257,7 +257,7 @@ async function sendDeadHeartbeatAlert(alertData) {
     minute: '2-digit',
     second: '2-digit',
     hour12: false
-  }) + ' WIB';
+  }) + ' WITA';
 
   const rootCauseCategory = alertData.rootCauseCategory || (moduleId === 0 ? 'HOST_NETWORK_OFFLINE' : 'HARDWARE_MODULE_FAULT');
   const diagnosticHint = alertData.diagnosticHint || '';
@@ -358,7 +358,7 @@ async function sendBatchDeadHeartbeatAlert({ serverId, serverName, modules = [],
   const thresholds = getHeartbeatThresholdsConfig();
 
   const timeStr = new Date().toLocaleString('id-ID', {
-    timeZone: 'Asia/Jakarta',
+    timeZone: 'Asia/Makassar',
     day: '2-digit',
     month: 'short',
     year: 'numeric',
@@ -366,7 +366,7 @@ async function sendBatchDeadHeartbeatAlert({ serverId, serverName, modules = [],
     minute: '2-digit',
     second: '2-digit',
     hour12: false
-  }) + ' WIB';
+  }) + ' WITA';
 
   // Build list of dead modules
   const moduleLines = eligibleModules.map((m, idx) => {
@@ -421,7 +421,7 @@ async function sendBatchDeadHeartbeatAlert({ serverId, serverName, modules = [],
 async function sendTestTelegramMessage(senderName = 'Admin Dashboard') {
   const config = getTelegramAlertConfig();
   const timeStr = new Date().toLocaleString('id-ID', {
-    timeZone: 'Asia/Jakarta',
+    timeZone: 'Asia/Makassar',
     day: '2-digit',
     month: 'short',
     year: 'numeric',
@@ -429,7 +429,7 @@ async function sendTestTelegramMessage(senderName = 'Admin Dashboard') {
     minute: '2-digit',
     second: '2-digit',
     hour12: false
-  }) + ' WIB';
+  }) + ' WITA';
 
   const testHtml = [
     '🔔 <b>[TEST NOTIFIKASI] SISTEM MONITORING HEARTBEAT</b> 🔔',
