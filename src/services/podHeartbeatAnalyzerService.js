@@ -329,27 +329,33 @@ function classifyRootCauseHeuristic({
     };
   }
 
-  // Find the most relevant gap near targetMs (prioritize gaps exceeding deadThresholdSec)
+  // Find the most relevant gap or jump/drop incident near targetMs
   let primaryGap = null;
-  const deadGaps = (gaps || []).filter(g => g.durationSec >= deadThresholdSec);
-  if (deadGaps.length > 0) {
-    primaryGap = [...deadGaps].sort((a, b) => Math.abs(a.endTs - targetMs) - Math.abs(b.endTs - targetMs))[0];
+  const significantGaps = (gaps || []).filter(g =>
+    g.durationSec >= deadThresholdSec ||
+    g.postDeadType === 'LOMPAT' ||
+    g.postDeadType === 'LONCAT' ||
+    g.postDeadType === 'RESET' ||
+    (g.hbDiff !== null && g.hbDiff > 5)
+  );
+  if (significantGaps.length > 0) {
+    primaryGap = [...significantGaps].sort((a, b) => Math.abs(a.endTs - targetMs) - Math.abs(b.endTs - targetMs))[0];
   } else if (gaps && gaps.length > 0) {
     primaryGap = [...gaps].sort((a, b) => Math.abs(a.endTs - targetMs) - Math.abs(b.endTs - targetMs))[0];
   }
 
-  // Case 1: Gap exceeding dead threshold detected!
-  if (primaryGap && primaryGap.durationSec >= deadThresholdSec) {
+  // Case 1: Significant gap, counter jump (lompat / packet drop), or reset detected!
+  if (primaryGap && (primaryGap.durationSec >= deadThresholdSec || primaryGap.postDeadType === 'LOMPAT' || primaryGap.postDeadType === 'LONCAT' || primaryGap.postDeadType === 'RESET' || (primaryGap.hbDiff !== null && primaryGap.hbDiff > 5))) {
     const { durationSec, beforeHb, afterHb, hbDiff, startTs, endTs } = primaryGap;
     const gapDurationStr = `${durationSec.toFixed(1)} detik`;
     const beforeTime = formatTimeOnly(startTs) + ' WITA';
     const afterTime = formatTimeOnly(endTs) + ' WITA';
 
-    // Check if counter reset to 0/1 or dropped significantly -> RESET
+    // Check if counter reset to 0/1 or dropped backward -> RESET
     const isReset = (afterHb !== null && afterHb !== undefined && afterHb <= 2) ||
       (beforeHb !== null && afterHb !== null && afterHb < beforeHb);
 
-    // Pola 1B: Counter Reset -> RESET
+    // Pola 1A: Counter Reset -> RESET
     if (isReset) {
       return {
         patternType: 'HARDWARE_REBOOT',
@@ -357,7 +363,7 @@ function classifyRootCauseHeuristic({
         postDeadLabel: 'RESET (MULAI DARI 0)',
         severity: 'CRITICAL',
         patternTitle: 'RESET (Modul Restart / Catu Daya Drop)',
-        summary: `Setelah jeda mati ${gapDurationStr}, counter detak mengalami RESET dari #${beforeHb ?? '—'} kembali ke #${afterHb ?? '0'}. Modul perangkat keras atau proses driver mengalami restart dari awal (0).`,
+        summary: `Setelah jeda ${gapDurationStr}, counter detak mengalami RESET dari #${beforeHb ?? '—'} kembali ke #${afterHb ?? '0'}. Modul perangkat keras atau proses driver mengalami restart dari awal (0).`,
         rootCauseDetails: `Counter detak dimulai kembali dari angka awal (0/1), mengindikasikan modul microcontroller (MCU) kehilangan catu daya sesaat (brownout/power dip) atau daemon proses driver modul di pod mengalami crash lalu di-spawn ulang oleh supervisor.`,
         recommendedAction: `1. Periksa kabel daya 5V/12V dan koneksi terminal modul.
 2. Cek log sistem OS di POD (/var/log/syslog atau journalctl) untuk mencari indikasi USB disconnect/re-enumerate.
@@ -370,7 +376,29 @@ function classifyRootCauseHeuristic({
       };
     }
 
-    // Pola 1A: Counter did NOT reset (incremented smoothly or <= 5) -> BERLANJUT
+    // Pola 1B: Counter jumped significantly (> 5 ticks missed) -> LOMPAT / PACKET DROP
+    // Contoh kasus: dari hb 46922 ke 46968 (+46 detak terlewat di jalur transport)
+    if (beforeHb !== null && afterHb !== null && afterHb > beforeHb && hbDiff > 5) {
+      return {
+        patternType: 'PACKET_DROP',
+        postDeadType: 'LOMPAT',
+        postDeadLabel: `LOMPAT (+${hbDiff} Detak Terlewat)`,
+        severity: 'WARNING',
+        patternTitle: 'LOMPAT (Paket Hilang di Jalur Transport / Network Drop)',
+        summary: `Terjadi jeda ${gapDurationStr}, dan counter melompat dari #${beforeHb} ke #${afterHb} (+${hbDiff} detak hilang di perjalanan).`,
+        rootCauseDetails: `Modul microcontroller fisik tetap berdetak secara normal di pod, namun ${hbDiff} paket detak (dari #${beforeHb} ke #${afterHb}) tidak pernah sampai ke server backend. Masalah terletak pada konektivitas transport jaringan (WiFi/LAN jitter, antrean QoS 0 broker MQTT drop, atau buffer serial terlewat).`,
+        recommendedAction: `1. Periksa ping latency dan packet loss antara POD dan broker MQTT.
+2. Cek koneksi router / access point yang menghubungkan pod ke server.
+3. Pastikan tidak ada gangguan fisik kabel serial USB pod.`,
+        gapDetails: {
+          ...primaryGap,
+          postDeadType: 'LOMPAT',
+          postDeadLabel: `LOMPAT (+${hbDiff} Detak Terlewat)`
+        }
+      };
+    }
+
+    // Pola 1C: Counter did NOT reset (incremented smoothly or <= 5) -> BERLANJUT
     if (beforeHb !== null && afterHb !== null && afterHb >= beforeHb && (hbDiff <= 5 || hbDiff === null)) {
       return {
         patternType: 'TRANSIENT_IO_LAG',
@@ -387,26 +415,6 @@ function classifyRootCauseHeuristic({
           ...primaryGap,
           postDeadType: 'BERLANJUT',
           postDeadLabel: 'BERLANJUT (KONTINU)'
-        }
-      };
-    }
-
-    // Pola 1C: Counter jumped significantly (> 5 ticks missed) -> LONCAT / PACKET DROP
-    if (beforeHb !== null && afterHb !== null && afterHb > beforeHb && hbDiff > 5) {
-      return {
-        patternType: 'PACKET_DROP',
-        postDeadType: 'LONCAT',
-        postDeadLabel: `LONCAT (+${hbDiff} Detak Terlewat)`,
-        severity: 'WARNING',
-        patternTitle: 'LONCAT (Paket Hilang di Jalur Transport / Network Drop)',
-        summary: `Terjadi jeda ${gapDurationStr}, dan counter melompat dari #${beforeHb} ke #${afterHb} (+${hbDiff} detak hilang di perjalanan).`,
-        rootCauseDetails: `Modul hardware tetap berdetak secara normal di pod, namun paket-paket di antara #${beforeHb} dan #${afterHb} tidak pernah sampai ke server backend. Masalah terletak pada konektivitas jaringan (WiFi/LAN jitter) atau broker MQTT yang men-drop paket QoS 0.`,
-        recommendedAction: `1. Periksa ping latency dan packet loss antara POD dan broker MQTT.
-2. Cek koneksi router / access point yang menghubungkan pod ke server.`,
-        gapDetails: {
-          ...primaryGap,
-          postDeadType: 'LONCAT',
-          postDeadLabel: `LONCAT (+${hbDiff} Detak Terlewat)`
         }
       };
     }
@@ -578,24 +586,63 @@ async function analyzeHeartbeatPattern({
         deltaHb = curr.hb - prev.hb;
       }
 
+      const isReset = (curr.hb !== null && curr.hb !== undefined && curr.hb <= 2) ||
+        (prev.hb !== null && prev.hb !== undefined && curr.hb !== null && curr.hb !== undefined && curr.hb < prev.hb);
+      const isJumped = !isReset && deltaHb !== null && deltaHb > 5;
+      const isResumed = !isReset && !isJumped && (deltaHb !== null && deltaHb >= 0 && deltaHb <= 5);
+
       if (deltaSec >= deadSec) {
         status = 'GAP_DEAD';
-        const isReset = (curr.hb !== null && curr.hb !== undefined && curr.hb <= 2) ||
-          (prev.hb !== null && prev.hb !== undefined && curr.hb !== null && curr.hb !== undefined && curr.hb < prev.hb);
-        const isResumed = !isReset && (deltaHb !== null && deltaHb >= 0 && deltaHb <= 5);
-        const isJumped = !isReset && deltaHb !== null && deltaHb > 5;
-
-        postDeadType = isReset ? 'RESET' : isResumed ? 'BERLANJUT' : isJumped ? 'LONCAT' : 'BERLANJUT';
+        postDeadType = isReset ? 'RESET' : isJumped ? 'LOMPAT' : 'BERLANJUT';
         postDeadLabel = isReset
           ? 'RESET (Mulai Dari 0)'
-          : isResumed
-            ? 'BERLANJUT (Kontinu)'
-            : isJumped
-              ? `LONCAT (+${deltaHb} Detak)`
-              : 'BERLANJUT';
+          : isJumped
+            ? `LOMPAT (+${deltaHb} Detak)`
+            : 'BERLANJUT (Kontinu)';
 
         gaps.push({
           id: `gap_${prev.ts}_${curr.ts}`,
+          startTs: prev.ts,
+          endTs: curr.ts,
+          startTime: formatTimeOnly(prev.ts),
+          endTime: formatTimeOnly(curr.ts),
+          durationSec: deltaSec,
+          beforeHb: prev.hb !== undefined ? prev.hb : null,
+          afterHb: curr.hb !== undefined ? curr.hb : null,
+          hbDiff: deltaHb,
+          postDeadType,
+          postDeadLabel,
+          port: curr.port || prev.port || detectedPort
+        });
+      } else if (isJumped) {
+        // Counter lompat / packet drop (> 5 detak hilang di perjalanan)
+        // Contoh: dari hb 46922 ke 46968 (+46 detak terlewat)
+        status = 'GAP_JUMP';
+        postDeadType = 'LOMPAT';
+        postDeadLabel = `LOMPAT (+${deltaHb} Detak)`;
+
+        gaps.push({
+          id: `jump_${prev.ts}_${curr.ts}`,
+          startTs: prev.ts,
+          endTs: curr.ts,
+          startTime: formatTimeOnly(prev.ts),
+          endTime: formatTimeOnly(curr.ts),
+          durationSec: deltaSec,
+          beforeHb: prev.hb !== undefined ? prev.hb : null,
+          afterHb: curr.hb !== undefined ? curr.hb : null,
+          hbDiff: deltaHb,
+          postDeadType,
+          postDeadLabel,
+          port: curr.port || prev.port || detectedPort
+        });
+      } else if (isReset) {
+        // Counter reset cepat ke 0/1 (< deadSec)
+        status = 'RESET';
+        postDeadType = 'RESET';
+        postDeadLabel = 'RESET (Mulai Dari 0)';
+
+        gaps.push({
+          id: `reset_${prev.ts}_${curr.ts}`,
           startTs: prev.ts,
           endTs: curr.ts,
           startTime: formatTimeOnly(prev.ts),
@@ -760,5 +807,6 @@ async function getRecentIncidentList(limit = 40) {
 module.exports = {
   analyzeHeartbeatPattern,
   getRecentIncidentList,
-  parseTargetTime
+  parseTargetTime,
+  classifyRootCauseHeuristic
 };
