@@ -7,6 +7,7 @@ RUN apk add --no-cache \
     openssh-client \
     git \
     bash \
+    tzdata \
     docker-cli \
     docker-cli-compose
 
@@ -29,6 +30,8 @@ EXPOSE 5002
 
 ENV NODE_ENV=production
 ENV PORT=5002
+ENV TZ=Asia/Makassar
+ENV TIMEZONE=Asia/Makassar
 
 # Start Express server entrypoint
 CMD ["node", "src/server.js"]

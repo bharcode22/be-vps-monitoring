@@ -5,6 +5,7 @@ const { dbAsync, pool } = require('./db');
 const {
   getPodDir,
   formatLocalDate,
+  APP_TIMEZONE,
   getPodEventsLogPath,
   getPodHeartbeatsLogPath,
   getRecentFleetIncidents
@@ -16,12 +17,36 @@ const {
 } = require('./podHeartbeatConfigService');
 
 /**
+ * Calculate ISO timezone offset string (e.g. "+08:00" for Asia/Makassar, "+07:00" for Asia/Jakarta)
+ * This guarantees consistent epoch timestamp calculation regardless of whether the backend
+ * runs in host OS (Mac/Windows) or inside Docker container (which defaults to UTC).
+ */
+function getTimezoneOffsetString(tz = APP_TIMEZONE || 'Asia/Makassar') {
+  try {
+    const d = new Date();
+    const utcDate = new Date(d.toLocaleString('en-US', { timeZone: 'UTC' }));
+    const tzDate = new Date(d.toLocaleString('en-US', { timeZone: tz }));
+    const diffMinutes = Math.round((tzDate.getTime() - utcDate.getTime()) / (1000 * 60));
+    const sign = diffMinutes >= 0 ? '+' : '-';
+    const absMin = Math.abs(diffMinutes);
+    const hours = String(Math.floor(absMin / 60)).padStart(2, '0');
+    const mins = String(absMin % 60).padStart(2, '0');
+    return `${sign}${hours}:${mins}`;
+  } catch (_) {
+    return '+08:00';
+  }
+}
+
+/**
  * Parse various target time formats into timestamp (ms) and date string (YYYY-MM-DD)
+ * Supports explicit epoch ms, ISO string, and local time strings with Docker-safe timezone resolution.
  */
 function parseTargetTime(targetTime, explicitDate = null) {
   const now = Date.now();
+  const effectiveTz = APP_TIMEZONE || 'Asia/Makassar';
+
   if (!targetTime) {
-    const dStr = explicitDate || formatLocalDate(now);
+    const dStr = explicitDate || formatLocalDate(now, effectiveTz);
     return { targetMs: now, dateStr: dStr };
   }
 
@@ -29,19 +54,21 @@ function parseTargetTime(targetTime, explicitDate = null) {
   if (typeof targetTime === 'number' || (!isNaN(Number(targetTime)) && String(targetTime).trim().length >= 10)) {
     let num = Number(targetTime);
     if (num < 10000000000) num *= 1000; // Convert seconds to ms
-    const dStr = explicitDate || formatLocalDate(num);
+    const dStr = explicitDate || formatLocalDate(num, effectiveTz);
     return { targetMs: num, dateStr: dStr };
   }
 
   const str = String(targetTime).trim();
 
-  // 2. ISO timestamp string (e.g. 2026-09-08T07:21:27.000Z)
-  if (str.includes('T')) {
+  // 2. ISO timestamp string with timezone indicator (e.g. 2026-09-08T07:21:27.000Z or +08:00)
+  if (str.includes('T') && (str.includes('Z') || str.includes('+') || str.lastIndexOf('-') > 7)) {
     const parsed = Date.parse(str);
     if (!isNaN(parsed)) {
-      return { targetMs: parsed, dateStr: explicitDate || formatLocalDate(parsed) };
+      return { targetMs: parsed, dateStr: explicitDate || formatLocalDate(parsed, effectiveTz) };
     }
   }
+
+  const tzOffset = getTimezoneOffsetString(effectiveTz);
 
   // 3. Date and Time (YYYY-MM-DD HH:mm:ss)
   const dtMatch = str.match(/^(\d{4}-\d{2}-\d{2})[\sT](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
@@ -50,7 +77,8 @@ function parseTargetTime(targetTime, explicitDate = null) {
     const hour = dtMatch[2].padStart(2, '0');
     const min = dtMatch[3].padStart(2, '0');
     const sec = (dtMatch[4] || '00').padStart(2, '0');
-    const d = new Date(`${dStr}T${hour}:${min}:${sec}`);
+    // Attach configured timezone offset so Docker UTC container parses to the exact Indonesian local time
+    const d = new Date(`${dStr}T${hour}:${min}:${sec}${tzOffset}`);
     if (!isNaN(d.getTime())) {
       return { targetMs: d.getTime(), dateStr: explicitDate || dStr };
     }
@@ -59,17 +87,18 @@ function parseTargetTime(targetTime, explicitDate = null) {
   // 4. Time only (HH:mm:ss or HH:mm)
   const tMatch = str.match(/^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
   if (tMatch) {
-    const dStr = explicitDate || formatLocalDate(now);
+    const dStr = explicitDate || formatLocalDate(now, effectiveTz);
     const hour = tMatch[1].padStart(2, '0');
     const min = tMatch[2].padStart(2, '0');
     const sec = (tMatch[3] || '00').padStart(2, '0');
-    const d = new Date(`${dStr}T${hour}:${min}:${sec}`);
+    // Attach configured timezone offset so Docker UTC container parses to the exact Indonesian local time
+    const d = new Date(`${dStr}T${hour}:${min}:${sec}${tzOffset}`);
     if (!isNaN(d.getTime())) {
       return { targetMs: d.getTime(), dateStr: dStr };
     }
   }
 
-  return { targetMs: now, dateStr: explicitDate || formatLocalDate(now) };
+  return { targetMs: now, dateStr: explicitDate || formatLocalDate(now, effectiveTz) };
 }
 
 /**
@@ -427,6 +456,20 @@ async function analyzeHeartbeatPattern({
   if (rawTicks.length === 0 && effectivePodId !== pId) {
     rawTicks = await loadTicksForWindow(pId, mId, resolvedDate, startMs, endMs);
   }
+
+  // Fallback: If no ticks found, check with alternate Indonesian timezone offset (WIB vs WITA ±1 hour)
+  if (rawTicks.length === 0) {
+    const tzOffset = getTimezoneOffsetString(APP_TIMEZONE || 'Asia/Makassar');
+    const isWITA = tzOffset === '+08:00';
+    const shiftMs = isWITA ? 3600000 : -3600000;
+    const altStart = startMs + shiftMs;
+    const altEnd = endMs + shiftMs;
+    rawTicks = await loadTicksForWindow(effectivePodId, mId, resolvedDate, altStart, altEnd);
+    if (rawTicks.length === 0 && effectivePodId !== pId) {
+      rawTicks = await loadTicksForWindow(pId, mId, resolvedDate, altStart, altEnd);
+    }
+  }
+
   const incidents = await loadIncidentsForWindow(effectivePodId, mId, resolvedDate, startMs, endMs);
 
   // 4. Compute intervals, deltas, and gaps

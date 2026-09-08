@@ -9,6 +9,9 @@ services:
       - "5002:5002"
     env_file:
       - .env
+    environment:
+      - TZ=Asia/Makassar
+      - TIMEZONE=Asia/Makassar
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /home/pod/dev:/home/pod/dev

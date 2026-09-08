@@ -23,8 +23,14 @@ const activeHbStreamMap = new Map();
 // Memory cache for pod server name mapping: Map<podId, serverName>
 const podNameCache = new Map();
 
-// Local timezone configuration for human-readable timestamps
-const APP_TIMEZONE = process.env.TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Makassar';
+// Local timezone configuration for human-readable timestamps.
+// Fallback to 'Asia/Makassar' (UTC+8) if running in UTC (such as default Docker alpine containers).
+const resolvedSystemTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const APP_TIMEZONE = process.env.TIMEZONE || (
+  resolvedSystemTz && resolvedSystemTz !== 'UTC' && resolvedSystemTz !== 'Etc/UTC'
+    ? resolvedSystemTz
+    : 'Asia/Makassar'
+);
 
 /**
  * Format timestamp into local calendar date (YYYY-MM-DD)
@@ -1680,6 +1686,7 @@ module.exports = {
   getPodDir,
   formatLocalDate,
   formatLocalDateTime,
+  APP_TIMEZONE,
   registerPodName,
   hasPodName,
   sanitizeServerName,
