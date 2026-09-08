@@ -38,6 +38,20 @@ function getTimezoneOffsetString(tz = APP_TIMEZONE || 'Asia/Makassar') {
 }
 
 /**
+ * Format timestamp into standard "YYYY-MM-DD HH:mm:ss" in configured timezone
+ */
+function formatFullDateTime(ts, timeZone = APP_TIMEZONE || 'Asia/Makassar') {
+  try {
+    const d = new Date(ts);
+    const datePart = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+    const timePart = new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
+    return `${datePart} ${timePart}`;
+  } catch (_) {
+    return new Date(ts).toISOString().replace('T', ' ').slice(0, 19);
+  }
+}
+
+/**
  * Parse various target time formats into timestamp (ms) and date string (YYYY-MM-DD)
  * Supports explicit epoch ms, ISO string, and local time strings with Docker-safe timezone resolution.
  */
@@ -565,8 +579,8 @@ async function analyzeHeartbeatPattern({
     ticksWithDelta.push({
       index: i + 1,
       ts: curr.ts,
-      date: curr.date || new Date(curr.ts).toLocaleString('id-ID'),
-      time: new Date(curr.ts).toLocaleTimeString('id-ID', { hour12: false }),
+      date: curr.date || formatFullDateTime(curr.ts),
+      time: curr.time || formatFullDateTime(curr.ts).split(' ')[1] || new Date(curr.ts).toLocaleTimeString('id-ID', { hour12: false }),
       hb: curr.hb !== undefined ? curr.hb : null,
       deltaSec,
       deltaHb,
