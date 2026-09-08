@@ -16,12 +16,14 @@ const {
   getHeartbeatModulesConfig
 } = require('./podHeartbeatConfigService');
 
+const WITA_TIMEZONE = 'Asia/Makassar'; // WITA (UTC+8) standard for POD fleet
+
 /**
- * Calculate ISO timezone offset string (e.g. "+08:00" for Asia/Makassar, "+07:00" for Asia/Jakarta)
+ * Calculate ISO timezone offset string (e.g. "+08:00" for Asia/Makassar)
  * This guarantees consistent epoch timestamp calculation regardless of whether the backend
  * runs in host OS (Mac/Windows) or inside Docker container (which defaults to UTC).
  */
-function getTimezoneOffsetString(tz = APP_TIMEZONE || 'Asia/Makassar') {
+function getTimezoneOffsetString(tz = WITA_TIMEZONE) {
   try {
     const d = new Date();
     const utcDate = new Date(d.toLocaleString('en-US', { timeZone: 'UTC' }));
@@ -38,9 +40,9 @@ function getTimezoneOffsetString(tz = APP_TIMEZONE || 'Asia/Makassar') {
 }
 
 /**
- * Format timestamp into standard "YYYY-MM-DD HH:mm:ss" in configured timezone
+ * Format timestamp into standard "YYYY-MM-DD HH:mm:ss" in WITA (Asia/Makassar)
  */
-function formatFullDateTime(ts, timeZone = APP_TIMEZONE || 'Asia/Makassar') {
+function formatFullDateTime(ts, timeZone = WITA_TIMEZONE) {
   try {
     const d = new Date(ts);
     const datePart = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
@@ -52,12 +54,49 @@ function formatFullDateTime(ts, timeZone = APP_TIMEZONE || 'Asia/Makassar') {
 }
 
 /**
+ * Format timestamp into "HH:mm:ss" in WITA (Asia/Makassar)
+ */
+function formatTimeOnly(ts, timeZone = WITA_TIMEZONE) {
+  try {
+    return new Intl.DateTimeFormat('en-GB', {
+      timeZone,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).format(new Date(ts));
+  } catch (_) {
+    return new Date(ts).toLocaleTimeString('id-ID', { hour12: false });
+  }
+}
+
+/**
+ * Format timestamp into localized "DD MMM YYYY, HH:mm:ss WITA" in WITA (Asia/Makassar)
+ */
+function formatDateTimeWITA(ts) {
+  try {
+    return new Intl.DateTimeFormat('id-ID', {
+      timeZone: WITA_TIMEZONE,
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).format(new Date(ts)) + ' WITA';
+  } catch (_) {
+    return new Date(ts).toLocaleString('id-ID') + ' WITA';
+  }
+}
+
+/**
  * Parse various target time formats into timestamp (ms) and date string (YYYY-MM-DD)
- * Supports explicit epoch ms, ISO string, and local time strings with Docker-safe timezone resolution.
+ * Supports explicit epoch ms, ISO string, and local time strings with Docker-safe timezone resolution in WITA.
  */
 function parseTargetTime(targetTime, explicitDate = null) {
   const now = Date.now();
-  const effectiveTz = APP_TIMEZONE || 'Asia/Makassar';
+  const effectiveTz = WITA_TIMEZONE;
 
   if (!targetTime) {
     const dStr = explicitDate || formatLocalDate(now, effectiveTz);
@@ -303,8 +342,8 @@ function classifyRootCauseHeuristic({
   if (primaryGap && primaryGap.durationSec >= deadThresholdSec) {
     const { durationSec, beforeHb, afterHb, hbDiff, startTs, endTs } = primaryGap;
     const gapDurationStr = `${durationSec.toFixed(1)} detik`;
-    const beforeTime = new Date(startTs).toLocaleTimeString('id-ID');
-    const afterTime = new Date(endTs).toLocaleTimeString('id-ID');
+    const beforeTime = formatTimeOnly(startTs) + ' WITA';
+    const afterTime = formatTimeOnly(endTs) + ' WITA';
 
     // Check if counter reset to 0/1 or dropped significantly -> RESET
     const isReset = (afterHb !== null && afterHb !== undefined && afterHb <= 2) ||
@@ -559,8 +598,8 @@ async function analyzeHeartbeatPattern({
           id: `gap_${prev.ts}_${curr.ts}`,
           startTs: prev.ts,
           endTs: curr.ts,
-          startTime: new Date(prev.ts).toLocaleTimeString('id-ID', { hour12: false }),
-          endTime: new Date(curr.ts).toLocaleTimeString('id-ID', { hour12: false }),
+          startTime: formatTimeOnly(prev.ts),
+          endTime: formatTimeOnly(curr.ts),
           durationSec: deltaSec,
           beforeHb: prev.hb !== undefined ? prev.hb : null,
           afterHb: curr.hb !== undefined ? curr.hb : null,
@@ -579,8 +618,8 @@ async function analyzeHeartbeatPattern({
     ticksWithDelta.push({
       index: i + 1,
       ts: curr.ts,
-      date: curr.date || formatFullDateTime(curr.ts),
-      time: curr.time || formatFullDateTime(curr.ts).split(' ')[1] || new Date(curr.ts).toLocaleTimeString('id-ID', { hour12: false }),
+      date: formatFullDateTime(curr.ts),
+      time: formatTimeOnly(curr.ts),
       hb: curr.hb !== undefined ? curr.hb : null,
       deltaSec,
       deltaHb,
@@ -617,12 +656,14 @@ async function analyzeHeartbeatPattern({
       moduleId: mId,
       moduleName,
       port: detectedPort,
+      timezone: 'WITA (UTC+8)',
+      timezoneName: WITA_TIMEZONE,
       dateStr: resolvedDate,
       targetTimestamp: targetMs,
-      targetTimeStr: new Date(targetMs).toLocaleString('id-ID'),
+      targetTimeStr: formatDateTimeWITA(targetMs),
       windowMinutes: winMin,
-      windowStart: new Date(startMs).toLocaleString('id-ID'),
-      windowEnd: new Date(endMs).toLocaleString('id-ID'),
+      windowStart: formatDateTimeWITA(startMs),
+      windowEnd: formatDateTimeWITA(endMs),
       thresholds: {
         deadSec,
         frozenSec,
@@ -672,15 +713,7 @@ async function getRecentIncidentList(limit = 40) {
           lastHb: ev.lastHb,
           downtimeSeconds: ev.downtimeSeconds || ev.durationSeconds || 0,
           timestamp: ts,
-          timeFormatted: new Date(ts).toLocaleString('id-ID', {
-            day: '2-digit',
-            month: 'short',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
-          }) + ' WIB'
+          timeFormatted: formatDateTimeWITA(ts)
         });
       }
     }
@@ -713,15 +746,7 @@ async function getRecentIncidentList(limit = 40) {
             lastHb: row.last_hb,
             downtimeSeconds: row.duration_seconds || 0,
             timestamp: ts,
-            timeFormatted: new Date(ts).toLocaleString('id-ID', {
-              day: '2-digit',
-              month: 'short',
-              year: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-              hour12: false
-            }) + ' WIB'
+            timeFormatted: formatDateTimeWITA(ts)
           });
         }
       }
