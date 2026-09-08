@@ -800,6 +800,9 @@ async function getRecentIncidentList(limit = 40) {
           message: ev.message,
           lastHb: ev.lastHb,
           downtimeSeconds: ev.downtimeSeconds || ev.durationSeconds || 0,
+          rootCauseCategory: ev.rootCauseCategory || (Number(mId) === 0 ? 'HOST_NETWORK_OFFLINE' : 'HARDWARE_MODULE_FAULT'),
+          diagnosticHint: ev.diagnosticHint || null,
+          pingMs: ev.pingMs !== undefined ? ev.pingMs : null,
           timestamp: ts,
           timeFormatted: formatDateTimeWITA(ts)
         });
@@ -810,7 +813,7 @@ async function getRecentIncidentList(limit = 40) {
   // 2. From database table pod_heartbeat_alerts as persistent history
   try {
     const dbAlerts = await pool.query(
-      `SELECT id, server_id, server_name, module_id, module_name, alert_type, message, last_hb, duration_seconds, created_at
+      `SELECT id, server_id, server_name, module_id, module_name, alert_type, message, last_hb, duration_seconds, created_at, root_cause, diagnostic_hint, ping_ms
        FROM pod_heartbeat_alerts
        ORDER BY created_at DESC
        LIMIT $1`,
@@ -833,6 +836,9 @@ async function getRecentIncidentList(limit = 40) {
             message: row.message,
             lastHb: row.last_hb,
             downtimeSeconds: row.duration_seconds || 0,
+            rootCauseCategory: row.root_cause || (Number(row.module_id) === 0 ? 'HOST_NETWORK_OFFLINE' : 'HARDWARE_MODULE_FAULT'),
+            diagnosticHint: row.diagnostic_hint || null,
+            pingMs: row.ping_ms !== null && row.ping_ms !== undefined ? parseFloat(row.ping_ms) : null,
             timestamp: ts,
             timeFormatted: formatDateTimeWITA(ts)
           });

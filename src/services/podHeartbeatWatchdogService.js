@@ -19,6 +19,8 @@ const {
   clearDeadAlertCooldown
 } = require('./telegramAlertService');
 
+const { getPodLatencySnapshot } = require('./podPingService');
+
 // In-memory registry of latest heartbeat status per pod & module
 // Map<podId, Map<moduleId, { hb, lastSeenAt, isAlive, previousHb, lastHbChangeAt, port, totalPackets, deadAlertSent, frozenAlertSent }>>
 const heartbeatRegistry = new Map();
@@ -51,6 +53,9 @@ async function initAlertsSchema() {
       );
       CREATE INDEX IF NOT EXISTS idx_hb_alerts_server_id ON pod_heartbeat_alerts(server_id);
       CREATE INDEX IF NOT EXISTS idx_hb_alerts_created_at ON pod_heartbeat_alerts(created_at DESC);
+      ALTER TABLE pod_heartbeat_alerts ADD COLUMN IF NOT EXISTS root_cause VARCHAR(50);
+      ALTER TABLE pod_heartbeat_alerts ADD COLUMN IF NOT EXISTS diagnostic_hint TEXT;
+      ALTER TABLE pod_heartbeat_alerts ADD COLUMN IF NOT EXISTS ping_ms NUMERIC(6,1);
     `);
   } catch (err) {
     // Ignore DB errors as JSON file is the primary storage
@@ -263,10 +268,41 @@ function getHeartbeatSnapshot() {
  */
 async function logIncidentAlert(alert) {
   const moduleFriendlyName = alert.moduleName || getModuleNameById(alert.moduleId);
+
+  // Root Cause Diagnosis (Improvement 1)
+  const podLatency = typeof getPodLatencySnapshot === 'function' ? getPodLatencySnapshot(alert.serverId) : null;
+  const isHostOnline = podLatency ? (podLatency.stats?.isOnline && podLatency.stats?.currentPingMs !== null) : true;
+  const pingMs = podLatency?.stats?.currentPingMs ?? null;
+
+  let rootCauseCategory = alert.rootCauseCategory || 'UNKNOWN';
+  let diagnosticHint = alert.diagnosticHint || '';
+
+  if (rootCauseCategory === 'UNKNOWN') {
+    if (alert.alertType === 'DEAD' || alert.alertType === 'FROZEN') {
+      if (!isHostOnline || alert.moduleId === 0) {
+        rootCauseCategory = 'HOST_NETWORK_OFFLINE';
+        diagnosticHint = 'Host POD tidak merespons ping / broker offline. Kemungkinan gangguan Wi-Fi, kabel LAN, atau catu daya listrik utama POD terputus.';
+      } else {
+        rootCauseCategory = 'HARDWARE_MODULE_FAULT';
+        diagnosticHint = `Host POD online (Ping: ${pingMs !== null ? `${pingMs}ms` : 'OK'}). Terindikasi kabel USB modul lepas, hub USB macet, atau mikrokontroler modul crash.`;
+      }
+    } else if (alert.alertType === 'RECOVERED') {
+      rootCauseCategory = 'RECOVERED';
+      diagnosticHint = 'Modul telah pulih dan kembali mengirimkan detak heartbeat normal.';
+    }
+  }
+
+  alert.rootCauseCategory = rootCauseCategory;
+  alert.diagnosticHint = diagnosticHint;
+  alert.pingMs = pingMs;
+
   const entry = {
     id: `alt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     ...alert,
     moduleName: moduleFriendlyName,
+    rootCauseCategory,
+    diagnosticHint,
+    pingMs,
     createdAt: new Date().toISOString()
   };
 
@@ -294,6 +330,9 @@ async function logIncidentAlert(alert) {
     message: alert.message,
     lastHb: alert.lastHb || 0,
     downtimeSeconds: alert.durationSeconds || 0,
+    rootCauseCategory,
+    diagnosticHint,
+    pingMs,
     timestamp: Date.now()
   });
 
@@ -301,8 +340,8 @@ async function logIncidentAlert(alert) {
   try {
     await pool.query(`
       INSERT INTO pod_heartbeat_alerts 
-        (server_id, server_name, module_id, module_name, alert_type, message, last_hb, duration_seconds)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        (server_id, server_name, module_id, module_name, alert_type, message, last_hb, duration_seconds, root_cause, diagnostic_hint, ping_ms)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     `, [
       alert.serverId,
       alert.serverName,
@@ -311,7 +350,10 @@ async function logIncidentAlert(alert) {
       alert.alertType,
       alert.message,
       alert.lastHb || 0,
-      alert.durationSeconds || 0
+      alert.durationSeconds || 0,
+      rootCauseCategory,
+      diagnosticHint,
+      pingMs
     ]);
   } catch (_) { }
 

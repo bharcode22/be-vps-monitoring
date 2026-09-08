@@ -272,7 +272,31 @@ async function executePodV3PingRound() {
       return [];
     }
 
+    const { getLastMqttSeenTime } = require('./podActivityService');
+    const now = Date.now();
+    const ADAPTIVE_STREAMING_INTERVAL_MS = 15000;
+
     const probePromises = v3Pods.map(async (pod) => {
+      const lastMqttSeen = typeof getLastMqttSeenTime === 'function' ? getLastMqttSeenTime(pod.id) : 0;
+      const isStreamingLive = lastMqttSeen > 0 && (now - lastMqttSeen < 4000);
+      const existingRecord = podLatencyMap.get(pod.id);
+      const lastProbedAt = existingRecord?.history?.slice(-1)[0]?.ts || 0;
+
+      // Improvement 2: Adaptive Probing
+      // If packets are actively streaming (<4s) and last TCP probe was done recently (<15s),
+      // we know the link is healthy. Skip redundant TCP socket creation to save CPU & socket resources!
+      if (isStreamingLive && (now - lastProbedAt < ADAPTIVE_STREAMING_INTERVAL_MS) && existingRecord) {
+        existingRecord.stats.lastUpdated = now;
+        existingRecord.stats.isOnline = true;
+        return {
+          podId: pod.id,
+          podCode: pod.code,
+          podName: pod.name,
+          host: pod.host,
+          ...existingRecord.stats
+        };
+      }
+
       const probeRes = await probePod(pod);
       const record = updatePodLatencyRecord(pod.id, pod, probeRes);
       return {

@@ -259,6 +259,14 @@ async function sendDeadHeartbeatAlert(alertData) {
     hour12: false
   }) + ' WIB';
 
+  const rootCauseCategory = alertData.rootCauseCategory || (moduleId === 0 ? 'HOST_NETWORK_OFFLINE' : 'HARDWARE_MODULE_FAULT');
+  const diagnosticHint = alertData.diagnosticHint || '';
+  const pingMs = alertData.pingMs !== undefined && alertData.pingMs !== null ? `${alertData.pingMs} ms` : null;
+
+  const rootCauseBadge = rootCauseCategory === 'HOST_NETWORK_OFFLINE'
+    ? '🟠 <b>GANGGUAN JARINGAN / POD HOST OFFLINE</b>'
+    : '🔴 <b>KEGAGALAN FISIK MODUL HARDWARE (USB/POWER)</b>';
+
   let messageHtml = '';
 
   // 1. Pod-Wide Outage (Aggregated All Modules DEAD)
@@ -269,11 +277,13 @@ async function sendDeadHeartbeatAlert(alertData) {
       `🏢 <b>Pod:</b> <code>${escapeHtml(serverName)}</code>`,
       '🔌 <b>Cakupan:</b> Seluruh Modul Terputus Serentak',
       '⚠️ <b>Status:</b> 🔴 <b>POD DOWN / OFFLINE</b>',
+      `🌐 <b>Konektivitas Host:</b> <code>${pingMs ? `${pingMs} (Online)` : 'Host Unreachable / Timeout'}</code>`,
+      `🛠️ <b>Akar Masalah:</b> ${rootCauseBadge}`,
       `⏱️ <b>Ambang Batas Dead:</b> ≥ ${thresholds.deadSec} detik`,
       `⏳ <b>Durasi Terputus:</b> ${durationSeconds} detik`,
       `🕒 <b>Waktu Insiden:</b> ${timeStr}`,
       '',
-      '⚠️ <i>Peringatan otomatis: Seluruh modul pod mati secara bersamaan. Kemungkinan unit POD kehilangan catu daya, atau broker MQTT / jaringan terputus total.</i>'
+      `💡 <b>Rekomendasi Tindakan:</b> <i>${escapeHtml(diagnosticHint || 'Periksa catu daya listrik utama unit POD dan koneksi router jaringan.')}</i>`
     ].join('\n');
   } else {
     // 2. Individual Module DEAD Outage
@@ -284,12 +294,14 @@ async function sendDeadHeartbeatAlert(alertData) {
       `🏢 <b>Pod:</b> <code>${escapeHtml(serverName)}</code>`,
       `🔌 <b>Modul:</b> <code>ID ${moduleId}</code> - <b>${escapeHtml(moduleName)}</b>`,
       '⚠️ <b>Status:</b> 🔴 <b>DEAD (Tidak Ada Sinyal Detak)</b>',
+      `🌐 <b>Konektivitas Host:</b> <code>${pingMs ? `${pingMs} (Online)` : 'Host Unreachable / Timeout'}</code>`,
+      `🛠️ <b>Akar Masalah:</b> ${rootCauseBadge}`,
       `⏱️ <b>Ambang Batas Dead:</b> ≥ ${thresholds.deadSec} detik`,
       `⏳ <b>Durasi Mati:</b> ${durationSeconds} detik`,
       `📡 <b>Counter Terakhir:</b> <code>#${lastHb !== null && lastHb !== undefined ? lastHb : '—'}</code>`,
       `🕒 <b>Waktu Insiden:</b> ${timeStr}`,
       '',
-      'ℹ️ <i>Peringatan otomatis: Modul tidak merespons melebihi batas waktu toleransi. Mohon periksa koneksi hardware / serial port modul terkait.</i>'
+      `💡 <b>Rekomendasi Tindakan:</b> <i>${escapeHtml(diagnosticHint || 'Periksa koneksi fisik kabel USB / serial port modul terkait.')}</i>`
     ].join('\n');
   }
 
@@ -365,23 +377,32 @@ async function sendBatchDeadHeartbeatAlert({ serverId, serverName, modules = [],
     return `  ${idx + 1}. <b>${escapeHtml(modName)}</b> (<code>ID: ${modId}</code>) — Macet di <code>${hbVal}</code> [${durSec}s]`;
   }).join('\n');
 
-  const deadNames = eligibleModules.map(m => m.modName || m.moduleName || `Modul ${m.moduleId}`).join(', ');
-  const batchTitle = eligibleModules.length <= 2
-    ? `MODUL ${deadNames.toUpperCase()} DEAD`
-    : `${eligibleModules.length} MODUL DEAD (${deadNames.toUpperCase()})`;
+  const { getPodLatencySnapshot } = require('./podPingService');
+  const podLat = typeof getPodLatencySnapshot === 'function' ? getPodLatencySnapshot(serverId) : null;
+  const isHostOnline = podLat ? (podLat.stats?.isOnline && podLat.stats?.currentPingMs !== null) : true;
+  const batchPingMs = podLat?.stats?.currentPingMs !== null && podLat?.stats?.currentPingMs !== undefined ? `${podLat.stats.currentPingMs} ms` : null;
+
+  const batchRootCause = isHostOnline
+    ? '🔴 <b>KEGAGALAN FISIK MODUL HARDWARE (USB/POWER)</b>'
+    : '🟠 <b>GANGGUAN JARINGAN / POD HOST OFFLINE</b>';
+  const batchHint = isHostOnline
+    ? `Host POD terbukti aktif (Ping: ${batchPingMs || 'OK'}). Terindikasi USB Hub atau pasokan daya modul serial terganggu.`
+    : 'Host POD tidak merespons ping. Terindikasi koneksi jaringan Wi-Fi/VPN terputus atau catu daya listrik unit POD mati.';
 
   const messageHtml = [
     `🚨 <b>[ALERT] ${escapeHtml(batchTitle)}</b> 🚨`,
     '',
     `🏢 <b>Pod:</b> <code>${escapeHtml(sName)}</code>`,
     `⚠️ <b>Total Modul Mati:</b> ${eligibleModules.length} Modul Terputus Bersamaan`,
+    `🌐 <b>Konektivitas Host:</b> <code>${batchPingMs ? `${batchPingMs} (Online)` : 'Host Unreachable / Timeout'}</code>`,
+    `🛠️ <b>Akar Masalah:</b> ${batchRootCause}`,
     `⏱️ <b>Ambang Batas Dead:</b> ≥ ${thresholds.deadSec} detik`,
     `🕒 <b>Waktu Insiden:</b> ${timeStr}`,
     '',
     '📋 <b>Rincian Modul Bermasalah:</b>',
     moduleLines,
     '',
-    'ℹ️ <i>Peringatan otomatis: Modul-modul di atas kehilangan sinyal detak heartbeat. Mohon segera periksa perkabelan USB / hardware unit.</i>'
+    `💡 <b>Rekomendasi Tindakan:</b> <i>${escapeHtml(batchHint)}</i>`
   ].join('\n');
 
   const result = await sendRawTelegramMessage(messageHtml);

@@ -701,6 +701,25 @@ async function simulatePodActivity({ serverId, value, topic = 'mod_chair/pob_sta
   };
 }
 
+/**
+ * Get timestamp of the latest MQTT message received for a specific pod
+ * Used for adaptive telemetry probing (Improvement 2)
+ */
+function getLastMqttSeenTime(podId) {
+  const pId = Number(podId);
+  const state = podStateMap.get(pId);
+  if (!state || !state.lastSeenAt) return 0;
+  return new Date(state.lastSeenAt).getTime();
+}
+
+/**
+ * Get current MQTT broker connection state for a pod
+ */
+function getPodMqttState(podId) {
+  const pId = Number(podId);
+  return podStateMap.get(pId) || null;
+}
+
 module.exports = {
   initPodActivityService,
   getPodActivityStatus,
@@ -709,5 +728,7 @@ module.exports = {
   syncAndConnectAllV3Pods,
   getIngestionDaemonStatus,
   setStreamFlushInterval,
-  getStreamFlushInterval
+  getStreamFlushInterval,
+  getLastMqttSeenTime,
+  getPodMqttState
 };
