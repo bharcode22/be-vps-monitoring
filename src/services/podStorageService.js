@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { dbAsync } = require('./db');
+const { getModuleNameById } = require('./podHeartbeatConfigService');
 
 // Base directory for pod-centric storage
 const BASE_STORAGE_DIR = path.join(__dirname, '../data/pod_storage');
@@ -767,7 +768,8 @@ function getPodStorageFilesList(podId, targetDateFilter = null) {
           const match = filename.match(/^current_(\d+)_/);
           if (match) {
             modId = Number(match[1]);
-            category = `Telemetri Arus (Modul ${modId})`;
+            const modName = getModuleNameById(modId);
+            category = `Telemetri Arus (${modName || `Modul ${modId}`})`;
           } else {
             category = 'Telemetri Arus (Current)';
           }
@@ -776,7 +778,8 @@ function getPodStorageFilesList(podId, targetDateFilter = null) {
           const match = filename.match(/^hb_(\d+)_/);
           if (match) {
             modId = Number(match[1]);
-            category = `Detak Modul (ID: ${modId})`;
+            const modName = getModuleNameById(modId);
+            category = `Detak Modul (${modName || `ID: ${modId}`})`;
           } else {
             category = 'Detak Modul (Raw Heartbeats)';
           }
@@ -796,6 +799,7 @@ function getPodStorageFilesList(podId, targetDateFilter = null) {
         type,
         category,
         moduleId: modId,
+        moduleName: modId ? getModuleNameById(modId) : null,
         relativePath: path.relative(PODS_DIR, fullPath),
         sizeBytes: stat.size,
         sizeFormatted: formatBytes(stat.size),
