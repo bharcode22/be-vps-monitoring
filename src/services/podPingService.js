@@ -9,6 +9,7 @@ const TCP_TIMEOUT_MS = 3000;
 // In-memory latency cache: Map<podId, { history: Array<{ ts, pingMs, success }>, stats: Object }>
 const podLatencyMap = new Map();
 let isWorkerRunning = false;
+let isAutoPingEnabled = true;
 let workerTimer = null;
 let socketIoInstance = null;
 
@@ -289,6 +290,7 @@ async function executePodV3PingRound() {
     if (socketIoInstance) {
       socketIoInstance.emit('pod_latency_update', {
         timestamp: Date.now(),
+        autoPingEnabled: isAutoPingEnabled,
         fleetLatency: results
       });
     }
@@ -315,7 +317,9 @@ function startPodV3PingWorker(io = null, intervalMs = DEFAULT_PING_INTERVAL_MS) 
 
   const loop = async () => {
     if (!isWorkerRunning) return;
-    await executePodV3PingRound();
+    if (isAutoPingEnabled) {
+      await executePodV3PingRound();
+    }
     workerTimer = setTimeout(loop, intervalMs);
   };
 
@@ -332,6 +336,40 @@ function stopPodV3PingWorker() {
     clearTimeout(workerTimer);
     workerTimer = null;
   }
+}
+
+/**
+ * Toggle or set auto ping status
+ * @param {boolean} enabled
+ */
+function setAutoPingEnabled(enabled) {
+  isAutoPingEnabled = Boolean(enabled);
+  console.log(`📡 Auto ping POD v3 status changed: ${isAutoPingEnabled ? 'ENABLED' : 'DISABLED'}`);
+
+  if (socketIoInstance) {
+    socketIoInstance.emit('pod_latency_auto_ping_status', {
+      autoPingEnabled: isAutoPingEnabled,
+      timestamp: Date.now()
+    });
+  }
+
+  // If enabled, trigger a round immediately for instant feedback
+  if (isAutoPingEnabled && isWorkerRunning) {
+    executePodV3PingRound().catch(() => {});
+  }
+
+  return isAutoPingEnabled;
+}
+
+/**
+ * Get current auto ping status
+ */
+function getAutoPingStatus() {
+  return {
+    autoPingEnabled: isAutoPingEnabled,
+    isWorkerRunning,
+    intervalMs: DEFAULT_PING_INTERVAL_MS
+  };
 }
 
 /**
@@ -414,5 +452,7 @@ module.exports = {
   measureIcmpLatency,
   getPodLatencySnapshot,
   getAllPodV3LatencySnapshot,
-  pingPodOnDemand
+  pingPodOnDemand,
+  setAutoPingEnabled,
+  getAutoPingStatus
 };

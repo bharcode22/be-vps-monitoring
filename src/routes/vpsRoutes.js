@@ -282,6 +282,8 @@ router.get('/pod-activity/pods/:id/hb-analysis', optionalAuth, podActivityContro
 router.get('/pod-activity/pods/:id/latency', optionalAuth, podActivityController.getPodLatencyHandler);
 router.post('/pod-activity/pods/:id/ping-now', optionalAuth, podActivityController.pingPodNowHandler);
 router.get('/pod-activity/fleet/latency', optionalAuth, podActivityController.getAllPodV3LatencyHandler);
+router.get('/pod-activity/fleet/latency/auto-ping', optionalAuth, podActivityController.getAutoPingStatusHandler);
+router.post('/pod-activity/fleet/latency/auto-ping', optionalAuth, podActivityController.setAutoPingStatusHandler);
 router.get('/pod-activity/pods/:id/heartbeats/download', optionalAuth, podActivityController.downloadPodHeartbeatsHandler);
 router.get('/pod-activity/pods/:id/log-dates', optionalAuth, podActivityController.getPodLogDatesHandler);
 router.get('/pod-activity/pods/:id/state', optionalAuth, podActivityController.getPodStateHandler);

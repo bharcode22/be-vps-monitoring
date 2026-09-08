@@ -49,7 +49,9 @@ const {
 const {
   getPodLatencySnapshot,
   getAllPodV3LatencySnapshot,
-  pingPodOnDemand
+  pingPodOnDemand,
+  setAutoPingEnabled,
+  getAutoPingStatus
 } = require('../services/podPingService');
 
 /**
@@ -693,6 +695,33 @@ async function pingPodNowHandler(req, res) {
   }
 }
 
+/**
+ * GET /api/pod-activity/fleet/latency/auto-ping
+ * Get auto ping worker status
+ */
+async function getAutoPingStatusHandler(req, res) {
+  try {
+    const status = getAutoPingStatus();
+    res.json({ success: true, ...status });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * POST /api/pod-activity/fleet/latency/auto-ping
+ * Toggle auto ping worker on/off
+ */
+async function setAutoPingStatusHandler(req, res) {
+  try {
+    const { enabled } = req.body;
+    const result = setAutoPingEnabled(enabled);
+    res.json({ success: true, autoPingEnabled: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 module.exports = {
   getStatus,
   getHistory,
@@ -723,5 +752,7 @@ module.exports = {
   setStreamFrequencyHandler,
   getPodLatencyHandler,
   getAllPodV3LatencyHandler,
-  pingPodNowHandler
+  pingPodNowHandler,
+  getAutoPingStatusHandler,
+  setAutoPingStatusHandler
 };
