@@ -279,6 +279,9 @@ router.get('/pod-activity/heartbeat-thresholds', optionalAuth, podActivityContro
 router.get('/pod-activity/pods/:id/events', optionalAuth, podActivityController.getPodEventsHandler);
 router.get('/pod-activity/pods/:id/heartbeats', optionalAuth, podActivityController.getPodHeartbeatsHandler);
 router.get('/pod-activity/pods/:id/hb-analysis', optionalAuth, podActivityController.analyzePodHeartbeatHandler);
+router.get('/pod-activity/pods/:id/latency', optionalAuth, podActivityController.getPodLatencyHandler);
+router.post('/pod-activity/pods/:id/ping-now', optionalAuth, podActivityController.pingPodNowHandler);
+router.get('/pod-activity/fleet/latency', optionalAuth, podActivityController.getAllPodV3LatencyHandler);
 router.get('/pod-activity/pods/:id/heartbeats/download', optionalAuth, podActivityController.downloadPodHeartbeatsHandler);
 router.get('/pod-activity/pods/:id/log-dates', optionalAuth, podActivityController.getPodLogDatesHandler);
 router.get('/pod-activity/pods/:id/state', optionalAuth, podActivityController.getPodStateHandler);

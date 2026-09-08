@@ -19,6 +19,7 @@ const { initHeartbeatWatchdog } = require('./services/podHeartbeatWatchdogServic
 const { setActivitySocketIo } = require('./services/activityLoggerService');
 const { registerUserPresenceHandlers } = require('./services/userPresenceService');
 const { initTelegramBotListener } = require('./services/telegramBotListenerService');
+const { startPodV3PingWorker } = require('./services/podPingService');
 
 
 const app = express();
@@ -115,6 +116,7 @@ async function runPollingLoop() {
 initPodActivityService(io);
 initHeartbeatWatchdog(io);
 initTelegramBotListener();
+startPodV3PingWorker(io);
 
 // Start continuous polling loop
 setTimeout(runPollingLoop, 1000);

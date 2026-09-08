@@ -46,6 +46,12 @@ const {
   sendTestTelegramMessage
 } = require('../services/telegramAlertService');
 
+const {
+  getPodLatencySnapshot,
+  getAllPodV3LatencySnapshot,
+  pingPodOnDemand
+} = require('../services/podPingService');
+
 /**
  * GET /api/pod-activity/status
  * Get current real-time status of all POD V3 units, summary counts, and recent logs
@@ -643,6 +649,50 @@ async function setStreamFrequencyHandler(req, res) {
   }
 }
 
+/**
+ * GET /api/pod-activity/pods/:id/latency
+ * Get real-time latency statistics and history for a specific POD v3
+ */
+async function getPodLatencyHandler(req, res) {
+  try {
+    const podId = parseInt(req.params.id, 10);
+    const data = getPodLatencySnapshot(podId);
+    if (!data) {
+      return res.status(404).json({ success: false, error: `Data latensi untuk POD ${podId} belum tersedia.` });
+    }
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * GET /api/pod-activity/fleet/latency
+ * Get real-time latency summary for all POD v3 units
+ */
+async function getAllPodV3LatencyHandler(req, res) {
+  try {
+    const data = getAllPodV3LatencySnapshot();
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * POST /api/pod-activity/pods/:id/ping-now
+ * Trigger immediate on-demand ping probe for a POD v3
+ */
+async function pingPodNowHandler(req, res) {
+  try {
+    const podId = parseInt(req.params.id, 10);
+    const result = await pingPodOnDemand(podId);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 module.exports = {
   getStatus,
   getHistory,
@@ -670,5 +720,8 @@ module.exports = {
   saveTelegramConfigHandler,
   testTelegramAlertHandler,
   getStreamFrequencyHandler,
-  setStreamFrequencyHandler
+  setStreamFrequencyHandler,
+  getPodLatencyHandler,
+  getAllPodV3LatencyHandler,
+  pingPodNowHandler
 };

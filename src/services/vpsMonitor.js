@@ -4,6 +4,7 @@ const { getRemoteSSHMetrics } = require('./monitor/sshCollector');
 const { getPostgresMetrics } = require('./monitor/dbCollector');
 const { getS3Metrics } = require('./monitor/s3Collector');
 const { fetchRawHeartbeat } = require('../controllers/heartbeatController');
+const { getPodLatencySnapshot } = require('./podPingService');
 
 // In-memory cache for live real-time metrics and rolling in-memory history (Zero DB write I/O)
 const liveMetricsCache = {};
@@ -101,14 +102,20 @@ async function collectAllServerMetrics(io) {
 
       // For POD nodes: if SSH is not reachable but Heartbeat has ping_status === true, keep status online!
       if (serverType === 'pod') {
+        const podLatency = getPodLatencySnapshot(server.id);
         const hb = (server.code && heartbeatMap.get(String(server.code).trim())) ||
           (server.host && heartbeatMap.get(String(server.host).trim())) ||
           (server.name && [...heartbeatMap.values()].find(h => h.pod_id && new RegExp(`\\b${h.pod_id}\\b`, 'i').test(server.name)));
 
+        if (podLatency && podLatency.stats?.currentPingMs !== null && podLatency.stats?.currentPingMs !== undefined) {
+          metrics.pingMs = podLatency.stats.currentPingMs;
+          metrics.status = podLatency.stats.isOnline ? 'online' : metrics.status;
+        }
+
         if (hb && hb.ping_status) {
           metrics.status = 'online';
           if (!metrics.pingMs || metrics.pingMs === 0) {
-            metrics.pingMs = 5;
+            metrics.pingMs = podLatency?.stats?.currentPingMs || 5;
           }
           if (hb.heartbeat_metrics && typeof hb.heartbeat_metrics === 'object') {
             if (hb.heartbeat_metrics.cpu_usage && !metrics.cpuUsage) metrics.cpuUsage = Number(hb.heartbeat_metrics.cpu_usage) || 0;
