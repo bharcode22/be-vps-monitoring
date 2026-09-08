@@ -8,7 +8,8 @@ const {
   APP_TIMEZONE,
   getPodEventsLogPath,
   getPodHeartbeatsLogPath,
-  getRecentFleetIncidents
+  getRecentFleetIncidents,
+  registerPodName
 } = require('./podStorageService');
 const {
   getHeartbeatThresholdsConfig,
@@ -186,24 +187,25 @@ function readTicksFromFile(filePath, modFilter = null, startMs = null, endMs = n
 /**
  * Load ticks for a pod & module in a given time window
  */
-async function loadTicksForWindow(podId, moduleId, targetDate, startMs, endMs) {
+async function loadTicksForWindow(podId, moduleId, targetDate, startMs, endMs, serverName = null) {
   const modIdNum = Number(moduleId);
-  const podDir = getPodDir(podId);
+  const podDir = getPodDir(podId, serverName);
   const dateDir = path.join(podDir, targetDate);
 
   const filePromises = [];
 
-  // Check specific module files: hb_[moduleId]_[date].jsonl and current_[moduleId]_[date].jsonl
+  // Check specific module heartbeat file: hb_[moduleId]_[date].jsonl
+  // NOTE: We do NOT load current_[moduleId]_[date].jsonl here. Current files contain electrical
+  // sensor readings (PEMF_CUR, EE_12V, etc.) without an 'hb' field, which breaks deltaHb computation.
   if (fs.existsSync(dateDir) && fs.statSync(dateDir).isDirectory()) {
     const hbFile = path.join(dateDir, `hb_${modIdNum}_${targetDate}.jsonl`);
-    const curFile = path.join(dateDir, `current_${modIdNum}_${targetDate}.jsonl`);
-
-    if (fs.existsSync(hbFile)) filePromises.push(readTicksFromFile(hbFile, modIdNum, startMs, endMs));
-    if (fs.existsSync(curFile)) filePromises.push(readTicksFromFile(curFile, modIdNum, startMs, endMs));
+    if (fs.existsSync(hbFile)) {
+      filePromises.push(readTicksFromFile(hbFile, modIdNum, startMs, endMs));
+    }
   }
 
   // Legacy fallback file
-  const legacyFile = getPodHeartbeatsLogPath(podId, targetDate, modIdNum);
+  const legacyFile = getPodHeartbeatsLogPath(podId, targetDate, modIdNum, serverName);
   if (filePromises.length === 0 && fs.existsSync(legacyFile) && !fs.statSync(legacyFile).isDirectory()) {
     filePromises.push(readTicksFromFile(legacyFile, modIdNum, startMs, endMs));
   }
@@ -214,10 +216,14 @@ async function loadTicksForWindow(podId, moduleId, targetDate, startMs, endMs) {
     ticks = results.flat();
   }
 
-  // De-duplicate ticks by ts & hb
+  // Prioritize ticks that actually have the 'hb' counter if available
+  const ticksWithHb = ticks.filter(t => t.hb !== undefined && t.hb !== null);
+  const candidateTicks = ticksWithHb.length > 0 ? ticksWithHb : ticks;
+
+  // De-duplicate ticks by ts & hb & modId
   const seen = new Set();
   const deduped = [];
-  for (const t of ticks) {
+  for (const t of candidateTicks) {
     const key = `${t.ts}_${t.hb}_${t.modId}`;
     if (!seen.has(key)) {
       seen.add(key);
@@ -228,11 +234,22 @@ async function loadTicksForWindow(podId, moduleId, targetDate, startMs, endMs) {
   // Sort ascending by timestamp
   deduped.sort((a, b) => a.ts - b.ts);
 
-  // Filter consecutive duplicate entries where timestamp and hb are identical
+  // Filter consecutive duplicate entries where timestamp and hb are identical or duplicate packet burst within 300ms
   const cleaned = [];
   for (let i = 0; i < deduped.length; i++) {
     const curr = deduped[i];
     const prev = cleaned[cleaned.length - 1];
+    if (
+      prev &&
+      prev.hb !== null &&
+      prev.hb !== undefined &&
+      curr.hb !== null &&
+      curr.hb !== undefined &&
+      prev.hb === curr.hb &&
+      Math.abs(curr.ts - prev.ts) < 300
+    ) {
+      continue;
+    }
     if (prev && prev.ts === curr.ts && prev.hb === curr.hb) {
       continue;
     }
@@ -526,15 +543,27 @@ async function analyzeHeartbeatPattern({
   let serverName = `POD ${pId}`;
   let effectivePodId = pId;
   try {
-    const srv = await dbAsync.get(
-      'SELECT id, name, code, host FROM servers WHERE id = ? OR code = ? OR name = ? OR name = ?',
-      [pId, String(pId), `POD ${pId}`, `POD_${pId}`]
+    // Check by server code or name first (e.g. code = '31' -> POD 31) before raw id to avoid collision
+    let srv = await dbAsync.get(
+      'SELECT id, name, code, host FROM servers WHERE code = ? OR name = ? OR name = ?',
+      [String(pId), `POD ${pId}`, `POD_${pId}`]
     );
+    if (!srv) {
+      srv = await dbAsync.get(
+        'SELECT id, name, code, host FROM servers WHERE id = ?',
+        [pId]
+      );
+    }
     if (srv) {
       serverName = srv.name;
       effectivePodId = srv.id;
     }
   } catch (_) { }
+
+  if (serverName) {
+    registerPodName(effectivePodId, serverName);
+    registerPodName(pId, serverName);
+  }
 
   const moduleName = getModuleNameById(mId);
   const thresholds = getHeartbeatThresholdsConfig();
@@ -543,9 +572,9 @@ async function analyzeHeartbeatPattern({
   const delaySec = thresholds.delaySec || 2;
 
   // 3. Load ticks and incidents (try effectivePodId first, fallback to pId)
-  let rawTicks = await loadTicksForWindow(effectivePodId, mId, resolvedDate, startMs, endMs);
+  let rawTicks = await loadTicksForWindow(effectivePodId, mId, resolvedDate, startMs, endMs, serverName);
   if (rawTicks.length === 0 && effectivePodId !== pId) {
-    rawTicks = await loadTicksForWindow(pId, mId, resolvedDate, startMs, endMs);
+    rawTicks = await loadTicksForWindow(pId, mId, resolvedDate, startMs, endMs, serverName);
   }
 
   // Fallback: If no ticks found, check with alternate Indonesian timezone offset (WIB vs WITA ±1 hour)
@@ -555,9 +584,9 @@ async function analyzeHeartbeatPattern({
     const shiftMs = isWITA ? 3600000 : -3600000;
     const altStart = startMs + shiftMs;
     const altEnd = endMs + shiftMs;
-    rawTicks = await loadTicksForWindow(effectivePodId, mId, resolvedDate, altStart, altEnd);
+    rawTicks = await loadTicksForWindow(effectivePodId, mId, resolvedDate, altStart, altEnd, serverName);
     if (rawTicks.length === 0 && effectivePodId !== pId) {
-      rawTicks = await loadTicksForWindow(pId, mId, resolvedDate, altStart, altEnd);
+      rawTicks = await loadTicksForWindow(pId, mId, resolvedDate, altStart, altEnd, serverName);
     }
   }
 
@@ -567,6 +596,7 @@ async function analyzeHeartbeatPattern({
   const ticksWithDelta = [];
   const gaps = [];
   let detectedPort = null;
+  let lastKnownHb = null;
 
   for (let i = 0; i < rawTicks.length; i++) {
     const curr = rawTicks[i];
@@ -581,13 +611,20 @@ async function analyzeHeartbeatPattern({
     if (i > 0) {
       const prev = rawTicks[i - 1];
       deltaSec = Math.round(((curr.ts - prev.ts) / 1000) * 100) / 100;
+    }
 
-      if (curr.hb !== null && curr.hb !== undefined && prev.hb !== null && prev.hb !== undefined) {
-        deltaHb = curr.hb - prev.hb;
+    if (curr.hb !== null && curr.hb !== undefined) {
+      if (lastKnownHb !== null && lastKnownHb !== undefined) {
+        deltaHb = curr.hb - lastKnownHb;
       }
+    }
+
+    if (i > 0) {
+      const prev = rawTicks[i - 1];
+      const prevHb = (prev.hb !== null && prev.hb !== undefined) ? prev.hb : lastKnownHb;
 
       const isReset = (curr.hb !== null && curr.hb !== undefined && curr.hb <= 2) ||
-        (prev.hb !== null && prev.hb !== undefined && curr.hb !== null && curr.hb !== undefined && curr.hb < prev.hb);
+        (prevHb !== null && prevHb !== undefined && curr.hb !== null && curr.hb !== undefined && curr.hb < prevHb);
       const isJumped = !isReset && deltaHb !== null && deltaHb > 5;
       const isResumed = !isReset && !isJumped && (deltaHb !== null && deltaHb >= 0 && deltaHb <= 5);
 
@@ -607,7 +644,7 @@ async function analyzeHeartbeatPattern({
           startTime: formatTimeOnly(prev.ts),
           endTime: formatTimeOnly(curr.ts),
           durationSec: deltaSec,
-          beforeHb: prev.hb !== undefined ? prev.hb : null,
+          beforeHb: prevHb !== undefined ? prevHb : null,
           afterHb: curr.hb !== undefined ? curr.hb : null,
           hbDiff: deltaHb,
           postDeadType,
@@ -628,7 +665,7 @@ async function analyzeHeartbeatPattern({
           startTime: formatTimeOnly(prev.ts),
           endTime: formatTimeOnly(curr.ts),
           durationSec: deltaSec,
-          beforeHb: prev.hb !== undefined ? prev.hb : null,
+          beforeHb: prevHb !== undefined ? prevHb : null,
           afterHb: curr.hb !== undefined ? curr.hb : null,
           hbDiff: deltaHb,
           postDeadType,
@@ -648,7 +685,7 @@ async function analyzeHeartbeatPattern({
           startTime: formatTimeOnly(prev.ts),
           endTime: formatTimeOnly(curr.ts),
           durationSec: deltaSec,
-          beforeHb: prev.hb !== undefined ? prev.hb : null,
+          beforeHb: prevHb !== undefined ? prevHb : null,
           afterHb: curr.hb !== undefined ? curr.hb : null,
           hbDiff: deltaHb,
           postDeadType,
@@ -660,6 +697,10 @@ async function analyzeHeartbeatPattern({
       } else if (deltaHb === 0 && deltaSec >= frozenSec) {
         status = 'FROZEN';
       }
+    }
+
+    if (curr.hb !== null && curr.hb !== undefined) {
+      lastKnownHb = curr.hb;
     }
 
     ticksWithDelta.push({

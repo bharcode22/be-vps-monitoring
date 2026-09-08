@@ -292,7 +292,10 @@ async function analyzePodHeartbeatHandler(req, res) {
 
     if (!hasPodName(podId)) {
       try {
-        const srv = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
+        const srv = await dbAsync.get(
+          'SELECT name FROM servers WHERE code = ? OR name = ? OR id = ?',
+          [String(podId), `POD ${podId}`, podId]
+        );
         if (srv && srv.name) registerPodName(podId, srv.name);
       } catch (_) { }
     }

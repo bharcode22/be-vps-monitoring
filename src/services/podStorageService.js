@@ -124,28 +124,68 @@ function getPodDir(podId, explicitName = null) {
     }
   }
 
-  // 2. For new writes, if sanitized name is known, use sanitized name directory (e.g. POD_36)
-  if (sanitized) {
-    return path.join(PODS_DIR, sanitized);
-  }
-
-  // 3. Fallback scan: check existing pod folders in PODS_DIR for state.json with matching podId
+  // 2. Scan existing folders in PODS_DIR with case-insensitivity and smart ID/code matching
   if (fs.existsSync(PODS_DIR)) {
     try {
       const folders = fs.readdirSync(PODS_DIR);
+
+      // 2A. Case-insensitive match on sanitized name (crucial for Linux ext4)
+      if (sanitized) {
+        const lowerSanitized = sanitized.toLowerCase();
+        for (const folder of folders) {
+          if (folder.toLowerCase() === lowerSanitized) {
+            registerPodName(id, folder);
+            return path.join(PODS_DIR, folder);
+          }
+        }
+      }
+
+      // 2B. Check state.json inside each subfolder for podId, code, or name digits match
       for (const folder of folders) {
         const stateFile = path.join(PODS_DIR, folder, 'state.json');
         if (fs.existsSync(stateFile)) {
           try {
             const stateData = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-            if (Number(stateData.podId) === id) {
+            const statePodId = Number(stateData.podId);
+            const stateCode = stateData.code ? String(stateData.code) : null;
+            const nameDigits = stateData.name ? String(stateData.name).replace(/\D/g, '') : null;
+
+            if (
+              statePodId === id ||
+              stateCode === String(id) ||
+              (nameDigits && Number(nameDigits) === id)
+            ) {
               registerPodName(id, stateData.name || folder);
+              if (statePodId && statePodId !== id) {
+                registerPodName(statePodId, stateData.name || folder);
+              }
               return path.join(PODS_DIR, folder);
             }
           } catch (_) {}
         }
       }
+
+      // 2C. Direct folder name match: 'POD_31', 'Pod_31', 'pod_31' for id 31
+      const targetPrefix = `pod_${id}`;
+      const targetNoUnderscore = `pod${id}`;
+      for (const folder of folders) {
+        const lowerFolder = folder.toLowerCase();
+        const folderDigits = folder.replace(/\D/g, '');
+        if (
+          lowerFolder === targetPrefix ||
+          lowerFolder === targetNoUnderscore ||
+          (folderDigits && Number(folderDigits) === id)
+        ) {
+          registerPodName(id, folder);
+          return path.join(PODS_DIR, folder);
+        }
+      }
     } catch (_) {}
+  }
+
+  // 3. For new writes, if sanitized name is known, use sanitized name directory (e.g. POD_36)
+  if (sanitized) {
+    return path.join(PODS_DIR, sanitized);
   }
 
   // 4. Fallback check for old naming: 'pod_15'
