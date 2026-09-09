@@ -333,6 +333,16 @@ router.get('/pod-influx/pods/:id/schema', optionalAuth, podInfluxController.getS
 router.post('/pod-influx/pods/:id/query', optionalAuth, podInfluxController.queryData);
 router.post('/pod-influx/pods/:id/export', optionalAuth, podInfluxController.exportData);
 router.get('/pod-influx/pods/:id/export', optionalAuth, podInfluxController.exportData);
+router.post('/pod-influx/pods/:id/cli-export', optionalAuth, podInfluxController.runCliExportOnPod);
+router.get('/pod-influx/pods/:id/exports', optionalAuth, podInfluxController.listExportFiles);
+router.delete('/pod-influx/pods/:id/exports/:filename', optionalAuth, podInfluxController.deleteExportFile);
+router.get('/pod-influx/pods/:id/exports/:filename/download', optionalAuth, podInfluxController.downloadExportFile);
+
+// Influx Saved Query Templates Routes (Shared catalog for Pusat & Edge)
+router.get('/influx/templates', optionalAuth, podInfluxController.getTemplates);
+router.post('/influx/templates', optionalAuth, podInfluxController.createTemplate);
+router.put('/influx/templates/:id', optionalAuth, podInfluxController.updateTemplate);
+router.delete('/influx/templates/:id', optionalAuth, podInfluxController.deleteTemplate);
 
 // Cross-POD Saved Query Templates Routes
 router.get('/pod-influx/templates', optionalAuth, podInfluxController.getTemplates);

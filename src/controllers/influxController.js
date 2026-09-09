@@ -97,7 +97,7 @@ const getBuckets = async (req, res) => {
 const getSchema = async (req, res) => {
   try {
     const bucket = req.query.bucket || null;
-    const measurement = req.query.measurement || null;
+    const measurement = req.query.measurements || req.query.measurement || null;
     const schema = await influxService.getBucketSchema(bucket, measurement);
     return res.json({ success: true, data: schema });
   } catch (err) {
@@ -135,20 +135,22 @@ const exportData = async (req, res) => {
       customStart: req.query.customStart,
       customStop: req.query.customStop,
       measurement: req.query.measurement,
+      measurements: req.query.measurements ? (Array.isArray(req.query.measurements) ? req.query.measurements : req.query.measurements.split(',')) : undefined,
       field: req.query.field,
+      fields: req.query.fields ? (Array.isArray(req.query.fields) ? req.query.fields : req.query.fields.split(',')) : undefined,
       unit: req.query.unit,
       aggregation: req.query.aggregation,
       aggFn: req.query.aggFn,
-      limit: req.query.limit ? Number(req.query.limit) : 5000,
+      limit: req.query.limit ? Number(req.query.limit) : 50000,
       format: req.query.format || 'csv',
       rawFluxQuery: req.query.rawFluxQuery,
-      tags: req.query.tags ? JSON.parse(req.query.tags) : {}
+      tags: req.query.tags ? (typeof req.query.tags === 'string' ? JSON.parse(req.query.tags) : req.query.tags) : {}
     };
 
     const format = (options.format || 'csv').toLowerCase();
     const result = await influxService.queryInfluxData({
       ...options,
-      limit: options.limit || 10000 // Higher limit for export
+      limit: options.limit || 50000 // High limit for export so all multi-field rows are included
     });
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -161,8 +163,8 @@ const exportData = async (req, res) => {
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       return res.send(JSON.stringify(result.rows, null, 2));
     } else {
-      // Default: CSV
-      const csvString = influxService.convertRecordsToCsv(result.rows, result.tagKeys);
+      // Default: InfluxDB Annotated CSV (#group, #datatype, #default, ...)
+      const csvString = await influxService.exportAnnotatedCsv(options);
       const filename = `influx_export_${bucketName}${measName}_${timestamp}.csv`;
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');

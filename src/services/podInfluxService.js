@@ -2,6 +2,8 @@ const axios = require('axios');
 const http = require('http');
 const db = require('./db');
 const { executeSshCommand } = require('../utils/sshExecutor');
+const { Client } = require('ssh2');
+const { decrypt } = require('../utils/crypto');
 
 // Default fallback token (shared default across some PODs)
 const DEFAULT_FALLBACK_TOKEN = 'CZtWSYvyTkfwGvaGffoDLEMJL0flUn10wkcn6gYuG3G3_ae666e6Y-DiaOHQ2zRgJdIQPSRVgnMt4skITBgzEQ==';
@@ -357,6 +359,7 @@ async function checkPodInfluxHealth(podId) {
     portOpen: pingResult.open,
     latencyMs: Date.now() - startTime,
     version: pingResult.version || null,
+    token: tokenData.token,
     tokenSource: tokenData.source,
     isFallback: tokenData.isFallback || false,
     authorized: false,
@@ -388,7 +391,7 @@ async function checkPodInfluxHealth(podId) {
 /**
  * Execute raw Flux query directly against a POD's InfluxDB (Read-Only)
  */
-async function executeFluxQueryOnPod(podId, fluxQuery) {
+async function executeFluxQueryOnPod(podId, fluxQuery, dialect = null) {
   validateReadOnlyFluxQuery(fluxQuery);
   const server = await getPodServer(podId);
   const tokenData = await getOrFetchPodToken(server);
@@ -396,13 +399,31 @@ async function executeFluxQueryOnPod(podId, fluxQuery) {
   const url = `http://${server.host}:8086/api/v2/query?org=pod`;
 
   try {
-    const response = await axios.post(url, fluxQuery, {
-      headers: {
-        Authorization: `Token ${tokenData.token}`,
-        'Content-Type': 'application/vnd.flux',
-        Accept: 'application/csv'
-      },
-      timeout: 15000,
+    let requestBody;
+    const headers = {
+      Authorization: `Token ${tokenData.token}`,
+      Accept: 'application/csv'
+    };
+
+    if (dialect) {
+      headers['Content-Type'] = 'application/json';
+      requestBody = {
+        query: fluxQuery,
+        type: 'flux',
+        dialect: typeof dialect === 'object' ? dialect : {
+          annotations: ['group', 'datatype', 'default'],
+          header: true,
+          delimiter: ','
+        }
+      };
+    } else {
+      headers['Content-Type'] = 'application/vnd.flux';
+      requestBody = fluxQuery;
+    }
+
+    const response = await axios.post(url, requestBody, {
+      headers,
+      timeout: 45000,
       responseType: 'text'
     });
 
@@ -528,14 +549,46 @@ async function getPodSchema(podId, bucketName = 'pod_monitoring', measurement = 
       .filter(Boolean);
   } catch (_) {}
 
+  // 5. Tag Values for 'chair_section'
+  let chairSections = [];
+  try {
+    const fluxChairSections = `
+      import "influxdata/influxdb/schema"
+      schema.tagValues(bucket: "${bucketName}", tag: "chair_section")
+    `;
+    const csvRaw = await executeFluxQueryOnPod(podId, fluxChairSections);
+    chairSections = parseAnnotatedCsv(csvRaw)
+      .map((r) => r._value)
+      .filter(Boolean);
+  } catch (_) {}
+
   return {
     podId,
     bucket: bucketName,
     measurements: Array.from(new Set(measurements)),
     fields: Array.from(new Set(fields)),
     units: Array.from(new Set(units)),
+    chairSections: Array.from(new Set(chairSections)),
     tagKeys: Array.from(new Set(tagKeys))
   };
+}
+
+function formatFluxTimeLiteral(val, isStop = false) {
+  if (!val) return null;
+  const s = String(val).trim();
+  if (!s) return null;
+  if (/^-\d+[smhdwmo]$/i.test(s) || s === 'now()') {
+    return s;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const timeSuffix = isStop ? 'T23:59:59.999Z' : 'T00:00:00.000Z';
+    return new Date(`${s}${timeSuffix}`).toISOString();
+  }
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    return d.toISOString();
+  }
+  return s;
 }
 
 /**
@@ -552,6 +605,8 @@ function buildPodFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
     field = null,
     fields = null,
     unit = null,
+    chair_section = null,
+    chairSection = null,
     tags = {},
     aggregation = 'none',
     aggFn = 'mean',
@@ -563,10 +618,12 @@ function buildPodFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
 
   // Range
   if (customStart) {
-    if (customStop) {
-      lines.push(`  |> range(start: ${customStart}, stop: ${customStop})`);
+    const cStart = formatFluxTimeLiteral(customStart, false);
+    const cStop = customStop ? formatFluxTimeLiteral(customStop, true) : null;
+    if (cStop) {
+      lines.push(`  |> range(start: ${cStart}, stop: ${cStop})`);
     } else {
-      lines.push(`  |> range(start: ${customStart})`);
+      lines.push(`  |> range(start: ${cStart})`);
     }
   } else {
     lines.push(`  |> range(start: ${timeRange || '-1h'})`);
@@ -609,6 +666,12 @@ function buildPodFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
   // Unit
   if (unit && String(unit).trim() !== '' && String(unit).trim() !== 'all') {
     lines.push(`  |> filter(fn: (r) => r["unit"] == "${String(unit).trim()}")`);
+  }
+
+  // Chair Section (power_monitoring mod_chair)
+  const targetChairSection = chair_section || chairSection;
+  if (targetChairSection && String(targetChairSection).trim() !== '' && String(targetChairSection).trim() !== 'all') {
+    lines.push(`  |> filter(fn: (r) => r["chair_section"] == "${String(targetChairSection).trim()}")`);
   }
 
   // Dynamic tags
@@ -691,24 +754,91 @@ async function queryPodData(podId, options = {}) {
 }
 
 /**
- * Export data from POD to CSV or JSON
+ * Convert structured JSON records into InfluxDB Annotated CSV format
+ * Matches official InfluxDB specification:
+ * #group,false,false,true,true,false,false,true,true,...
+ * #datatype,string,long,dateTime:RFC3339,dateTime:RFC3339,dateTime:RFC3339,double,string,string,...
+ * #default,_result,,,,,,,,...
+ * ,result,table,_start,_stop,_time,_value,_field,_measurement,[tags...]
+ */
+function convertRecordsToAnnotatedCsv(records = [], tagKeys = []) {
+  if (!tagKeys || tagKeys.length === 0) {
+    const tagSet = new Set();
+    records.forEach((r) => {
+      Object.keys(r).forEach((k) => {
+        if (!['_time', '_measurement', '_field', '_value', 'table', 'result', '_start', '_stop'].includes(k)) {
+          tagSet.add(k);
+        }
+      });
+    });
+    tagKeys = Array.from(tagSet);
+  }
+
+  const escapeVal = (v) => {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+      return `"${s.replace(/"/g, '""')}"`;
+    }
+    return s;
+  };
+
+  const groupCols = ['#group', 'false', 'false', 'true', 'true', 'false', 'false', 'true', 'true', ...tagKeys.map(() => 'true')];
+  const datatypeCols = ['#datatype', 'string', 'long', 'dateTime:RFC3339', 'dateTime:RFC3339', 'dateTime:RFC3339', 'double', 'string', 'string', ...tagKeys.map(() => 'string')];
+  const defaultCols = ['#default', '_result', ...new Array(groupCols.length - 2).fill('')];
+  const headerCols = ['', 'result', 'table', '_start', '_stop', '_time', '_value', '_field', '_measurement', ...tagKeys];
+
+  const lines = [
+    groupCols.join(','),
+    datatypeCols.join(','),
+    defaultCols.join(','),
+    headerCols.join(',')
+  ];
+
+  for (const r of records) {
+    const row = [
+      '',
+      escapeVal(r.result || ''),
+      escapeVal(r.table !== undefined ? r.table : 0),
+      escapeVal(r._start || ''),
+      escapeVal(r._stop || ''),
+      escapeVal(r._time || ''),
+      escapeVal(r._value !== undefined && r._value !== null ? r._value : ''),
+      escapeVal(r._field || ''),
+      escapeVal(r._measurement || ''),
+      ...tagKeys.map((t) => escapeVal(r[t]))
+    ];
+    lines.push(row.join(','));
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Export data from POD to InfluxDB Annotated CSV or JSON
  */
 async function exportPodData(podId, options = {}, format = 'csv') {
   const server = await getPodServer(podId);
-  const result = await queryPodData(podId, {
-    ...options,
-    limit: options.limit || 50000
-  });
-
-  const records = result.data || [];
   const safePodName = (server.name || `POD_${podId}`).replace(/[^a-zA-Z0-9_-]/g, '_');
   const timestampStr = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
   const fileName = `influx_pod_${safePodName}_${timestampStr}.${format === 'json' ? 'json' : 'csv'}`;
 
+  let fluxQuery = '';
+  if (options.rawFluxQuery && typeof options.rawFluxQuery === 'string' && options.rawFluxQuery.trim()) {
+    fluxQuery = options.rawFluxQuery.trim();
+  } else {
+    fluxQuery = buildPodFluxQuery({
+      ...options,
+      limit: options.limit || 50000
+    }, options.bucket || 'pod_monitoring');
+  }
+
   if (format === 'json') {
+    const csvRaw = await executeFluxQueryOnPod(podId, fluxQuery);
+    const records = parseAnnotatedCsv(csvRaw);
     return {
       fileName,
-      contentType: 'application/json',
+      contentType: 'application/json; charset=utf-8',
       content: JSON.stringify(
         {
           meta: {
@@ -717,7 +847,7 @@ async function exportPodData(podId, options = {}, format = 'csv') {
             host: server.host,
             exportedAt: new Date().toISOString(),
             totalRecords: records.length,
-            fluxQuery: result.fluxQuery
+            fluxQuery
           },
           data: records
         },
@@ -727,46 +857,237 @@ async function exportPodData(podId, options = {}, format = 'csv') {
     };
   }
 
-  // Format as CSV
-  const dynamicTagKeys = new Set();
-  records.forEach((r) => {
-    Object.keys(r).forEach((k) => {
-      if (!['_time', '_measurement', '_field', '_value', 'table'].includes(k)) {
-        dynamicTagKeys.add(k);
-      }
+  // Format as InfluxDB Annotated CSV (#group, #datatype, #default, ...)
+  try {
+    const csvRaw = await executeFluxQueryOnPod(podId, fluxQuery, {
+      annotations: ['group', 'datatype', 'default'],
+      header: true,
+      delimiter: ','
     });
-  });
-  const tagList = Array.from(dynamicTagKeys);
-  const headers = ['time', 'measurement', 'field', 'value', ...tagList];
 
-  const escapeCsv = (str) => {
-    if (str === null || str === undefined) return '';
-    const s = String(str);
-    if (s.includes(',') || s.includes('"') || s.includes('\n')) {
-      return `"${s.replace(/"/g, '""')}"`;
+    if (csvRaw && csvRaw.includes('#datatype')) {
+      return {
+        fileName,
+        contentType: 'text/csv; charset=utf-8',
+        content: csvRaw
+      };
     }
-    return s;
-  };
-
-  const csvLines = [];
-  csvLines.push(headers.join(','));
-
-  for (const r of records) {
-    const row = [
-      escapeCsv(r._time),
-      escapeCsv(r._measurement),
-      escapeCsv(r._field),
-      escapeCsv(r._value),
-      ...tagList.map((tag) => escapeCsv(r[tag]))
-    ];
-    csvLines.push(row.join(','));
+  } catch (err) {
+    console.warn(`[exportPodData] Dialect export failed, falling back to converted annotated CSV:`, err.message);
   }
+
+  // Fallback if raw query dialect was unavailable
+  const result = await queryPodData(podId, {
+    ...options,
+    limit: options.limit || 50000
+  });
+  const fallbackCsv = convertRecordsToAnnotatedCsv(result.data || []);
 
   return {
     fileName,
-    contentType: 'text/csv',
-    content: csvLines.join('\n')
+    contentType: 'text/csv; charset=utf-8',
+    content: fallbackCsv
   };
+}
+
+/**
+ * Execute an export directly on the POD using the Influx CLI (`influx query ... --raw`)
+ * Saves the CSV directly on the POD filesystem (e.g. /home/pod/exports/) and returns file details.
+ */
+async function executePodCliExport(podId, options = {}) {
+  const server = await getPodServer(podId);
+  const { rawFluxQuery, customFilename, bucket = 'pod_monitoring' } = options;
+
+  let fluxQuery = rawFluxQuery;
+  if (!fluxQuery) {
+    fluxQuery = buildPodFluxQuery(options, bucket);
+  }
+
+  // Enforce read-only Flux query guarantee
+  validateReadOnlyFluxQuery(fluxQuery);
+
+  const safeFilename = (customFilename || `pod_${podId}_influx_cli_${Date.now()}.csv`).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const exportDir = '/home/pod/exports';
+  const fullPath = `${exportDir}/${safeFilename}`;
+
+  // Escape query safely for bash single-quote execution (replace ' with '\'')
+  const escapedQuery = fluxQuery.replace(/'/g, "'\\''");
+
+  // Command to create export folder, run influx query with --raw, and get file stats
+  const cliCmd = `mkdir -p ${exportDir} && influx query '${escapedQuery}' --org "pod" --raw > ${fullPath} && ls -lh ${fullPath} && wc -l ${fullPath}`;
+
+  const stdout = await executeSshCommand(server, cliCmd, {
+    timeoutMs: 90000 // 90s for large queries
+  });
+
+  return {
+    success: true,
+    podId: server.id,
+    podName: server.name,
+    host: server.host,
+    filePath: fullPath,
+    fileName: safeFilename,
+    cliCommand: `influx query '${escapedQuery}' --org "pod" --raw > ${fullPath}`,
+    outputSummary: stdout ? stdout.trim() : 'Export selesai'
+  };
+}
+
+/**
+ * Helper to get SSH connection config for server
+ */
+function getSshConfig(server) {
+  let privateKey = null;
+  let password = null;
+  if (server.auth_type === 'key' && server.private_key) {
+    privateKey = decrypt(server.private_key);
+  } else if (server.password) {
+    password = decrypt(server.password);
+  }
+
+  return {
+    host: server.host,
+    port: server.port || 22,
+    username: server.username || 'pod',
+    readyTimeout: 15000,
+    privateKey,
+    password
+  };
+}
+
+/**
+ * Format bytes to human-readable string
+ */
+function formatBytes(bytes, decimals = 1) {
+  if (!+bytes) return '0 B';
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
+/**
+ * List all exported CSV files stored on the POD in /home/pod/exports
+ */
+async function listPodExportFiles(podId) {
+  const server = await getPodServer(podId);
+  const cmd = `mkdir -p /home/pod/exports && stat -c "%n|%s|%y" /home/pod/exports/*.csv 2>/dev/null || true`;
+
+  const stdout = await executeSshCommand(server, cmd, { timeoutMs: 15000 });
+  const lines = (stdout || '').trim().split('\n').filter(Boolean);
+
+  const files = [];
+  for (const line of lines) {
+    const parts = line.split('|');
+    if (parts.length >= 3) {
+      const fullPath = parts[0].trim();
+      const filename = fullPath.split('/').pop();
+      const sizeBytes = parseInt(parts[1].trim(), 10) || 0;
+      const modifiedRaw = parts[2].trim();
+      const modifiedAt = modifiedRaw.split('.')[0] || modifiedRaw;
+
+      files.push({
+        fileName: filename,
+        filePath: fullPath,
+        sizeBytes,
+        sizeHuman: formatBytes(sizeBytes),
+        modifiedAt,
+        scpCommand: `scp ${server.username || 'pod'}@${server.host}:${fullPath} ~/Downloads/`
+      });
+    }
+  }
+
+  // Sort newest first by modifiedAt
+  files.sort((a, b) => new Date(b.modifiedAt) - new Date(a.modifiedAt));
+
+  return files;
+}
+
+/**
+ * Delete an exported file from the POD filesystem
+ */
+async function deletePodExportFile(podId, filename) {
+  const server = await getPodServer(podId);
+  const safeFilename = String(filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
+  if (!safeFilename || safeFilename.includes('..') || !safeFilename.endsWith('.csv')) {
+    throw new Error('Nama file tidak valid.');
+  }
+
+  const fullPath = `/home/pod/exports/${safeFilename}`;
+  await executeSshCommand(server, `rm -f "${fullPath}"`, { timeoutMs: 10000 });
+
+  return { success: true, fileName: safeFilename };
+}
+
+/**
+ * Stream an exported CSV file directly from POD to client browser response
+ */
+async function streamPodExportFileToClient(podId, filename, res) {
+  const server = await getPodServer(podId);
+  const safeFilename = String(filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
+  if (!safeFilename || safeFilename.includes('..') || !safeFilename.endsWith('.csv')) {
+    throw new Error('Nama file tidak valid.');
+  }
+
+  const fullPath = `/home/pod/exports/${safeFilename}`;
+
+  // Check file size
+  let sizeBytes = 0;
+  try {
+    const sizeOut = await executeSshCommand(server, `stat -c "%s" "${fullPath}"`, { timeoutMs: 5000 });
+    sizeBytes = parseInt(sizeOut.trim(), 10) || 0;
+  } catch (_) {}
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
+  if (sizeBytes > 0) {
+    res.setHeader('Content-Length', sizeBytes);
+  }
+
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    const sshConfig = getSshConfig(server);
+
+    let isClosed = false;
+
+    function cleanup() {
+      if (!isClosed) {
+        isClosed = true;
+        try { conn.end(); } catch (_) {}
+      }
+    }
+
+    res.on('close', cleanup);
+    res.on('finish', cleanup);
+
+    conn.on('ready', () => {
+      conn.exec(`cat "${fullPath}"`, (err, stream) => {
+        if (err) {
+          cleanup();
+          return reject(err);
+        }
+
+        stream.on('error', (streamErr) => {
+          cleanup();
+          reject(streamErr);
+        });
+
+        stream.on('close', () => {
+          cleanup();
+          resolve();
+        });
+
+        stream.pipe(res);
+      });
+    });
+
+    conn.on('error', (connErr) => {
+      cleanup();
+      reject(connErr);
+    });
+
+    conn.connect(sshConfig);
+  });
 }
 
 let isTemplatesTableInitialized = false;
@@ -996,6 +1317,10 @@ module.exports = {
   getQueryTemplates,
   createQueryTemplate,
   updateQueryTemplate,
-  deleteQueryTemplate
+  deleteQueryTemplate,
+  executePodCliExport,
+  listPodExportFiles,
+  deletePodExportFile,
+  streamPodExportFileToClient
 };
 

@@ -260,7 +260,7 @@ function parseNumericOrString(val) {
  * Execute raw Flux query via InfluxDB v2 REST API
  * STRICTLY READ-ONLY: Rejects any queries that might modify data
  */
-async function executeFluxQuery(fluxQuery) {
+async function executeFluxQuery(fluxQuery, dialect = null) {
   const config = await getInfluxConfig();
   if (!config.token) {
     throw new Error('InfluxDB Token belum dikonfigurasi.');
@@ -276,12 +276,19 @@ async function executeFluxQuery(fluxQuery) {
 
   const queryUrl = `${config.url}/api/v2/query${config.org ? `?org=${encodeURIComponent(config.org)}` : ''}`;
 
+  const payload = {
+    query: fluxQuery,
+    type: 'flux',
+    ...(dialect ? { dialect: typeof dialect === 'object' ? dialect : {
+      annotations: ['group', 'datatype', 'default'],
+      header: true,
+      delimiter: ','
+    } } : {})
+  };
+
   const response = await axios.post(
     queryUrl,
-    {
-      query: fluxQuery,
-      type: 'flux'
-    },
+    payload,
     {
       headers: {
         Authorization: `Token ${config.token}`,
@@ -293,7 +300,7 @@ async function executeFluxQuery(fluxQuery) {
     }
   );
 
-  return response.data;
+  return response.data || '';
 }
 
 /**
@@ -322,21 +329,45 @@ async function getBucketSchema(bucketName = null, measurement = null) {
   }
 
   // 2. If measurement specified, get field keys and tag keys
-  if (measurement) {
+  let measurementList = [];
+  if (Array.isArray(measurement)) {
+    measurementList = measurement.map(m => String(m).trim()).filter(Boolean);
+  } else if (measurement && typeof measurement === 'string') {
+    measurementList = measurement.split(',').map(m => m.trim()).filter(Boolean);
+  }
+
+  if (measurementList.length > 0) {
     try {
-      const fieldFlux = `
-        import "influxdata/influxdb/schema"
-        schema.measurementFieldKeys(bucket: "${targetBucket}", measurement: "${measurement}")
-      `;
+      let fieldFlux = '';
+      if (measurementList.length === 1) {
+        fieldFlux = `
+          import "influxdata/influxdb/schema"
+          schema.fieldKeys(bucket: "${targetBucket}", predicate: (r) => r._measurement == "${measurementList[0]}")
+        `;
+      } else {
+        const cond = measurementList.map(m => `r._measurement == "${m}"`).join(' or ');
+        fieldFlux = `
+          import "influxdata/influxdb/schema"
+          schema.fieldKeys(bucket: "${targetBucket}", predicate: (r) => ${cond})
+        `;
+      }
       const csvRaw = await executeFluxQuery(fieldFlux);
       fields = parseAnnotatedCsv(csvRaw).map(r => r._value).filter(Boolean);
     } catch (_) {}
 
     try {
-      const tagKeysFlux = `
-        import "influxdata/influxdb/schema"
-        schema.measurementTagKeys(bucket: "${targetBucket}", measurement: "${measurement}")
-      `;
+      let tagKeysFlux = '';
+      if (measurementList.length === 1) {
+        tagKeysFlux = `
+          import "influxdata/influxdb/schema"
+          schema.measurementTagKeys(bucket: "${targetBucket}", measurement: "${measurementList[0]}")
+        `;
+      } else {
+        tagKeysFlux = `
+          import "influxdata/influxdb/schema"
+          schema.tagKeys(bucket: "${targetBucket}")
+        `;
+      }
       const csvRaw = await executeFluxQuery(tagKeysFlux);
       tagKeys = parseAnnotatedCsv(csvRaw)
         .map(r => r._value)
@@ -373,6 +404,24 @@ async function getBucketSchema(bucketName = null, measurement = null) {
  *   |> aggregateWindow(every: ..., fn: mean, createEmpty: false)
  *   |> yield(name: "...")
  */
+function formatFluxTimeLiteral(val, isStop = false) {
+  if (!val) return null;
+  const s = String(val).trim();
+  if (!s) return null;
+  if (/^-\d+[smhdwmo]$/i.test(s) || s === 'now()') {
+    return s;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const timeSuffix = isStop ? 'T23:59:59.999Z' : 'T00:00:00.000Z';
+    return new Date(`${s}${timeSuffix}`).toISOString();
+  }
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    return d.toISOString();
+  }
+  return s;
+}
+
 function buildFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
   const {
     bucket = defaultBucket,
@@ -380,7 +429,9 @@ function buildFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
     customStart = null,
     customStop = null,
     measurement = null,
+    measurements = null,
     field = null,
+    fields = null,
     unit = null,
     tags = {}, // { [tagKey]: tagValue }
     aggregation = 'none', // 'none' | '10s' | '1m' | '5m' | '15m' | '1h'
@@ -393,23 +444,49 @@ function buildFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
 
   // Range
   if (customStart) {
-    if (customStop) {
-      lines.push(`  |> range(start: ${customStart}, stop: ${customStop})`);
+    const cStart = formatFluxTimeLiteral(customStart, false);
+    const cStop = customStop ? formatFluxTimeLiteral(customStop, true) : null;
+    if (cStop) {
+      lines.push(`  |> range(start: ${cStart}, stop: ${cStop})`);
     } else {
-      lines.push(`  |> range(start: ${customStart})`);
+      lines.push(`  |> range(start: ${cStart})`);
     }
   } else {
     lines.push(`  |> range(start: ${timeRange || '-1h'})`);
   }
 
-  // Filter Measurement
-  if (measurement && String(measurement).trim() !== '') {
-    lines.push(`  |> filter(fn: (r) => r["_measurement"] == "${String(measurement).trim()}")`);
+  // Filter Measurement (Supports single string or multiple measurements array)
+  const rawMeasurements = measurements || measurement;
+  const targetMeasurements = Array.isArray(rawMeasurements)
+    ? rawMeasurements
+    : (rawMeasurements ? [rawMeasurements] : []);
+
+  const cleanMeasurements = targetMeasurements
+    .map(m => String(m).trim())
+    .filter(m => m.length > 0);
+
+  if (cleanMeasurements.length === 1) {
+    lines.push(`  |> filter(fn: (r) => r["_measurement"] == "${cleanMeasurements[0]}")`);
+  } else if (cleanMeasurements.length > 1) {
+    const measurementConditions = cleanMeasurements.map(m => `r["_measurement"] == "${m}"`).join(' or ');
+    lines.push(`  |> filter(fn: (r) => ${measurementConditions})`);
   }
 
-  // Filter Field
-  if (field && String(field).trim() !== '') {
-    lines.push(`  |> filter(fn: (r) => r["_field"] == "${String(field).trim()}")`);
+  // Filter Field (Supports single string or multiple fields array)
+  const rawFields = fields || field;
+  const targetFields = Array.isArray(rawFields)
+    ? rawFields
+    : (rawFields ? [rawFields] : []);
+
+  const cleanFields = targetFields
+    .map(f => String(f).trim())
+    .filter(f => f.length > 0);
+
+  if (cleanFields.length === 1) {
+    lines.push(`  |> filter(fn: (r) => r["_field"] == "${cleanFields[0]}")`);
+  } else if (cleanFields.length > 1) {
+    const fieldConditions = cleanFields.map(f => `r["_field"] == "${f}"`).join(' or ');
+    lines.push(`  |> filter(fn: (r) => ${fieldConditions})`);
   }
 
   // Filter Unit (e.g. pod_31)
@@ -438,7 +515,7 @@ function buildFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
 
   // Limit
   if (limit && Number(limit) > 0) {
-    const safeLimit = Math.min(Math.max(Number(limit), 1), 20000);
+    const safeLimit = Math.min(Math.max(Number(limit), 1), 50000);
     lines.push(`  |> limit(n: ${safeLimit})`);
   }
 
@@ -492,19 +569,19 @@ async function queryInfluxData(options = {}) {
 }
 
 /**
- * Format records to CSV string for export download
+ * Convert structured JSON records into InfluxDB Annotated CSV format
+ * Matches official InfluxDB specification:
+ * #group,false,false,true,true,false,false,true,true,...
+ * #datatype,string,long,dateTime:RFC3339,dateTime:RFC3339,dateTime:RFC3339,double,string,string,...
+ * #default,_result,,,,,,,,...
+ * ,result,table,_start,_stop,_time,_value,_field,_measurement,[tags...]
  */
-function convertRecordsToCsv(rows, tagKeys = []) {
-  if (!rows || rows.length === 0) {
-    return '_time,_measurement,_field,_value\n';
-  }
-
-  // Determine all distinct tag keys if not provided
+function convertRecordsToAnnotatedCsv(records = [], tagKeys = []) {
   if (!tagKeys || tagKeys.length === 0) {
     const tagSet = new Set();
-    rows.forEach(r => {
-      Object.keys(r).forEach(k => {
-        if (!['_time', '_measurement', '_field', '_value', 'table'].includes(k)) {
+    records.forEach((r) => {
+      Object.keys(r).forEach((k) => {
+        if (!['_time', '_measurement', '_field', '_value', 'table', 'result', '_start', '_stop'].includes(k)) {
           tagSet.add(k);
         }
       });
@@ -512,34 +589,70 @@ function convertRecordsToCsv(rows, tagKeys = []) {
     tagKeys = Array.from(tagSet);
   }
 
-  const headers = ['_time', '_measurement', '_field', '_value', ...tagKeys];
-  const csvLines = [headers.join(',')];
+  const groupCols = ['#group', 'false', 'false', 'true', 'true', 'false', 'false', 'true', 'true', ...tagKeys.map(() => 'true')];
+  const datatypeCols = ['#datatype', 'string', 'long', 'dateTime:RFC3339', 'dateTime:RFC3339', 'dateTime:RFC3339', 'double', 'string', 'string', ...tagKeys.map(() => 'string')];
+  const defaultCols = ['#default', '_result', ...new Array(groupCols.length - 2).fill('')];
+  const headerCols = ['', 'result', 'table', '_start', '_stop', '_time', '_value', '_field', '_measurement', ...tagKeys];
 
-  for (const r of rows) {
-    const rowValues = [
-      escapeCsvValue(r._time),
-      escapeCsvValue(r._measurement),
-      escapeCsvValue(r._field),
-      escapeCsvValue(r._value)
+  const lines = [
+    groupCols.join(','),
+    datatypeCols.join(','),
+    defaultCols.join(','),
+    headerCols.join(',')
+  ];
+
+  for (const r of records) {
+    const row = [
+      '',
+      escapeCsvValue(r.result || ''),
+      escapeCsvValue(r.table !== undefined ? r.table : 0),
+      escapeCsvValue(r._start || ''),
+      escapeCsvValue(r._stop || ''),
+      escapeCsvValue(r._time || ''),
+      escapeCsvValue(r._value !== undefined && r._value !== null ? r._value : ''),
+      escapeCsvValue(r._field || ''),
+      escapeCsvValue(r._measurement || ''),
+      ...tagKeys.map((t) => escapeCsvValue(r[t]))
     ];
-
-    for (const tag of tagKeys) {
-      rowValues.push(escapeCsvValue(r[tag]));
-    }
-
-    csvLines.push(rowValues.join(','));
+    lines.push(row.join(','));
   }
 
-  return csvLines.join('\n');
+  return lines.join('\n');
 }
 
-function escapeCsvValue(val) {
-  if (val === undefined || val === null) return '';
-  const str = String(val);
-  if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
-    return `"${str.replace(/"/g, '""')}"`;
+const convertRecordsToCsv = convertRecordsToAnnotatedCsv;
+
+/**
+ * Export query results in native InfluxDB Annotated CSV format
+ */
+async function exportAnnotatedCsv(options = {}) {
+  const config = await getInfluxConfig();
+  let fluxQuery = '';
+  if (options.rawFluxQuery && typeof options.rawFluxQuery === 'string' && options.rawFluxQuery.trim()) {
+    fluxQuery = options.rawFluxQuery.trim();
+  } else {
+    fluxQuery = buildFluxQuery({
+      ...options,
+      limit: options.limit || 50000
+    }, options.bucket || config.bucket);
   }
-  return str;
+
+  try {
+    const csvRaw = await executeFluxQuery(fluxQuery, {
+      annotations: ['group', 'datatype', 'default'],
+      header: true,
+      delimiter: ','
+    });
+
+    if (csvRaw && csvRaw.includes('#datatype')) {
+      return csvRaw;
+    }
+  } catch (err) {
+    console.warn('[influxService.exportAnnotatedCsv] Dialect export failed, falling back to converted records:', err.message);
+  }
+
+  const result = await queryInfluxData({ ...options, limit: options.limit || 50000 });
+  return convertRecordsToAnnotatedCsv(result.rows || [], result.tagKeys || []);
 }
 
 module.exports = {
@@ -551,5 +664,7 @@ module.exports = {
   buildFluxQuery,
   executeFluxQuery,
   queryInfluxData,
-  convertRecordsToCsv
+  convertRecordsToCsv,
+  convertRecordsToAnnotatedCsv,
+  exportAnnotatedCsv
 };

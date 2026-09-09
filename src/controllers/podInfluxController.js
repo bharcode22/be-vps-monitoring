@@ -173,6 +173,91 @@ class PodInfluxController {
   }
 
   /**
+   * POST /api/pod-influx/pods/:id/cli-export
+   * Trigger direct Influx CLI export on the POD via SSH
+   */
+  async runCliExportOnPod(req, res) {
+    const { id } = req.params;
+    try {
+      const result = await podInfluxService.executePodCliExport(Number(id), req.body || {});
+      return res.json({
+        success: true,
+        message: 'Ekspor data via Influx CLI di POD berhasil dijalankan.',
+        data: result
+      });
+    } catch (err) {
+      console.error(`[podInfluxController.runCliExportOnPod] Error for POD ${id}:`, err.message);
+      const isForbidden = err.message.includes('Akses Ditolak');
+      return res.status(isForbidden ? 403 : 500).json({
+        success: false,
+        error: err.message
+      });
+    }
+  }
+
+  /**
+   * GET /api/pod-influx/pods/:id/exports
+   * List all exported CSV files stored on the POD
+   */
+  async listExportFiles(req, res) {
+    const { id } = req.params;
+    try {
+      const files = await podInfluxService.listPodExportFiles(Number(id));
+      return res.json({
+        success: true,
+        count: files.length,
+        data: files
+      });
+    } catch (err) {
+      console.error(`[podInfluxController.listExportFiles] Error for POD ${id}:`, err.message);
+      return res.status(500).json({
+        success: false,
+        error: `Gagal memuat daftar berkas ekspor: ${err.message}`
+      });
+    }
+  }
+
+  /**
+   * DELETE /api/pod-influx/pods/:id/exports/:filename
+   * Delete an exported CSV file from the POD
+   */
+  async deleteExportFile(req, res) {
+    const { id, filename } = req.params;
+    try {
+      const result = await podInfluxService.deletePodExportFile(Number(id), filename);
+      return res.json({
+        success: true,
+        message: `Berkas ${result.fileName} berhasil dihapus dari POD.`
+      });
+    } catch (err) {
+      console.error(`[podInfluxController.deleteExportFile] Error for POD ${id}:`, err.message);
+      return res.status(500).json({
+        success: false,
+        error: `Gagal menghapus berkas ekspor: ${err.message}`
+      });
+    }
+  }
+
+  /**
+   * GET /api/pod-influx/pods/:id/exports/:filename/download
+   * Stream download an exported CSV file directly from the POD to the client browser
+   */
+  async downloadExportFile(req, res) {
+    const { id, filename } = req.params;
+    try {
+      await podInfluxService.streamPodExportFileToClient(Number(id), filename, res);
+    } catch (err) {
+      console.error(`[podInfluxController.downloadExportFile] Error for POD ${id}:`, err.message);
+      if (!res.headersSent) {
+        return res.status(500).json({
+          success: false,
+          error: `Gagal mengunduh berkas ekspor: ${err.message}`
+        });
+      }
+    }
+  }
+
+  /**
    * GET /api/pod-influx/templates
    * Get all cross-POD saved query templates
    */
