@@ -471,11 +471,24 @@ async function getPodSchema(podId, bucketName = 'pod_monitoring', measurement = 
 
   // 2. Field Keys
   try {
+    let measurementList = [];
+    if (Array.isArray(measurement)) {
+      measurementList = measurement.map(m => String(m).trim()).filter(Boolean);
+    } else if (measurement && typeof measurement === 'string') {
+      measurementList = measurement.split(',').map(m => m.trim()).filter(Boolean);
+    }
+
     let fluxFields = '';
-    if (measurement && String(measurement).trim()) {
+    if (measurementList.length === 1) {
       fluxFields = `
         import "influxdata/influxdb/schema"
-        schema.fieldKeys(bucket: "${bucketName}", predicate: (r) => r._measurement == "${String(measurement).trim()}")
+        schema.fieldKeys(bucket: "${bucketName}", predicate: (r) => r._measurement == "${measurementList[0]}")
+      `;
+    } else if (measurementList.length > 1) {
+      const cond = measurementList.map(m => `r._measurement == "${m}"`).join(' or ');
+      fluxFields = `
+        import "influxdata/influxdb/schema"
+        schema.fieldKeys(bucket: "${bucketName}", predicate: (r) => ${cond})
       `;
     } else {
       fluxFields = `
@@ -535,7 +548,9 @@ function buildPodFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
     customStart = null,
     customStop = null,
     measurement = null,
+    measurements = null,
     field = null,
+    fields = null,
     unit = null,
     tags = {},
     aggregation = 'none',
@@ -557,14 +572,38 @@ function buildPodFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
     lines.push(`  |> range(start: ${timeRange || '-1h'})`);
   }
 
-  // Measurement
-  if (measurement && String(measurement).trim() !== '') {
-    lines.push(`  |> filter(fn: (r) => r["_measurement"] == "${String(measurement).trim()}")`);
+  // Measurement (Supports single string or multiple measurements array)
+  const rawMeasurements = measurements || measurement;
+  const targetMeasurements = Array.isArray(rawMeasurements)
+    ? rawMeasurements
+    : (rawMeasurements ? [rawMeasurements] : []);
+
+  const cleanMeasurements = targetMeasurements
+    .map(m => String(m).trim())
+    .filter(m => m.length > 0);
+
+  if (cleanMeasurements.length === 1) {
+    lines.push(`  |> filter(fn: (r) => r["_measurement"] == "${cleanMeasurements[0]}")`);
+  } else if (cleanMeasurements.length > 1) {
+    const measurementConditions = cleanMeasurements.map(m => `r["_measurement"] == "${m}"`).join(' or ');
+    lines.push(`  |> filter(fn: (r) => ${measurementConditions})`);
   }
 
-  // Field
-  if (field && String(field).trim() !== '') {
-    lines.push(`  |> filter(fn: (r) => r["_field"] == "${String(field).trim()}")`);
+  // Field (Supports single string or multiple fields array)
+  const rawFields = fields || field;
+  const targetFields = Array.isArray(rawFields)
+    ? rawFields
+    : (rawFields ? [rawFields] : []);
+
+  const cleanFields = targetFields
+    .map(f => String(f).trim())
+    .filter(f => f.length > 0);
+
+  if (cleanFields.length === 1) {
+    lines.push(`  |> filter(fn: (r) => r["_field"] == "${cleanFields[0]}")`);
+  } else if (cleanFields.length > 1) {
+    const fieldConditions = cleanFields.map(f => `r["_field"] == "${f}"`).join(' or ');
+    lines.push(`  |> filter(fn: (r) => ${fieldConditions})`);
   }
 
   // Unit
