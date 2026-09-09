@@ -26,6 +26,8 @@ const podLogsSyncController = require('../controllers/podLogsSyncController');
 const podActivityController = require('../controllers/podActivityController');
 const flowEditorStorageController = require('../controllers/flowEditorStorageController');
 const directS3Controller = require('../controllers/directS3Controller');
+const influxController = require('../controllers/influxController');
+const podInfluxController = require('../controllers/podInfluxController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // 1. Health check, Speedtest & Settings
@@ -312,5 +314,32 @@ router.get('/reports/download/:filename', podReportController.downloadReportHand
 router.get('/reports/list', optionalAuth, podReportController.listReportsHandler);
 router.delete('/reports/:filename', optionalAuth, podReportController.deleteReportHandler);
 
+// InfluxDB Read-Only Explorer & Manager Routes (VPS Contabo Central)
+router.get('/influx/health', optionalAuth, influxController.getHealth);
+router.get('/influx/config', optionalAuth, influxController.getConfig);
+router.post('/influx/config', optionalAuth, influxController.saveConfig);
+router.get('/influx/buckets', optionalAuth, influxController.getBuckets);
+router.get('/influx/schema', optionalAuth, influxController.getSchema);
+router.post('/influx/query', optionalAuth, influxController.queryData);
+router.post('/influx/export', optionalAuth, influxController.exportData);
+router.get('/influx/export', optionalAuth, influxController.exportData);
+
+// Dedicated POD V3 Edge InfluxDB Read-Only Routes
+router.get('/pod-influx/pods', optionalAuth, podInfluxController.getPods);
+router.get('/pod-influx/pods/:id/health', optionalAuth, podInfluxController.getPodHealth);
+router.post('/pod-influx/pods/:id/token/refresh', optionalAuth, podInfluxController.refreshToken);
+router.get('/pod-influx/pods/:id/buckets', optionalAuth, podInfluxController.getBuckets);
+router.get('/pod-influx/pods/:id/schema', optionalAuth, podInfluxController.getSchema);
+router.post('/pod-influx/pods/:id/query', optionalAuth, podInfluxController.queryData);
+router.post('/pod-influx/pods/:id/export', optionalAuth, podInfluxController.exportData);
+router.get('/pod-influx/pods/:id/export', optionalAuth, podInfluxController.exportData);
+
+// Cross-POD Saved Query Templates Routes
+router.get('/pod-influx/templates', optionalAuth, podInfluxController.getTemplates);
+router.post('/pod-influx/templates', optionalAuth, podInfluxController.createTemplate);
+router.put('/pod-influx/templates/:id', optionalAuth, podInfluxController.updateTemplate);
+router.delete('/pod-influx/templates/:id', optionalAuth, podInfluxController.deleteTemplate);
+
 module.exports = router;
+
 
