@@ -1,4 +1,7 @@
+const fs = require('fs');
+const path = require('path');
 const podInfluxService = require('../services/podInfluxService');
+const { podChartPdfService, parseInfluxCsvForReport } = require('../services/report/podChartPdfService');
 
 /**
  * Controller to manage and explore InfluxDB on POD V3 Edge nodes
@@ -342,6 +345,121 @@ class PodInfluxController {
       return res.status(500).json({
         success: false,
         error: err.message
+      });
+    }
+  }
+
+  /**
+   * POST or GET /api/pod-influx/pods/:id/chart-report
+   * Generate landscape 3-page timeseries chart PDF report (PEMF, Temp & Hum, Heartbeat)
+   */
+  async generateChartPdfReport(req, res) {
+    const { id } = req.params;
+    const podId = Number(id);
+    const options = req.method === 'POST' ? req.body : req.query;
+
+    const {
+      date = null,
+      startTime = null,
+      stopTime = null,
+      moduleName = 'Chair',
+      moduleId = String(podId || 502),
+      csvFile = null
+    } = options;
+
+    try {
+      let dataset = null;
+      const targetDate = date || new Date().toISOString().slice(0, 10);
+
+      // 1. If explicit CSV file given, parse directly
+      if (csvFile && typeof csvFile === 'string') {
+        const repoRoot = path.resolve(__dirname, '../../..');
+        const resolvedPath = path.resolve(repoRoot, csvFile);
+        if (fs.existsSync(resolvedPath)) {
+          const content = fs.readFileSync(resolvedPath, 'utf-8');
+          dataset = parseInfluxCsvForReport(content, targetDate);
+        }
+      }
+
+      // 2. Otherwise query Influx on the POD or use active dataset
+      if (!dataset) {
+        const fluxStart = startTime || `${targetDate}T00:00:00Z`;
+        const fluxStop = stopTime || `${targetDate}T23:59:59Z`;
+
+        const queryResult = await podInfluxService.queryPodData(podId, {
+          bucket: options.bucket || 'power_monitoring',
+          measurement: options.measurement || 'mod_chair',
+          range: options.range || null,
+          customStart: fluxStart,
+          customStop: fluxStop,
+          rowLimit: 50000
+        });
+
+        const pemfPoints = [];
+        const tempPoints = [];
+        const humPoints = [];
+        const hbPoints = [];
+
+        if (Array.isArray(queryResult?.data)) {
+          for (const r of queryResult.data) {
+            if (r._value === null || r._value === undefined || isNaN(Number(r._value))) continue;
+            const timeMs = new Date(r._time).getTime();
+            if (isNaN(timeMs)) continue;
+            const val = Number(r._value);
+            const field = r._field || '';
+            const section = r.chair_section || '';
+
+            if ((field === 'current' && section === 'PEMF_CUR') || field === 'pemf_cur' || field === 'set_pemf') {
+              const currentInAmpere = val > 5 ? val / 1000 : val;
+              pemfPoints.push({ time: timeMs, value: currentInAmpere });
+            } else if (field === 'temperature' || field === 'chair_temp') {
+              tempPoints.push({ time: timeMs, value: val });
+            } else if (field === 'humidity' || field === 'chair_hum') {
+              humPoints.push({ time: timeMs, value: val });
+            } else if (field === 'heartbeat' || field === 'hb' || field.includes('heartbeat')) {
+              hbPoints.push({ time: timeMs, value: val });
+            }
+          }
+        }
+
+        const sortFn = (a, b) => a.time - b.time;
+        pemfPoints.sort(sortFn);
+        tempPoints.sort(sortFn);
+        humPoints.sort(sortFn);
+        hbPoints.sort(sortFn);
+
+        dataset = {
+          date: targetDate,
+          pemf: pemfPoints,
+          temp: tempPoints,
+          hum: humPoints,
+          heartbeat: hbPoints
+        };
+      }
+
+      const cleanDate = targetDate.replace(/-/g, '');
+      const fileName = `report_${moduleName.toLowerCase()}_${moduleId}_${cleanDate}.pdf`;
+
+      const pdfBuffer = await podChartPdfService.buildReport({
+        dataset,
+        options: {
+          date: targetDate,
+          moduleName,
+          moduleId,
+          sampling: options.sampling || '1s',
+          timeZone: 'UTC+8'
+        }
+      });
+
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      res.setHeader('Content-Length', pdfBuffer.length);
+      return res.send(pdfBuffer);
+    } catch (err) {
+      console.error(`[podInfluxController.generateChartPdfReport] Error for POD ${id}:`, err.message);
+      return res.status(500).json({
+        success: false,
+        error: `Gagal membuat laporan PDF grafik sensor: ${err.message}`
       });
     }
   }

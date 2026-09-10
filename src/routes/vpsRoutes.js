@@ -333,6 +333,8 @@ router.get('/pod-influx/pods/:id/schema', optionalAuth, podInfluxController.getS
 router.post('/pod-influx/pods/:id/query', optionalAuth, podInfluxController.queryData);
 router.post('/pod-influx/pods/:id/export', optionalAuth, podInfluxController.exportData);
 router.get('/pod-influx/pods/:id/export', optionalAuth, podInfluxController.exportData);
+router.post('/pod-influx/pods/:id/chart-report', optionalAuth, podInfluxController.generateChartPdfReport);
+router.get('/pod-influx/pods/:id/chart-report', optionalAuth, podInfluxController.generateChartPdfReport);
 router.post('/pod-influx/pods/:id/cli-export', optionalAuth, podInfluxController.runCliExportOnPod);
 router.get('/pod-influx/pods/:id/exports', optionalAuth, podInfluxController.listExportFiles);
 router.delete('/pod-influx/pods/:id/exports/:filename', optionalAuth, podInfluxController.deleteExportFile);
