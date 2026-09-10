@@ -392,7 +392,7 @@ class PodInfluxController {
           range: options.range || null,
           customStart: fluxStart,
           customStop: fluxStop,
-          rowLimit: 50000
+          limit: null // Full Dump: Ambil seluruh data tanpa batas 1000 baris
         });
 
         const pemfPoints = [];
