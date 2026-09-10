@@ -102,10 +102,11 @@ class PodInfluxController {
    */
   async getSchema(req, res) {
     const { id } = req.params;
-    const { bucket = 'pod_monitoring', measurement, measurements } = req.query;
+    const { bucket = 'pod_monitoring', buckets, measurement, measurements } = req.query;
 
     try {
-      const schema = await podInfluxService.getPodSchema(Number(id), bucket, measurements || measurement);
+      const targetBuckets = buckets || bucket;
+      const schema = await podInfluxService.getPodSchema(Number(id), targetBuckets, measurements || measurement);
       return res.json({
         success: true,
         data: schema

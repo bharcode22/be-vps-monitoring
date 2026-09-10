@@ -468,9 +468,9 @@ async function getPodBuckets(podId) {
 }
 
 /**
- * Get schema (measurements, field keys, units) for a bucket in a POD
+ * Internal helper to get schema for a single bucket
  */
-async function getPodSchema(podId, bucketName = 'pod_monitoring', measurement = null) {
+async function getSingleBucketSchema(podId, bucketName, measurement = null) {
   let measurements = [];
   let fields = [];
   let units = [];
@@ -487,7 +487,7 @@ async function getPodSchema(podId, bucketName = 'pod_monitoring', measurement = 
       .map((r) => r._value)
       .filter(Boolean);
   } catch (err) {
-    console.warn(`[podInfluxService] Measurements schema failed on POD ${podId}:`, err.message);
+    console.warn(`[podInfluxService] Measurements schema failed on POD ${podId} for bucket ${bucketName}:`, err.message);
   }
 
   // 2. Field Keys
@@ -522,7 +522,7 @@ async function getPodSchema(podId, bucketName = 'pod_monitoring', measurement = 
       .map((r) => r._value)
       .filter(Boolean);
   } catch (err) {
-    console.warn(`[podInfluxService] Fields schema failed on POD ${podId}:`, err.message);
+    console.warn(`[podInfluxService] Fields schema failed on POD ${podId} for bucket ${bucketName}:`, err.message);
   }
 
   // 3. Tag Keys
@@ -563,13 +563,63 @@ async function getPodSchema(podId, bucketName = 'pod_monitoring', measurement = 
   } catch (_) {}
 
   return {
-    podId,
     bucket: bucketName,
     measurements: Array.from(new Set(measurements)),
     fields: Array.from(new Set(fields)),
     units: Array.from(new Set(units)),
     chairSections: Array.from(new Set(chairSections)),
     tagKeys: Array.from(new Set(tagKeys))
+  };
+}
+
+/**
+ * Get schema (measurements, field keys, units) for one or multiple buckets in a POD
+ */
+async function getPodSchema(podId, bucketName = 'pod_monitoring', measurement = null) {
+  let bucketList = [];
+  if (Array.isArray(bucketName)) {
+    bucketList = bucketName.map(b => String(b).trim()).filter(Boolean);
+  } else if (bucketName && typeof bucketName === 'string') {
+    bucketList = bucketName.split(',').map(b => b.trim()).filter(Boolean);
+  }
+  if (bucketList.length === 0) bucketList = ['pod_monitoring'];
+
+  if (bucketList.length === 1) {
+    const single = await getSingleBucketSchema(podId, bucketList[0], measurement);
+    return {
+      podId,
+      ...single
+    };
+  }
+
+  // Multi-bucket schema discovery (concurrent)
+  const results = await Promise.all(
+    bucketList.map(b => getSingleBucketSchema(podId, b, measurement))
+  );
+
+  const combinedMeasurements = new Set();
+  const combinedFields = new Set();
+  const combinedUnits = new Set();
+  const combinedChairSections = new Set();
+  const combinedTagKeys = new Set();
+
+  results.forEach(res => {
+    res.measurements.forEach(m => combinedMeasurements.add(m));
+    res.fields.forEach(f => combinedFields.add(f));
+    res.units.forEach(u => combinedUnits.add(u));
+    res.chairSections.forEach(cs => combinedChairSections.add(cs));
+    res.tagKeys.forEach(t => combinedTagKeys.add(t));
+  });
+
+  return {
+    podId,
+    bucket: bucketList[0],
+    buckets: bucketList,
+    measurements: Array.from(combinedMeasurements),
+    fields: Array.from(combinedFields),
+    units: Array.from(combinedUnits),
+    chairSections: Array.from(combinedChairSections),
+    tagKeys: Array.from(combinedTagKeys)
   };
 }
 
@@ -592,11 +642,10 @@ function formatFluxTimeLiteral(val, isStop = false) {
 }
 
 /**
- * Build clean Flux query matching user requirements
+ * Helper to build single bucket Flux pipeline branch
  */
-function buildPodFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
+function buildFluxBranch(bucketName, options, isSingleBucket = true) {
   const {
-    bucket = defaultBucket,
     timeRange = '-1h',
     customStart = null,
     customStop = null,
@@ -614,7 +663,7 @@ function buildPodFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
   } = options;
 
   const lines = [];
-  lines.push(`from(bucket: "${bucket || defaultBucket}")`);
+  lines.push(`from(bucket: "${bucketName}")`);
 
   // Range
   if (customStart) {
@@ -678,6 +727,7 @@ function buildPodFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
   if (tags && typeof tags === 'object') {
     for (const [k, v] of Object.entries(tags)) {
       if (k === 'unit' && unit) continue;
+      if (k === 'chair_section' && targetChairSection) continue;
       if (v !== undefined && v !== null && String(v).trim() !== '') {
         lines.push(`  |> filter(fn: (r) => r["${k}"] == "${String(v).trim()}")`);
       }
@@ -690,16 +740,76 @@ function buildPodFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
     const safeInterval = validIntervals.includes(aggregation) ? aggregation : '1m';
     const safeFn = ['mean', 'max', 'min', 'last', 'count', 'sum'].includes(aggFn) ? aggFn : 'mean';
     lines.push(`  |> aggregateWindow(every: ${safeInterval}, fn: ${safeFn}, createEmpty: false)`);
-    lines.push(`  |> yield(name: "${safeFn}")`);
+    if (isSingleBucket) {
+      lines.push(`  |> yield(name: "${safeFn}")`);
+    }
   }
 
-  // Limit
-  if (limit && Number(limit) > 0) {
-    const safeLimit = Math.min(Math.max(Number(limit), 1), 25000);
+  // When multi-bucket union is active, explicitly inject bucket column so CSV and data preview identify the origin bucket
+  if (!isSingleBucket) {
+    lines.push(`  |> set(key: "bucket", value: "${bucketName}")`);
+  }
+
+  // Limit on single bucket (omitted if null or 0 for full dump)
+  if (isSingleBucket && limit && Number(limit) > 0) {
+    const safeLimit = Math.max(Number(limit), 1);
     lines.push(`  |> limit(n: ${safeLimit})`);
   }
 
   return lines.join('\n');
+}
+
+/**
+ * Build dynamic Flux query for POD (Read-Only)
+ * Supports single bucket or multi-bucket union
+ */
+function buildPodFluxQuery(options = {}, defaultBucket = 'pod_monitoring') {
+  const { buckets, bucket, limit } = options;
+
+  let bucketList = [];
+  if (Array.isArray(buckets)) {
+    bucketList = buckets.map(b => String(b).trim()).filter(Boolean);
+  } else if (typeof buckets === 'string' && buckets.trim()) {
+    bucketList = buckets.split(',').map(b => b.trim()).filter(Boolean);
+  } else if (bucket) {
+    bucketList = typeof bucket === 'string' && bucket.includes(',')
+      ? bucket.split(',').map(b => b.trim()).filter(Boolean)
+      : [String(bucket).trim()];
+  } else {
+    bucketList = [defaultBucket];
+  }
+
+  if (bucketList.length <= 1) {
+    return buildFluxBranch(bucketList[0] || defaultBucket, options, true);
+  }
+
+  // Multiple buckets -> Flux union
+  const branchLines = [];
+  const tableVars = [];
+
+  bucketList.forEach((bName, idx) => {
+    const varName = `b${idx}`;
+    tableVars.push(varName);
+    const branchFlux = buildFluxBranch(bName, options, false);
+    branchLines.push(`${varName} = ${branchFlux}`);
+  });
+
+  const unionBlock = `union(tables: [${tableVars.join(', ')}])`;
+  branchLines.push(unionBlock);
+
+  // If aggregation was requested on multi-bucket, yield it at the end
+  if (options.aggregation && options.aggregation !== 'none') {
+    const safeFn = ['mean', 'max', 'min', 'last', 'count', 'sum'].includes(options.aggFn) ? options.aggFn : 'mean';
+    branchLines.push(`  |> yield(name: "${safeFn}")`);
+  }
+
+  // Apply limit after union if specified (omitted if null or 0 for full dump)
+  if (limit && Number(limit) > 0) {
+    const safeLimit = Math.max(Number(limit), 1);
+    branchLines.push(`  |> limit(n: ${safeLimit})`);
+  }
+
+  return branchLines.join('\n\n');
 }
 
 /**
@@ -827,9 +937,11 @@ async function exportPodData(podId, options = {}, format = 'csv') {
   if (options.rawFluxQuery && typeof options.rawFluxQuery === 'string' && options.rawFluxQuery.trim()) {
     fluxQuery = options.rawFluxQuery.trim();
   } else {
+    // When exporting, if options.limit is null, undefined, 0, or 'all', do a Full Dump (no limit)
+    const exportLimit = (options.limit && Number(options.limit) > 0) ? Number(options.limit) : null;
     fluxQuery = buildPodFluxQuery({
       ...options,
-      limit: options.limit || 50000
+      limit: exportLimit
     }, options.bucket || 'pod_monitoring');
   }
 
@@ -877,9 +989,10 @@ async function exportPodData(podId, options = {}, format = 'csv') {
   }
 
   // Fallback if raw query dialect was unavailable
+  const fallbackLimit = (options.limit && Number(options.limit) > 0) ? Number(options.limit) : null;
   const result = await queryPodData(podId, {
     ...options,
-    limit: options.limit || 50000
+    limit: fallbackLimit
   });
   const fallbackCsv = convertRecordsToAnnotatedCsv(result.data || []);
 
