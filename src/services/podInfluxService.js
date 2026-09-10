@@ -631,12 +631,16 @@ function formatFluxTimeLiteral(val, isStop = false) {
     return s;
   }
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    const timeSuffix = isStop ? 'T23:59:59.999Z' : 'T00:00:00.000Z';
-    return new Date(`${s}${timeSuffix}`).toISOString();
+    return `${s}${isStop ? 'T23:59:59Z' : 'T00:00:00Z'}`;
   }
-  const d = new Date(s);
-  if (!isNaN(d.getTime())) {
-    return d.toISOString();
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) {
+    return `${s}${isStop ? ':59Z' : ':00Z'}`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) {
+    return `${s}Z`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z?$/i.test(s)) {
+    return s.endsWith('Z') ? s : `${s}Z`;
   }
   return s;
 }
