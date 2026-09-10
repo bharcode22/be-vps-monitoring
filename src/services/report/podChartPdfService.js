@@ -214,11 +214,20 @@ class PodChartPdfService {
       }
     }
 
-    if (!isFinite(minTime) || !isFinite(maxTime) || minTime === maxTime) {
-      // Default fallback: 12:00 to 14:00 on the selected date
-      const baseMs = new Date(`${dateStr}T04:00:00Z`).getTime();
-      minTime = baseMs + 14 * 60000;       // 12:14 UTC+8
-      maxTime = baseMs + 119 * 60000;      // 13:59 UTC+8
+    if (isFinite(minTime) && isFinite(maxTime) && minTime === maxTime) {
+      minTime -= 30 * 60000;
+      maxTime += 30 * 60000;
+    }
+
+    if (!isFinite(minTime) || !isFinite(maxTime)) {
+      if (options?.startTime && options?.stopTime) {
+        minTime = new Date(options.startTime).getTime();
+        maxTime = new Date(options.stopTime).getTime();
+      } else {
+        const baseMs = new Date(`${dateStr}T00:00:00Z`).getTime();
+        minTime = isNaN(baseMs) ? Date.now() - 24 * 3600000 : baseMs;
+        maxTime = isNaN(baseMs) ? Date.now() : baseMs + 24 * 3600000;
+      }
     }
 
     // 2. Initialize PDFKit document in 1008x504 Landscape (0 margin prevents unwanted auto page break)
@@ -412,15 +421,13 @@ class PodChartPdfService {
 
       // Angled time label (-45 deg)
       const timeStr = formatTimeUtc8(curTime);
+      doc.save();
+      doc.rotate(-45, { origin: [x, box.y + box.h + 6] });
       doc.fontSize(8.5)
         .font('Helvetica')
         .fillColor(THEME.axisText);
       const textW = doc.widthOfString(timeStr);
-
-      doc.save();
-      doc.translate(x, box.y + box.h + 8);
-      doc.rotate(-45);
-      doc.text(timeStr, -textW, 0, { lineBreak: false });
+      doc.text(timeStr, x - textW - 2, box.y + box.h + 8, { lineBreak: false });
       doc.restore();
     }
 
