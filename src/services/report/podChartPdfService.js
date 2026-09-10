@@ -62,11 +62,15 @@ function downsampleTimeseries(points, maxPoints = 1200) {
 }
 
 /**
- * Format timestamp into HH:MM string in UTC+8
+ * Format timestamp into HH:MM string (supports Original Influx Time UTC or UTC+8)
  */
-function formatTimeUtc8(timestampMs) {
+function formatTime(timestampMs, isOriginal = true) {
   const d = new Date(timestampMs);
-  // Shift to UTC+8 (+8 hours = 28800000 ms)
+  if (isOriginal) {
+    const h = String(d.getUTCHours()).padStart(2, '0');
+    const m = String(d.getUTCMinutes()).padStart(2, '0');
+    return `${h}:${m}`;
+  }
   const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
   const utc8 = new Date(utc + (8 * 3600000));
   const h = String(utc8.getHours()).padStart(2, '0');
@@ -189,7 +193,8 @@ class PodChartPdfService {
     const moduleName = options.moduleName || 'Chair';
     const moduleId = options.moduleId || '502';
     const sampling = options.sampling || '1s';
-    const timezone = options.timeZone || 'UTC+8';
+    const timezone = options.timeZone || 'Original';
+    const isOriginal = timezone.toLowerCase() !== 'utc+8';
 
     // Downsample for crisp and fast vector rendering
     const pemfData = downsampleTimeseries(dataset.pemf || []);
@@ -202,15 +207,26 @@ class PodChartPdfService {
     const tempStats = computeStats(dataset.temp || []);
     const humStats = computeStats(dataset.hum || []);
 
-    // Determine overall time boundary (minTime to maxTime across available metrics)
+    // Determine overall time boundary (prefer requested startTime / stopTime so X-axis matches requested window)
     let minTime = Infinity;
     let maxTime = -Infinity;
 
-    const allCollections = [dataset.pemf, dataset.temp, dataset.hum, dataset.heartbeat];
-    for (const col of allCollections) {
-      if (col && col.length > 0) {
-        if (col[0].time < minTime) minTime = col[0].time;
-        if (col[col.length - 1].time > maxTime) maxTime = col[col.length - 1].time;
+    if (options?.startTime && options?.stopTime) {
+      const sMs = new Date(options.startTime).getTime();
+      const eMs = new Date(options.stopTime).getTime();
+      if (!isNaN(sMs) && !isNaN(eMs) && sMs < eMs) {
+        minTime = sMs;
+        maxTime = eMs;
+      }
+    }
+
+    if (!isFinite(minTime) || !isFinite(maxTime)) {
+      const allCollections = [dataset.pemf, dataset.temp, dataset.hum, dataset.heartbeat];
+      for (const col of allCollections) {
+        if (col && col.length > 0) {
+          if (col[0].time < minTime) minTime = col[0].time;
+          if (col[col.length - 1].time > maxTime) maxTime = col[col.length - 1].time;
+        }
       }
     }
 
@@ -220,14 +236,9 @@ class PodChartPdfService {
     }
 
     if (!isFinite(minTime) || !isFinite(maxTime)) {
-      if (options?.startTime && options?.stopTime) {
-        minTime = new Date(options.startTime).getTime();
-        maxTime = new Date(options.stopTime).getTime();
-      } else {
-        const baseMs = new Date(`${dateStr}T00:00:00Z`).getTime();
-        minTime = isNaN(baseMs) ? Date.now() - 24 * 3600000 : baseMs;
-        maxTime = isNaN(baseMs) ? Date.now() : baseMs + 24 * 3600000;
-      }
+      const baseMs = new Date(`${dateStr}T00:00:00Z`).getTime();
+      minTime = isNaN(baseMs) ? Date.now() - 24 * 3600000 : baseMs;
+      maxTime = isNaN(baseMs) ? Date.now() : baseMs + 24 * 3600000;
     }
 
     // 2. Initialize PDFKit document in 1008x504 Landscape (0 margin prevents unwanted auto page break)
@@ -256,17 +267,27 @@ class PodChartPdfService {
       h: 360
     };
 
-    const footerText = `Date: ${dateStr} | Module: ${moduleName} (ID${moduleId}) | Sampling: ${sampling} | ${timezone}`;
+    const tzDisplay = isOriginal ? 'Original Time' : timezone;
+    const footerText = `Date: ${dateStr} | Module: ${moduleName} (ID${moduleId}) | Sampling: ${sampling} | ${tzDisplay}`;
 
     // ==========================================
-    // PAGE 1: Chair — PEMF Current
+    // PAGE 1: Chair — Current
     // ==========================================
     doc.addPage();
+    const isAmperes = pemfStats.max <= 5;
+    const currentBadge = isAmperes
+      ? `Min: ${pemfStats.min.toFixed(3)} A | Avg: ${pemfStats.avg.toFixed(3)} A | Max: ${pemfStats.max.toFixed(3)} A`
+      : `Min: ${pemfStats.min.toFixed(2)} | Avg: ${pemfStats.avg.toFixed(2)} | Max: ${pemfStats.max.toFixed(2)}`;
+
     this.renderHeader(doc, {
-      title: `${moduleName} — PEMF Current`,
-      badgeText: `Min: ${pemfStats.min.toFixed(3)} A | Avg: ${pemfStats.avg.toFixed(3)} A | Max: ${pemfStats.max.toFixed(3)} A`,
+      title: `${moduleName} — Current`,
+      badgeText: pemfData.length > 0 ? currentBadge : null,
       badgeBg: THEME.pemfBadge
     });
+
+    const pemfYMax = isAmperes
+      ? Math.max(1.0, Math.ceil(pemfStats.max * 1.25 * 10) / 10)
+      : Math.max(1.0, Math.ceil(pemfStats.max * 1.15));
 
     this.renderSingleAxisChart(doc, {
       box: chartBox,
@@ -274,11 +295,12 @@ class PodChartPdfService {
       maxTime,
       data: pemfData,
       yMin: 0.0,
-      yMax: Math.max(1.0, Math.ceil(pemfStats.max * 1.25 * 10) / 10),
+      yMax: pemfYMax,
       yTicks: 5,
-      yLabel: 'Current (A)',
+      yLabel: isAmperes ? 'Current (A)' : 'Current',
       lineColor: THEME.pemfLine,
-      decimals: 1
+      decimals: isAmperes ? 1 : 0,
+      isOriginal
     });
 
     this.renderFooter(doc, footerText);
@@ -308,7 +330,8 @@ class PodChartPdfService {
       rightLabel: 'Humidity (%RH)',
       rightColor: THEME.humLine,
       rightYMin: 0,
-      rightYMax: Math.max(20, Math.ceil(humStats.max * 1.25 / 5) * 5)
+      rightYMax: Math.max(20, Math.ceil(humStats.max * 1.25 / 5) * 5),
+      isOriginal
     });
 
     this.renderFooter(doc, footerText);
@@ -317,9 +340,40 @@ class PodChartPdfService {
     // PAGE 3: Chair (502) — Heartbeat
     // ==========================================
     doc.addPage();
+
+    // Compute Heartbeat stats & dynamic domain
+    let hbYMin = 0;
+    let hbYMax = 100;
+    let hbBadge = null;
+
+    if (hbData.length > 0) {
+      const hbVals = hbData.map(d => Number(d.value)).filter(v => !isNaN(v));
+      if (hbVals.length > 0) {
+        const minV = Math.min(...hbVals);
+        const maxV = Math.max(...hbVals);
+        
+        if (minV === maxV) {
+          if (minV === 0) {
+            hbYMin = -0.2;
+            hbYMax = 1.0;
+            hbBadge = `Heartbeat: Standby / 0 (${hbData.length} Points)`;
+          } else {
+            hbYMin = Math.max(0, Math.floor(minV * 0.85));
+            hbYMax = Math.ceil(maxV * 1.15);
+            hbBadge = `Heartbeat: Nilai ${minV} (${hbData.length} Points)`;
+          }
+        } else {
+          const span = maxV - minV;
+          hbYMin = Math.max(0, Math.floor(minV - span * 0.1));
+          hbYMax = Math.ceil(maxV + span * 0.1);
+          hbBadge = `Heartbeat: Min ${minV} | Max ${maxV} (${hbData.length} Points)`;
+        }
+      }
+    }
+
     this.renderHeader(doc, {
       title: `${moduleName} (${moduleId}) — Heartbeat`,
-      badgeText: hbData.length > 0 ? `Heartbeat Points: ${hbData.length}` : null,
+      badgeText: hbBadge,
       badgeBg: THEME.heartbeatBadge
     });
 
@@ -328,13 +382,14 @@ class PodChartPdfService {
       minTime,
       maxTime,
       data: hbData,
-      yMin: 0,
-      yMax: 100,
+      yMin: hbYMin,
+      yMax: hbYMax,
       yTicks: 5,
-      yLabel: 'Heartbeat Count',
+      yLabel: 'Heartbeat Count / Status',
       lineColor: THEME.heartbeatLine,
-      decimals: 0,
-      emptyMessage: 'No heartbeat data available'
+      decimals: hbYMin < 0 ? 1 : 0,
+      emptyMessage: 'No heartbeat data available',
+      isOriginal
     });
 
     this.renderFooter(doc, footerText);
@@ -403,7 +458,7 @@ class PodChartPdfService {
   /**
    * Render X-Axis Time Ticks and Centered Label
    */
-  renderXAxis(doc, box, minTime, maxTime) {
+  renderXAxis(doc, box, minTime, maxTime, isOriginal = true) {
     const tickCount = 8;
     const timeSpan = maxTime - minTime;
     const step = timeSpan / (tickCount - 1);
@@ -420,7 +475,7 @@ class PodChartPdfService {
         .stroke();
 
       // Angled time label (-45 deg)
-      const timeStr = formatTimeUtc8(curTime);
+      const timeStr = formatTime(curTime, isOriginal);
       doc.save();
       doc.rotate(-45, { origin: [x, box.y + box.h + 6] });
       doc.fontSize(8.5)
@@ -435,7 +490,7 @@ class PodChartPdfService {
     doc.fontSize(9.5)
       .font('Helvetica')
       .fillColor(THEME.axisLabel)
-      .text('Time (HH:MM) UTC+8', box.x, box.y + box.h + 34, {
+      .text(isOriginal ? 'Time (HH:MM)' : 'Time (HH:MM) UTC+8', box.x, box.y + box.h + 34, {
         width: box.w,
         align: 'center'
       });
@@ -455,7 +510,8 @@ class PodChartPdfService {
     yLabel,
     lineColor,
     decimals = 1,
-    emptyMessage = null
+    emptyMessage = null,
+    isOriginal = true
   }) {
     // 1. Chart Frame & Grid Lines
     doc.rect(box.x, box.y, box.w, box.h)
@@ -509,7 +565,7 @@ class PodChartPdfService {
     }
 
     // 2. X Axis
-    this.renderXAxis(doc, box, minTime, maxTime);
+    this.renderXAxis(doc, box, minTime, maxTime, isOriginal);
 
     // 3. Render Data Line or Empty State
     if (!data || data.length === 0) {
@@ -568,7 +624,8 @@ class PodChartPdfService {
     rightLabel,
     rightColor,
     rightYMin = 0,
-    rightYMax = 20
+    rightYMax = 20,
+    isOriginal = true
   }) {
     // 1. Chart Frame
     doc.rect(box.x, box.y, box.w, box.h)
@@ -643,11 +700,20 @@ class PodChartPdfService {
     doc.fontSize(8.5).font('Helvetica-Bold').fillColor(THEME.titleText).text('Humidity (%RH)', legend2X + 22, legendY);
 
     // 3. X Axis
-    this.renderXAxis(doc, box, minTime, maxTime);
+    this.renderXAxis(doc, box, minTime, maxTime, isOriginal);
 
-    // 4. Render Lines (Clipped)
+    // Render empty state if both datasets are empty
+    if ((!leftData || leftData.length === 0) && (!rightData || rightData.length === 0)) {
+      doc.fontSize(12)
+        .font('Helvetica')
+        .fillColor(THEME.footerText)
+        .text('No temperature or humidity data available', box.x, box.y + box.h / 2 - 8, {
+          width: box.w,
+          align: 'center'
+        });
+    }
+
     const timeSpan = maxTime - minTime || 1;
-
     doc.save();
     doc.rect(box.x, box.y, box.w, box.h).clip();
 

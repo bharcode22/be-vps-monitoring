@@ -634,7 +634,10 @@ function formatFluxTimeLiteral(val, isStop = false) {
     return `${s}${isStop ? 'T23:59:59Z' : 'T00:00:00Z'}`;
   }
   if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) {
-    return `${s}${isStop ? ':59Z' : ':00Z'}`;
+    if (isStop && s.endsWith(':59')) {
+      return `${s}:59Z`;
+    }
+    return `${s}:00Z`;
   }
   if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) {
     return `${s}Z`;
@@ -743,6 +746,9 @@ function buildFluxBranch(bucketName, options, isSingleBucket = true) {
     const validIntervals = ['10s', '30s', '1m', '5m', '10m', '15m', '30m', '1h'];
     const safeInterval = validIntervals.includes(aggregation) ? aggregation : '1m';
     const safeFn = ['mean', 'max', 'min', 'last', 'count', 'sum'].includes(aggFn) ? aggFn : 'mean';
+    if (['mean', 'sum'].includes(safeFn)) {
+      lines.push(`  |> toFloat()`);
+    }
     lines.push(`  |> aggregateWindow(every: ${safeInterval}, fn: ${safeFn}, createEmpty: false)`);
     if (isSingleBucket) {
       lines.push(`  |> yield(name: "${safeFn}")`);

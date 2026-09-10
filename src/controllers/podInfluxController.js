@@ -364,7 +364,8 @@ class PodInfluxController {
       stopTime = null,
       moduleName = 'Chair',
       moduleId = String(podId || 502),
-      csvFile = null
+      csvFile = null,
+      clientData = null
     } = options;
 
     try {
@@ -381,75 +382,102 @@ class PodInfluxController {
         }
       }
 
-      // 2. Otherwise query Influx on the POD or use active dataset
+      // 2. Obtain records either from clientData (frontend memory) or Influx query
       if (!dataset) {
+        let records = null;
+        // Strip |> limit(...) so the report covers the full time range without truncation
         let fluxQuery = options.rawFluxQuery;
+        if (fluxQuery) {
+          fluxQuery = fluxQuery
+            .split('\n')
+            .filter(line => !line.trim().startsWith('|> limit('))
+            .join('\n');
+        }
 
-        if (!fluxQuery) {
-          const rangeClause = options.range
-            ? `|> range(start: ${options.range})`
-            : `|> range(start: ${startTime || targetDate + 'T00:00:00Z'}, stop: ${stopTime || targetDate + 'T23:59:59Z'})`;
+        // Only use clientData if it is NOT truncated by a preview limit
+        const clientDataIsTruncated = Array.isArray(clientData) && clientData.length > 0 && options.rawFluxQuery && options.rawFluxQuery.includes('limit(');
 
-          fluxQuery = `b0 = from(bucket: "pod_monitoring")
+        if (Array.isArray(clientData) && clientData.length > 0 && !clientDataIsTruncated) {
+          records = clientData;
+        } else {
+          if (!fluxQuery) {
+            const rangeClause = options.range
+              ? `|> range(start: ${options.range})`
+              : `|> range(start: ${startTime || targetDate + 'T00:00:00Z'}, stop: ${stopTime || targetDate + 'T23:59:59Z'})`;
+
+            fluxQuery = `b0 = from(bucket: "pod_monitoring")
   ${rangeClause}
-  |> filter(fn: (r) => r["_measurement"] == "mod_chair" or r["_measurement"] == "hb_module")
+  |> filter(fn: (r) => r["_measurement"] == "mod_chair" or r["_measurement"] == "hb_module" or r["_measurement"] == "heartbeat")
   |> filter(fn: (r) => r["_field"] == "temperature" or r["_field"] == "humidity" or r["_field"] == "current" or r["_field"] == "chair_temp" or r["_field"] == "chair_hum" or r["_field"] == "set_pemf" or r["_field"] =~ /^hb/)
   |> set(key: "bucket", value: "pod_monitoring")
 b1 = from(bucket: "power_monitoring")
   ${rangeClause}
-  |> filter(fn: (r) => r["_measurement"] == "mod_chair" or r["_measurement"] == "hb_module")
+  |> filter(fn: (r) => r["_measurement"] == "mod_chair" or r["_measurement"] == "hb_module" or r["_measurement"] == "heartbeat")
   |> filter(fn: (r) => r["_field"] == "temperature" or r["_field"] == "humidity" or r["_field"] == "current" or r["_field"] == "chair_temp" or r["_field"] == "chair_hum" or r["_field"] == "set_pemf" or r["_field"] =~ /^hb/)
   |> set(key: "bucket", value: "power_monitoring")
 union(tables: [b0, b1])`;
-        } else {
-          // If custom rawFluxQuery has |> limit(n: 1000) or similar, remove it for full report dump
-          fluxQuery = fluxQuery.replace(/\|\s*>\s*limit\s*\([^)]*\)/gi, '');
+          }
+
+          const queryResult = await podInfluxService.queryPodData(podId, {
+            rawFluxQuery: fluxQuery,
+            limit: 0
+          });
+          records = Array.isArray(queryResult?.data) ? queryResult.data : [];
         }
 
-        const queryResult = await podInfluxService.queryPodData(podId, {
-          rawFluxQuery: fluxQuery
-        });
+        const rawPemf = [];
+        const rawTemp = [];
+        const rawHum = [];
+        const rawHb = [];
 
-        const pemfPoints = [];
-        const tempPoints = [];
-        const humPoints = [];
-        const hbPoints = [];
-
-        if (Array.isArray(queryResult?.data)) {
-          for (const r of queryResult.data) {
+        if (Array.isArray(records)) {
+          for (const r of records) {
             if (r._value === null || r._value === undefined || isNaN(Number(r._value))) continue;
             const timeMs = new Date(r._time).getTime();
             if (isNaN(timeMs)) continue;
             const val = Number(r._value);
-            const field = r._field || '';
-            const section = r.chair_section || '';
+            const field = String(r._field || '').toLowerCase();
+            const section = String(r.chair_section || '').toUpperCase();
+            const measurement = String(r._measurement || '').toLowerCase();
 
-            // PEMF Current: field current with section PEMF_CUR or current (if no section/all) or set_pemf
-            if ((field === 'current' && (section === 'PEMF_CUR' || !section || section === 'all')) || field === 'pemf_cur' || field === 'set_pemf') {
-              const currentInAmpere = val > 5 ? val / 1000 : val;
-              pemfPoints.push({ time: timeMs, value: currentInAmpere });
-            } else if (field === 'temperature' || field === 'chair_temp') {
-              tempPoints.push({ time: timeMs, value: val });
-            } else if (field === 'humidity' || field === 'chair_hum') {
-              humPoints.push({ time: timeMs, value: val });
-            } else if (field === 'heartbeat' || field === 'hb' || field.startsWith('hb') || field.includes('heartbeat')) {
-              hbPoints.push({ time: timeMs, value: val });
+            // Current: matches 'current', 'pemf_cur', 'set_pemf' (keep original value matching frontend)
+            if (field.includes('current') || field === 'pemf_cur' || field === 'set_pemf') {
+              rawPemf.push({ time: timeMs, value: val, section });
+            } else if (field.includes('temp') || field.includes('suhu') || field === 'chair_temp') {
+              rawTemp.push({ time: timeMs, value: val });
+            } else if (field.includes('hum') || field.includes('kelembaban') || field === 'chair_hum') {
+              rawHum.push({ time: timeMs, value: val });
+            } else if (field.includes('heartbeat') || field.includes('hb') || field.startsWith('hb') || measurement === 'heartbeat') {
+              rawHb.push({ time: timeMs, value: val });
             }
           }
         }
 
+        // Use all matching current points (preserving original values and chair_sections)
+        const pemfPoints = rawPemf;
+
         const sortFn = (a, b) => a.time - b.time;
         pemfPoints.sort(sortFn);
-        tempPoints.sort(sortFn);
-        humPoints.sort(sortFn);
-        hbPoints.sort(sortFn);
+        rawTemp.sort(sortFn);
+        rawHum.sort(sortFn);
+        rawHb.sort(sortFn);
+
+        // Effective date display
+        let effectiveDate = targetDate;
+        if (startTime && stopTime) {
+          const sDate = startTime.slice(0, 10);
+          const eDate = stopTime.slice(0, 10);
+          effectiveDate = sDate === eDate ? sDate : `${sDate} s/d ${eDate}`;
+        } else if (records[0]?._time) {
+          effectiveDate = records[0]._time.slice(0, 10);
+        }
 
         dataset = {
-          date: targetDate,
+          date: effectiveDate,
           pemf: pemfPoints,
-          temp: tempPoints,
-          hum: humPoints,
-          heartbeat: hbPoints
+          temp: rawTemp,
+          hum: rawHum,
+          heartbeat: rawHb
         };
       }
 
@@ -459,11 +487,13 @@ union(tables: [b0, b1])`;
       const pdfBuffer = await podChartPdfService.buildReport({
         dataset,
         options: {
-          date: targetDate,
+          date: dataset?.date || targetDate,
+          startTime,
+          stopTime,
           moduleName,
           moduleId,
           sampling: options.sampling || '1s',
-          timeZone: 'UTC+8'
+          timeZone: options.timeZone || 'Original'
         }
       });
 
