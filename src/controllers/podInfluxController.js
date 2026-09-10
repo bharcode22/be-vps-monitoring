@@ -383,16 +383,31 @@ class PodInfluxController {
 
       // 2. Otherwise query Influx on the POD or use active dataset
       if (!dataset) {
-        const fluxStart = startTime || `${targetDate}T00:00:00Z`;
-        const fluxStop = stopTime || `${targetDate}T23:59:59Z`;
+        let fluxQuery = options.rawFluxQuery;
+
+        if (!fluxQuery) {
+          const rangeClause = options.range
+            ? `|> range(start: ${options.range})`
+            : `|> range(start: ${startTime || targetDate + 'T00:00:00Z'}, stop: ${stopTime || targetDate + 'T23:59:59Z'})`;
+
+          fluxQuery = `b0 = from(bucket: "pod_monitoring")
+  ${rangeClause}
+  |> filter(fn: (r) => r["_measurement"] == "mod_chair" or r["_measurement"] == "hb_module")
+  |> filter(fn: (r) => r["_field"] == "temperature" or r["_field"] == "humidity" or r["_field"] == "current" or r["_field"] == "chair_temp" or r["_field"] == "chair_hum" or r["_field"] == "set_pemf" or r["_field"] =~ /^hb/)
+  |> set(key: "bucket", value: "pod_monitoring")
+b1 = from(bucket: "power_monitoring")
+  ${rangeClause}
+  |> filter(fn: (r) => r["_measurement"] == "mod_chair" or r["_measurement"] == "hb_module")
+  |> filter(fn: (r) => r["_field"] == "temperature" or r["_field"] == "humidity" or r["_field"] == "current" or r["_field"] == "chair_temp" or r["_field"] == "chair_hum" or r["_field"] == "set_pemf" or r["_field"] =~ /^hb/)
+  |> set(key: "bucket", value: "power_monitoring")
+union(tables: [b0, b1])`;
+        } else {
+          // If custom rawFluxQuery has |> limit(n: 1000) or similar, remove it for full report dump
+          fluxQuery = fluxQuery.replace(/\|\s*>\s*limit\s*\([^)]*\)/gi, '');
+        }
 
         const queryResult = await podInfluxService.queryPodData(podId, {
-          bucket: options.bucket || 'power_monitoring',
-          measurement: options.measurement || 'mod_chair',
-          range: options.range || null,
-          customStart: fluxStart,
-          customStop: fluxStop,
-          limit: null // Full Dump: Ambil seluruh data tanpa batas 1000 baris
+          rawFluxQuery: fluxQuery
         });
 
         const pemfPoints = [];
@@ -409,14 +424,15 @@ class PodInfluxController {
             const field = r._field || '';
             const section = r.chair_section || '';
 
-            if ((field === 'current' && section === 'PEMF_CUR') || field === 'pemf_cur' || field === 'set_pemf') {
+            // PEMF Current: field current with section PEMF_CUR or current (if no section/all) or set_pemf
+            if ((field === 'current' && (section === 'PEMF_CUR' || !section || section === 'all')) || field === 'pemf_cur' || field === 'set_pemf') {
               const currentInAmpere = val > 5 ? val / 1000 : val;
               pemfPoints.push({ time: timeMs, value: currentInAmpere });
             } else if (field === 'temperature' || field === 'chair_temp') {
               tempPoints.push({ time: timeMs, value: val });
             } else if (field === 'humidity' || field === 'chair_hum') {
               humPoints.push({ time: timeMs, value: val });
-            } else if (field === 'heartbeat' || field === 'hb' || field.includes('heartbeat')) {
+            } else if (field === 'heartbeat' || field === 'hb' || field.startsWith('hb') || field.includes('heartbeat')) {
               hbPoints.push({ time: timeMs, value: val });
             }
           }

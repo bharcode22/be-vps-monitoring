@@ -142,7 +142,7 @@ function parseInfluxCsvForReport(csvContent, filterDate = null) {
     }
 
     // PEMF Current: field current with chair_section PEMF_CUR or field set_pemf / pemf_cur
-    if ((field === 'current' && section === 'PEMF_CUR') || field === 'pemf_cur' || field === 'set_pemf') {
+    if ((field === 'current' && (section === 'PEMF_CUR' || !section || section === 'all')) || field === 'pemf_cur' || field === 'set_pemf') {
       // Auto-scale from mA to A if values are in mA (> 5)
       const currentInAmpere = val > 5 ? val / 1000 : val;
       pemfPoints.push({ time: timeMs, value: currentInAmpere });
@@ -150,7 +150,7 @@ function parseInfluxCsvForReport(csvContent, filterDate = null) {
       tempPoints.push({ time: timeMs, value: val });
     } else if (field === 'humidity' || field === 'chair_hum') {
       humPoints.push({ time: timeMs, value: val });
-    } else if (field === 'heartbeat' || field === 'hb' || field.includes('heartbeat')) {
+    } else if (field === 'heartbeat' || field === 'hb' || field.startsWith('hb') || field.includes('heartbeat')) {
       hbPoints.push({ time: timeMs, value: val });
     }
   }
@@ -410,23 +410,25 @@ class PodChartPdfService {
         .strokeColor(THEME.border)
         .stroke();
 
-      // Angled time label (-40 deg)
+      // Angled time label (-45 deg)
       const timeStr = formatTimeUtc8(curTime);
-      doc.save();
-      doc.translate(x, box.y + box.h + 6);
-      doc.rotate(-40);
       doc.fontSize(8.5)
         .font('Helvetica')
-        .fillColor(THEME.axisText)
-        .text(timeStr, -22, 0, { align: 'right' });
+        .fillColor(THEME.axisText);
+      const textW = doc.widthOfString(timeStr);
+
+      doc.save();
+      doc.translate(x, box.y + box.h + 8);
+      doc.rotate(-45);
+      doc.text(timeStr, -textW, 0, { lineBreak: false });
       doc.restore();
     }
 
     // Centered X axis label
-    doc.fontSize(9)
+    doc.fontSize(9.5)
       .font('Helvetica')
       .fillColor(THEME.axisLabel)
-      .text('Time (HH:MM) UTC+8', box.x, box.y + box.h + 26, {
+      .text('Time (HH:MM) UTC+8', box.x, box.y + box.h + 34, {
         width: box.w,
         align: 'center'
       });
