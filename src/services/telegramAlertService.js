@@ -436,21 +436,26 @@ async function sendRecoveredHeartbeatAlert(alertData) {
 
   const config = getTelegramAlertConfig();
   if (!config.enabled) {
+    console.log(`[Telegram] Alert RECOVERED untuk Pod ${alertData.serverId} Modul ${alertData.moduleId} dilewati (Telegram Alert DISABLED di config).`);
     return { sent: false, reason: 'TELEGRAM_ALERT_DISABLED' };
   }
   if (config.alertOnlyDead && !config.notifyRecoveredContinue && !config.notifyRecoveredRestart && !config.notifyRecoveredJump) {
+    console.log(`[Telegram] Alert RECOVERED untuk Pod ${alertData.serverId} Modul ${alertData.moduleId} dilewati (alertOnlyDead=true dan semua flag pemulihan false).`);
     return { sent: false, reason: 'ALERT_ONLY_DEAD_CONFIGURED' };
   }
 
   const recoveryType = alertData.recoveryType || 'BERLANJUT';
 
   if (recoveryType === 'BERLANJUT' && config.notifyRecoveredContinue === false) {
+    console.log(`[Telegram] Alert RECOVERED BERLANJUT dilewati karena notifyRecoveredContinue=false.`);
     return { sent: false, reason: 'NOTIFY_CONTINUE_DISABLED' };
   }
   if (recoveryType === 'RESTART' && config.notifyRecoveredRestart === false) {
+    console.log(`[Telegram] Alert RECOVERED RESTART dilewati karena notifyRecoveredRestart=false.`);
     return { sent: false, reason: 'NOTIFY_RESTART_DISABLED' };
   }
   if (recoveryType === 'LOMPAT' && config.notifyRecoveredJump === false) {
+    console.log(`[Telegram] Alert RECOVERED LOMPAT dilewati karena notifyRecoveredJump=false.`);
     return { sent: false, reason: 'NOTIFY_JUMP_DISABLED' };
   }
 

@@ -120,32 +120,18 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
   const deadSinceTs = prevRecord?.deadSinceTs || prevRecord?.lastSeenAt || now;
   const deadSinceHb = prevRecord?.deadSinceHb !== undefined ? prevRecord.deadSinceHb : prevRecord?.hb;
 
-  // Anti-Flapping Protection:
-  // Heartbeat is considered genuinely advancing if:
-  // 1) Current value is a valid positive number (> 0)
-  // 2) Counter has moved (different from previous record)
-  const isAdvancing = currentHbNum !== null && currentHbNum > 0 && (prevHbNum === null || currentHbNum !== prevHbNum);
-
-  // Track consecutive healthy, advancing ticks
-  let consecutiveHealthyTicks = prevRecord?.consecutiveHealthyTicks || 0;
-  if (isAdvancing && !isFrozen) {
-    consecutiveHealthyTicks++;
-  } else {
-    consecutiveHealthyTicks = 0;
-  }
-
-  // Module is confirmed recovered only if advancing, not frozen, and has at least 2 consecutive ticks
-  // (Prevents sporadic dummy packets like #0 every 60s from tricking watchdog into RECOVERED state)
-  const isConfirmedRecovered = wasDead && isAdvancing && !isFrozen && consecutiveHealthyTicks >= 2;
+  // Recovery Condition from DEAD:
+  // When a module that was DEAD sends a valid positive heartbeat (> 0), it is immediately confirmed recovered.
+  // Dummy #0 packets are ignored.
+  const hasValidHeartbeat = currentHbNum !== null && currentHbNum > 0;
+  const isConfirmedRecovered = wasDead && hasValidHeartbeat;
 
   // Determine isDead state:
-  // If previously dead, remain dead until confirmed recovered (>= 2 consecutive healthy ticks)
   let isDead = false;
   if (wasDead) {
     if (isConfirmedRecovered) {
       isDead = false;
     } else {
-      // First recovering tick or dummy packets arriving while DEAD: module remains DEAD until confirmed!
       isDead = true;
     }
   }
@@ -175,6 +161,8 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
     } else if (recoveryType === 'LOMPAT') {
       recoveryMsg = `Modul ID ${moduleId} (${moduleName}) pulih dan MELOMPAT (+${hbDiff} detak) setelah downtime ${downtimeSeconds}s.`;
     }
+
+    console.log(`[Watchdog] 🟢 Modul ${moduleId} (${moduleName}) pada ${sName} PULIH (${recoveryType})! Downtime: ${downtimeSeconds}s. Counter: ${beforeHb} ➔ ${afterHb}`);
 
     logIncidentAlert({
       serverId,
@@ -257,7 +245,6 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
     totalPackets: (prevRecord?.totalPackets || 0) + 1,
     deadAlertSent,
     frozenAlertSent,
-    consecutiveHealthyTicks,
     lastAlertAt: prevRecord?.lastAlertAt || 0,
     values
   };
@@ -379,8 +366,8 @@ async function logIncidentAlert(alert) {
   try {
     await pool.query(`
       INSERT INTO pod_heartbeat_alerts 
-        (server_id, server_name, module_id, module_name, alert_type, message, last_hb, duration_seconds, root_cause, diagnostic_hint, ping_ms)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        (server_id, server_name, module_id, module_name, alert_type, message, last_hb, duration_seconds, root_cause, diagnostic_hint, ping_ms, recovery_type, before_hb, hb_diff)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
     `, [
       alert.serverId,
       alert.serverName,
@@ -392,7 +379,10 @@ async function logIncidentAlert(alert) {
       alert.durationSeconds || 0,
       rootCauseCategory,
       diagnosticHint,
-      pingMs
+      pingMs,
+      alert.recoveryType || null,
+      alert.beforeHb || null,
+      alert.hbDiff || null
     ]);
   } catch (_) { }
 
@@ -459,27 +449,30 @@ function queueRecoveredTelegramAlert(alert) {
     batch.modules.push(modItem);
   }
 
-  if (batch.timer) clearTimeout(batch.timer);
+  // Fixed 1000ms grouping window (does not postpone if already scheduled)
+  if (!batch.timer) {
+    batch.timer = setTimeout(async () => {
+      const current = recoveryBatchMap.get(serverId);
+      recoveryBatchMap.delete(serverId);
+      if (!current || current.modules.length === 0) return;
 
-  batch.timer = setTimeout(async () => {
-    const current = recoveryBatchMap.get(serverId);
-    recoveryBatchMap.delete(serverId);
-    if (!current || current.modules.length === 0) return;
-
-    try {
-      if (current.modules.length === 1) {
-        await sendRecoveredHeartbeatAlert(current.modules[0]);
-      } else {
-        await sendBatchRecoveredHeartbeatAlert({
-          serverId,
-          serverName: current.serverName,
-          modules: current.modules
-        });
+      try {
+        if (current.modules.length === 1) {
+          console.log(`[Watchdog] 📤 Mengirim alert Telegram RECOVERED untuk Pod ${serverId} Modul ${current.modules[0].moduleId}...`);
+          await sendRecoveredHeartbeatAlert(current.modules[0]);
+        } else {
+          console.log(`[Watchdog] 📤 Mengirim alert Telegram Batch RECOVERED untuk Pod ${serverId} (${current.modules.length} modul)...`);
+          await sendBatchRecoveredHeartbeatAlert({
+            serverId,
+            serverName: current.serverName,
+            modules: current.modules
+          });
+        }
+      } catch (err) {
+        console.warn('[Watchdog] Gagal mengirim batch/recovered alert Telegram:', err.message);
       }
-    } catch (err) {
-      console.warn('[Watchdog] Gagal mengirim batch/recovered alert Telegram:', err.message);
-    }
-  }, RECOVERY_BATCH_WINDOW_MS);
+    }, 1000);
+  }
 }
 
 /**
@@ -509,7 +502,6 @@ function runWatchdogCheck() {
         record.isDead = true;
         record.isFrozen = false;
         record.frozenAlertSent = false;
-        record.consecutiveHealthyTicks = 0;
         record.deadSinceTs = record.lastSeenAt || (now - elapsedSec * 1000);
         record.deadSinceHb = record.hb;
         newlyDeadModules.push({ moduleId, modName, record, elapsedSec });
@@ -518,7 +510,6 @@ function runWatchdogCheck() {
       else if (!record.isDead && !record.frozenAlertSent && hbElapsedSec !== null && hbElapsedSec >= thresholds.frozenSec) {
         record.isFrozen = true;
         record.frozenAlertSent = true;
-        record.consecutiveHealthyTicks = 0;
         logIncidentAlert({
           serverId,
           serverName,
