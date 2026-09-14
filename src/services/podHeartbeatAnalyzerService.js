@@ -2,12 +2,12 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { dbAsync, pool } = require('./db');
+const axios = require('axios');
+const { queryPodEvents } = require('./influxEventWriter');
 const {
   getPodDir,
   formatLocalDate,
   APP_TIMEZONE,
-  getPodEventsLogPath,
-  getPodHeartbeatsLogPath,
   getRecentFleetIncidents,
   registerPodName
 } = require('./podStorageService');
@@ -189,41 +189,63 @@ function readTicksFromFile(filePath, modFilter = null, startMs = null, endMs = n
  */
 async function loadTicksForWindow(podId, moduleId, targetDate, startMs, endMs, serverName = null) {
   const modIdNum = Number(moduleId);
-  const podDir = getPodDir(podId, serverName);
-  const dateDir = path.join(podDir, targetDate);
-
-  const filePromises = [];
-
-  // Check specific module heartbeat file: hb_[moduleId]_[date].jsonl
-  // NOTE: We do NOT load current_[moduleId]_[date].jsonl here. Current files contain electrical
-  // sensor readings (PEMF_CUR, EE_12V, etc.) without an 'hb' field, which breaks deltaHb computation.
-  if (fs.existsSync(dateDir) && fs.statSync(dateDir).isDirectory()) {
-    const hbFile = path.join(dateDir, `hb_${modIdNum}_${targetDate}.jsonl`);
-    if (fs.existsSync(hbFile)) {
-      filePromises.push(readTicksFromFile(hbFile, modIdNum, startMs, endMs));
-    }
-  }
-
-  // Legacy fallback file
-  const legacyFile = getPodHeartbeatsLogPath(podId, targetDate, modIdNum, serverName);
-  if (filePromises.length === 0 && fs.existsSync(legacyFile) && !fs.statSync(legacyFile).isDirectory()) {
-    filePromises.push(readTicksFromFile(legacyFile, modIdNum, startMs, endMs));
-  }
-
   let ticks = [];
-  if (filePromises.length > 0) {
-    const results = await Promise.all(filePromises);
-    ticks = results.flat();
-  }
 
-  // Prioritize ticks that actually have the 'hb' counter if available
-  const ticksWithHb = ticks.filter(t => t.hb !== undefined && t.hb !== null);
-  const candidateTicks = ticksWithHb.length > 0 ? ticksWithHb : ticks;
+  // Query InfluxDB pod_monitoring bucket (strictly READ-ONLY)
+  try {
+    const startIso = new Date(startMs).toISOString();
+    const stopIso = new Date(endMs).toISOString();
+    const flux = `
+from(bucket: "${process.env.INFLUX_DEFAULT_BUCKET || 'pod_monitoring'}")
+  |> range(start: ${startIso}, stop: ${stopIso})
+  |> filter(fn: (r) => (r["unit"] == "pod_${podId}" or r["unit"] == "POD_${podId}") and (r["_field"] == "hb502" or r["_field"] == "heartbeat"))
+  |> sort(columns: ["_time"], desc: false)
+  |> limit(n: 5000)
+`;
+    const queryUrl = `${(process.env.INFLUX_URL || 'http://10.20.10.3:8086').replace(/\/+$/, '')}/api/v2/query?org=${encodeURIComponent(process.env.INFLUX_ORG || 'pod')}`;
+    const res = await axios.post(queryUrl, flux, {
+      headers: {
+        'Authorization': `Token ${process.env.INFLUX_TOKEN || 'vV_n_nxn30wFNrhTuXtQo2lJTxnVqmAxXC0QHEvh8gMt2lOJJ5yMzQe7jWRdAAhiNzIxYkCaGXH_6c14wNX4Ew=='}`,
+        'Content-Type': 'application/vnd.flux',
+        'Accept': 'application/csv'
+      },
+      timeout: 10000
+    });
+
+    const lines = (res.data || '').split(/\r?\n/);
+    let headers = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const cols = trimmed.split(',');
+      if (headers.length === 0 || cols.includes('_value') || cols.includes('_time')) {
+        if (cols.includes('_value') || cols.includes('_time')) {
+          headers = cols;
+          continue;
+        }
+      }
+      if (headers.length === 0) continue;
+      const row = {};
+      for (let i = 0; i < headers.length; i++) row[headers[i]] = cols[i];
+      if (row._time && row._value !== undefined && row._value !== '') {
+        const ts = new Date(row._time).getTime();
+        ticks.push({
+          ts,
+          date: row._time,
+          modId: modIdNum,
+          hb: Number(row._value),
+          payload: null
+        });
+      }
+    }
+  } catch (influxErr) {
+    console.warn('[Analyzer] Influx query ticks warning:', influxErr.message);
+  }
 
   // De-duplicate ticks by ts & hb & modId
   const seen = new Set();
   const deduped = [];
-  for (const t of candidateTicks) {
+  for (const t of ticks) {
     const key = `${t.ts}_${t.hb}_${t.modId}`;
     if (!seen.has(key)) {
       seen.add(key);
@@ -260,30 +282,41 @@ async function loadTicksForWindow(podId, moduleId, targetDate, startMs, endMs, s
 }
 
 /**
- * Load events / incidents for pod & module in the target window
+ * Load events / incidents for pod & module in the target window from InfluxDB pod_logs_bhar
  */
 async function loadIncidentsForWindow(podId, moduleId, targetDate, startMs, endMs) {
   const incidents = [];
 
-  // 1. Read from daily events JSONL file
-  const eventsFile = getPodEventsLogPath(podId, targetDate);
-  if (fs.existsSync(eventsFile)) {
-    try {
-      const fileStream = fs.createReadStream(eventsFile, { encoding: 'utf8' });
-      const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
-      for await (const line of rl) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const ev = JSON.parse(trimmed);
-          if (ev.moduleId !== null && ev.moduleId !== undefined && Number(ev.moduleId) !== Number(moduleId)) continue;
-          if (startMs !== null && ev.timestamp < startMs) continue;
-          if (endMs !== null && ev.timestamp > endMs) continue;
-          incidents.push(ev);
-        } catch (_) { }
-      }
-    } catch (_) { }
-  }
+  // 1. Read from InfluxDB pod_logs_bhar
+  try {
+    const startIso = new Date(startMs).toISOString();
+    const stopIso = new Date(endMs).toISOString();
+    const evs = await queryPodEvents({
+      podId,
+      start: startIso,
+      stop: stopIso,
+      limit: 100
+    });
+    for (const ev of evs) {
+      if (moduleId && ev.moduleId && Number(ev.moduleId) !== Number(moduleId)) continue;
+      incidents.push({
+        id: ev.id,
+        podId: ev.podId,
+        podName: ev.podName,
+        moduleId: ev.moduleId,
+        moduleName: ev.moduleName,
+        eventType: ev.eventType,
+        message: ev.message,
+        lastHb: ev.lastHb,
+        downtimeSeconds: ev.downtimeSeconds,
+        rootCauseCategory: ev.rootCauseCategory,
+        diagnosticHint: ev.diagnosticHint,
+        pingMs: ev.pingMs,
+        timestamp: new Date(ev.time).getTime(),
+        isoTime: ev.time
+      });
+    }
+  } catch (_) { }
 
   // 2. Query Postgres/SQLite pod_heartbeat_alerts table as backup
   try {

@@ -276,8 +276,14 @@ async function executeFluxQuery(fluxQuery, dialect = null) {
 
   const queryUrl = `${config.url}/api/v2/query${config.org ? `?org=${encodeURIComponent(config.org)}` : ''}`;
 
+  // Prepend dashboard variable 'v' defaults if user query references v.timeRangeStart / v.timeRangeStop
+  let finalQuery = fluxQuery;
+  if ((finalQuery.includes('v.timeRangeStart') || finalQuery.includes('v.timeRangeStop')) && !finalQuery.includes('v =') && !finalQuery.includes('v=')) {
+    finalQuery = `v = {timeRangeStart: -1h, timeRangeStop: now()}\n${finalQuery}`;
+  }
+
   const payload = {
-    query: fluxQuery,
+    query: finalQuery,
     type: 'flux',
     ...(dialect ? { dialect: typeof dialect === 'object' ? dialect : {
       annotations: ['group', 'datatype', 'default'],
@@ -375,22 +381,30 @@ async function getBucketSchema(bucketName = null, measurement = null) {
     } catch (_) {}
   }
 
-  // 3. Get distinct unit tag values (e.g. pod_31, pod_14)
-  try {
-    const unitFlux = `
-      import "influxdata/influxdb/schema"
-      schema.tagValues(bucket: "${targetBucket}", tag: "unit")
-    `;
-    const csvRaw = await executeFluxQuery(unitFlux);
-    units = parseAnnotatedCsv(csvRaw).map(r => r._value).filter(Boolean);
-  } catch (_) {}
+  // 4. Get distinct tag values for discovered tag keys (e.g. module_id, pod_name, unit, etc.)
+  const tagValues = {};
+  const tagsToDiscover = Array.from(new Set([...tagKeys, 'unit', 'module_id', 'pod_name', 'event_type', 'root_cause'])).slice(0, 8);
+  for (const tagKey of tagsToDiscover) {
+    try {
+      const tvFlux = `
+        import "influxdata/influxdb/schema"
+        schema.tagValues(bucket: "${targetBucket}", tag: "${tagKey}")
+      `;
+      const csvRaw = await executeFluxQuery(tvFlux);
+      const vals = parseAnnotatedCsv(csvRaw).map(r => String(r._value)).filter(Boolean);
+      if (vals.length > 0) {
+        tagValues[tagKey] = vals;
+      }
+    } catch (_) {}
+  }
 
   return {
     bucket: targetBucket,
     measurements: Array.from(new Set(measurements)),
     fields: Array.from(new Set(fields)),
     units: Array.from(new Set(units)),
-    tagKeys: Array.from(new Set(tagKeys))
+    tagKeys: Array.from(new Set(tagKeys)),
+    tagValues
   };
 }
 

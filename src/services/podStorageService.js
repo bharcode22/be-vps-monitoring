@@ -3,6 +3,12 @@ const path = require('path');
 const readline = require('readline');
 const { dbAsync } = require('./db');
 const { getModuleNameById } = require('./podHeartbeatConfigService');
+const {
+  writePodEvent,
+  writePodHeartbeatTick,
+  writePodState,
+  queryPodEvents: queryPodEventsFromInflux
+} = require('./influxEventWriter');
 
 // Base directory for pod-centric storage
 const BASE_STORAGE_DIR = path.join(__dirname, '../data/pod_storage');
@@ -23,6 +29,9 @@ const activeHbStreamMap = new Map();
 
 // Memory cache for pod server name mapping: Map<podId, serverName>
 const podNameCache = new Map();
+
+// Memory cache for latest pod state snapshots (No disk writes)
+const podStateMemoryCache = new Map();
 
 // Local timezone configuration for human-readable timestamps.
 // Fallback to 'Asia/Makassar' (UTC+8) if running in UTC (such as default Docker alpine containers).
@@ -161,7 +170,7 @@ function getPodDir(podId, explicitName = null) {
               }
               return path.join(PODS_DIR, folder);
             }
-          } catch (_) {}
+          } catch (_) { }
         }
       }
 
@@ -180,7 +189,7 @@ function getPodDir(podId, explicitName = null) {
           return path.join(PODS_DIR, folder);
         }
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   // 3. For new writes, if sanitized name is known, use sanitized name directory (e.g. POD_36)
@@ -393,7 +402,7 @@ function recordRawHeartbeatTick({ podId, serverName = null, moduleId, hb, port =
 
   // Check if packet contains current telemetry (e.g. { id: 502, name: "PEMF_CUR", current: 0 })
   const hasCurrent = (payloadObj && payloadObj.current !== undefined && payloadObj.current !== null) ||
-                     (extraFields && extraFields.current !== undefined && extraFields.current !== null);
+    (extraFields && extraFields.current !== undefined && extraFields.current !== null);
 
   const rawTick = {
     ts: now,
@@ -416,20 +425,19 @@ function recordRawHeartbeatTick({ podId, serverName = null, moduleId, hb, port =
     buf.pop();
   }
 
-  // 2. High-performance non-blocking append to module .jsonl file:
-  // - current_[moduleId]_[date].jsonl if hasCurrent
-  // - hb_[moduleId]_[date].jsonl if !hasCurrent
+  // 2. Stream heartbeat tick to InfluxDB bucket pod_logs_bhar (measurement: pod_heartbeat_logs)
+  // Local disk writing is 100% disabled (Opsi B).
   try {
-    const jsonLine = JSON.stringify(rawTick) + '\n';
-    const modStream = hasCurrent
-      ? getCurrentModuleWriteStream(podId, moduleId, dateStr, serverName)
-      : getHbModuleWriteStream(podId, moduleId, dateStr, serverName);
-    if (modStream && modStream.writable) {
-      modStream.write(jsonLine);
-    }
-  } catch (err) {
-    console.warn(`⚠️ Error streaming raw heartbeat tick for POD ${podId}:`, err.message);
-  }
+    writePodHeartbeatTick({
+      podId: Number(podId),
+      serverName,
+      moduleId: Number(moduleId),
+      hb: hb !== null && hb !== undefined && !isNaN(Number(hb)) ? Number(hb) : null,
+      port: port || null,
+      payload: payloadObj,
+      timestamp: now
+    });
+  } catch (_) { }
 
   return rawTick;
 }
@@ -453,8 +461,6 @@ function recordPodEvent(eventObj) {
 
   const dateStr = formatLocalDate(now);
   const localDateTimeStr = formatLocalDateTime(now);
-  const { dateDir } = ensurePodDateDir(eventObj.podId, dateStr, eventObj.podName);
-  const filePath = path.join(dateDir, `events_${dateStr}.jsonl`);
 
   const entry = {
     id: `evt_${now}_${Math.random().toString(36).slice(2, 6)}`,
@@ -481,19 +487,19 @@ function recordPodEvent(eventObj) {
     recentFleetEvents.pop();
   }
 
-  // 2. Append asynchronously to pod's daily .jsonl file
-  const jsonLine = JSON.stringify(entry) + '\n';
-  fs.appendFile(filePath, jsonLine, 'utf8', (err) => {
-    if (err) {
-      console.warn(`⚠️ Error appending pod event log for POD ${eventObj.podId}:`, err.message);
-    }
-  });
+  // 2. Local filesystem write is disabled (Opsi B: 100% disk space saved).
+  // 3. Exclusively write event log to InfluxDB bucket (pod_logs_bhar)
+  try {
+    writePodEvent(entry);
+  } catch (influxErr) {
+    console.warn(`⚠️ Error sending pod event to InfluxDB:`, influxErr.message);
+  }
 
   return entry;
 }
 
 /**
- * Save / update latest state snapshot for a specific pod in state.json
+ * Save / update latest state snapshot for a specific pod (Stored in memory cache, zero disk writes)
  */
 function savePodState(podId, stateData) {
   if (!podId || !stateData) return;
@@ -501,43 +507,28 @@ function savePodState(podId, stateData) {
     if (stateData.name) {
       registerPodName(podId, stateData.name);
     }
-    const { podDir } = ensurePodDir(podId, stateData.name);
-    const stateFile = path.join(podDir, 'state.json');
     const content = {
       podId: Number(podId),
       updatedAt: new Date().toISOString(),
       ...stateData
     };
-    fs.writeFileSync(stateFile, JSON.stringify(content, null, 2), 'utf8');
+    podStateMemoryCache.set(Number(podId), content);
+
+    // Stream state snapshot to InfluxDB bucket pod_logs_bhar (measurement: pod_state)
+    try {
+      writePodState(Number(podId), content);
+    } catch (_) { }
   } catch (err) {
     console.warn(`⚠️ Error saving state for POD ${podId}:`, err.message);
   }
 }
 
 /**
- * Read latest state snapshot for a specific pod
+ * Read latest state snapshot for a specific pod (From memory cache)
  */
 function getPodState(podId) {
   if (!podId) return null;
-  try {
-    const { podDir } = ensurePodDir(podId);
-    const stateFile = path.join(podDir, 'state.json');
-    if (fs.existsSync(stateFile)) {
-      const raw = fs.readFileSync(stateFile, 'utf8');
-      return JSON.parse(raw);
-    }
-    // Fallback legacy folder
-    if (exactLegacyFolderExists(`pod_${podId}`)) {
-      const legacyState = path.join(PODS_DIR, `pod_${podId}`, 'state.json');
-      if (fs.existsSync(legacyState)) {
-        const raw = fs.readFileSync(legacyState, 'utf8');
-        return JSON.parse(raw);
-      }
-    }
-  } catch (err) {
-    console.warn(`⚠️ Error reading state for POD ${podId}:`, err.message);
-  }
-  return null;
+  return podStateMemoryCache.get(Number(podId)) || null;
 }
 
 /**
@@ -1293,9 +1284,9 @@ async function getPodFileMetrics(podId, fileName, dateStr = null, interval = '5m
 
     const channels = Array.from(channelSet);
     const unit = detectedType === 'channel_current' ? 'mA'
-               : detectedType === 'pob_raw' ? 'Raw'
-               : detectedType === 'multimetric' ? 'V/A/W'
-               : 'Ticks';
+      : detectedType === 'pob_raw' ? 'Raw'
+        : detectedType === 'multimetric' ? 'V/A/W'
+          : 'Ticks';
 
     return {
       success: true,
@@ -1610,7 +1601,7 @@ async function getPodLiveBackfillPoints({
           if (tick.ts) {
             rawTicks.push(tick);
           }
-        } catch (_) {}
+        } catch (_) { }
       });
       rl.on('close', resolve);
       rl.on('error', resolve);
@@ -1754,5 +1745,6 @@ module.exports = {
   getRecentFleetIncidents,
   saveFleetSnapshot,
   getFleetSnapshot,
-  autoPurgeOldLogs
+  autoPurgeOldLogs,
+  queryPodEventsFromInflux
 };

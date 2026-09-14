@@ -19,21 +19,22 @@ const {
 } = require('../services/podHeartbeatConfigService');
 
 const {
-  getPodEvents,
   getPodState,
-  getPodHeartbeatStream,
-  getPodLogDates,
-  getPodStorageFilesList,
-  getPodFileRawContent,
-  getPodFileMetrics,
-  getPodLiveBackfillPoints,
-  streamPodHeartbeatsDownload,
-  getRecentFleetIncidents,
-  getPodEventsLogPath,
-  getPodHeartbeatsLogPath,
   hasPodName,
   registerPodName
 } = require('../services/podStorageService');
+
+const {
+  getPodLogDatesFromInflux,
+  getPodStreamsListFromInflux,
+  getPodStreamContentFromInflux,
+  getPodStreamMetricsFromInflux,
+  getRecentFleetIncidentsFromInflux,
+  downloadPodTelemetryFromInflux,
+  getPodLiveBackfillFromInflux,
+  getPodHeartbeatsFromInflux
+} = require('../services/podInfluxRecordService');
+const { queryPodEvents } = require('../services/influxEventWriter');
 
 const {
   analyzeHeartbeatPattern,
@@ -238,23 +239,34 @@ async function resetHeartbeatThresholds(req, res) {
 
 /**
  * GET /api/pod-activity/pods/:id/events
- * Get daily events list for a specific pod
+ * Get events list for a specific pod from InfluxDB pod_logs_bhar
  */
 async function getPodEventsHandler(req, res) {
   try {
     const podId = parseInt(req.params.id, 10);
     const dateStr = req.query.date || null;
-    const events = getPodEvents(podId, dateStr);
+    let startIso = null;
+    let stopIso = null;
+    if (dateStr) {
+      startIso = `${dateStr}T00:00:00+08:00`;
+      stopIso = `${dateStr}T23:59:59+08:00`;
+    }
+    const events = await queryPodEvents({
+      podId,
+      start: startIso,
+      stop: stopIso,
+      limit: parseInt(req.query.limit, 10) || 100
+    });
     res.json({ success: true, podId, date: dateStr || new Date().toISOString().split('T')[0], events });
   } catch (err) {
-    console.error('Error fetching pod events:', err.message);
+    console.error('Error fetching pod events from Influx:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 }
 
 /**
  * GET /api/pod-activity/pods/:id/state
- * Get current state.json for a specific pod
+ * Get current state for a specific pod (memory snapshot)
  */
 async function getPodStateHandler(req, res) {
   try {
@@ -269,15 +281,15 @@ async function getPodStateHandler(req, res) {
 
 /**
  * GET /api/pod-activity/incidents/recent
- * Get recent incidents across all fleet pods from memory & persistent DB
+ * Get recent incidents across all fleet pods directly from InfluxDB pod_logs_bhar
  */
 async function getRecentIncidentsHandler(req, res) {
   try {
     const limit = parseInt(req.query.limit, 10) || 50;
-    const incidents = await getRecentIncidentList(limit);
+    const incidents = await getRecentFleetIncidentsFromInflux(limit);
     res.json({ success: true, data: incidents });
   } catch (err) {
-    console.error('Error fetching recent fleet incidents:', err.message);
+    console.error('Error fetching recent fleet incidents from Influx:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 }
@@ -344,14 +356,13 @@ async function getPodHeartbeatsHandler(req, res) {
       } catch (_) { }
     }
 
-    const heartbeats = await getPodHeartbeatStream({
+    const heartbeats = await getPodHeartbeatsFromInflux({
       podId,
       dateStr,
       moduleId,
       startTime,
       endTime,
-      limit,
-      source
+      limit
     });
 
     res.json({
@@ -389,7 +400,7 @@ async function downloadPodHeartbeatsHandler(req, res) {
       }
     } catch (_) { }
 
-    streamPodHeartbeatsDownload({
+    await downloadPodTelemetryFromInflux({
       podId,
       serverName,
       dateStr,
@@ -409,50 +420,38 @@ async function downloadPodHeartbeatsHandler(req, res) {
 
 /**
  * GET /api/pod-activity/pods/:id/log-dates
- * Get list of available recorded dates for a specific pod
+ * Get list of available recorded dates for a specific pod from InfluxDB
  */
 async function getPodLogDatesHandler(req, res) {
   try {
     const podId = parseInt(req.params.id, 10);
-    if (!hasPodName(podId)) {
-      try {
-        const srv = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
-        if (srv && srv.name) registerPodName(podId, srv.name);
-      } catch (_) { }
-    }
-    const dates = getPodLogDates(podId);
+    const dates = await getPodLogDatesFromInflux(podId);
     res.json({ success: true, podId, dates });
   } catch (err) {
-    console.error('Error fetching pod log dates:', err.message);
+    console.error('Error fetching pod log dates from Influx:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 }
 
 /**
  * GET /api/pod-activity/pods/:id/storage-files
- * Return list of physical files in pod_storage for a pod
+ * Return list of InfluxDB telemetry and event streams for a pod (Replaces physical files)
  */
 async function getPodStorageFilesHandler(req, res) {
   try {
     const podId = parseInt(req.params.id, 10);
     const dateFilter = req.query.date || null;
-    if (!hasPodName(podId)) {
-      try {
-        const srv = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
-        if (srv && srv.name) registerPodName(podId, srv.name);
-      } catch (_) { }
-    }
-    const result = getPodStorageFilesList(podId, dateFilter);
+    const result = await getPodStreamsListFromInflux(podId, dateFilter);
     res.json(result);
   } catch (err) {
-    console.error('Error fetching pod storage files:', err.message);
+    console.error('Error fetching pod streams from Influx:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 }
 
 /**
  * GET /api/pod-activity/pods/:id/file-content
- * Read raw content of a specific physical file in pod_storage on-demand
+ * Read stream content directly from InfluxDB on-demand (Formatted as JSON lines)
  */
 async function getPodFileContentHandler(req, res) {
   try {
@@ -460,33 +459,27 @@ async function getPodFileContentHandler(req, res) {
     const fileName = req.query.file || req.query.filename || null;
     const dateStr = req.query.date || null;
     const limit = parseInt(req.query.limit, 10) || 500;
+    const moduleId = req.query.moduleId || req.query.module_id || null;
 
     if (!fileName) {
       return res.status(400).json({ success: false, error: 'Query param "file" is required.' });
     }
 
-    if (!hasPodName(podId)) {
-      try {
-        const srv = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
-        if (srv && srv.name) registerPodName(podId, srv.name);
-      } catch (_) { }
-    }
-
-    const result = await getPodFileRawContent(podId, fileName, dateStr, limit);
+    const result = await getPodStreamContentFromInflux(podId, fileName, dateStr, limit, moduleId);
     if (!result.success) {
       return res.status(404).json(result);
     }
 
     res.json(result);
   } catch (err) {
-    console.error('Error fetching file content:', err.message);
+    console.error('Error fetching stream content from Influx:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 }
 
 /**
  * GET /api/pod-activity/pods/:id/file-metrics
- * Compute downsampled time-series metrics from a physical file for charting
+ * Compute aggregated time-series metrics from InfluxDB for charting via aggregateWindow
  */
 async function getPodFileMetricsHandler(req, res) {
   try {
@@ -494,26 +487,17 @@ async function getPodFileMetricsHandler(req, res) {
     const fileName = req.query.file || req.query.filename || null;
     const dateStr = req.query.date || null;
     const interval = req.query.interval || '5m';
+    const moduleId = req.query.moduleId || req.query.module_id || null;
 
     if (!fileName) {
       return res.status(400).json({ success: false, error: 'Query param "file" is required.' });
     }
 
-    if (!hasPodName(podId)) {
-      try {
-        const srv = await dbAsync.get('SELECT name FROM servers WHERE id = ?', [podId]);
-        if (srv && srv.name) registerPodName(podId, srv.name);
-      } catch (_) { }
-    }
-
-    const result = await getPodFileMetrics(podId, fileName, dateStr, interval);
-    if (!result.success) {
-      return res.status(404).json(result);
-    }
-
+    const stepSec = interval === '1m' ? 60 : interval === '15m' ? 900 : interval === '1h' ? 3600 : 300;
+    const result = await getPodStreamMetricsFromInflux(podId, fileName, dateStr, 3600, stepSec, moduleId);
     res.json(result);
   } catch (err) {
-    console.error('Error fetching file metrics:', err.message);
+    console.error('Error fetching stream metrics from Influx:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 }
@@ -542,7 +526,7 @@ async function getPodLiveBackfillHandler(req, res) {
       } catch (_) { }
     }
 
-    const result = await getPodLiveBackfillPoints({
+    const result = await getPodLiveBackfillFromInflux({
       podId,
       moduleId,
       dateStr,
