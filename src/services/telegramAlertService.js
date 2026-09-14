@@ -9,7 +9,11 @@ const DEFAULT_CONFIG = {
   enabled: true,
   botToken: process.env.TELEGRAM_BOT_TOKEN,
   chatId: process.env.TELEGRAM_CHAT_ID,
-  alertOnlyDead: true,
+  alertOnlyDead: false,
+  notifyDead: true,
+  notifyRecoveredContinue: true,
+  notifyRecoveredRestart: true,
+  notifyRecoveredJump: true,
   cooldownMinutes: 5
 };
 
@@ -45,7 +49,11 @@ function getTelegramAlertConfig() {
       enabled: parsed.enabled !== undefined ? Boolean(parsed.enabled) : true,
       botToken: parsed.botToken || DEFAULT_CONFIG.botToken,
       chatId: parsed.chatId || DEFAULT_CONFIG.chatId,
-      alertOnlyDead: parsed.alertOnlyDead !== undefined ? Boolean(parsed.alertOnlyDead) : true,
+      alertOnlyDead: parsed.alertOnlyDead !== undefined ? Boolean(parsed.alertOnlyDead) : false,
+      notifyDead: parsed.notifyDead !== undefined ? Boolean(parsed.notifyDead) : true,
+      notifyRecoveredContinue: parsed.notifyRecoveredContinue !== undefined ? Boolean(parsed.notifyRecoveredContinue) : true,
+      notifyRecoveredRestart: parsed.notifyRecoveredRestart !== undefined ? Boolean(parsed.notifyRecoveredRestart) : true,
+      notifyRecoveredJump: parsed.notifyRecoveredJump !== undefined ? Boolean(parsed.notifyRecoveredJump) : true,
       cooldownMinutes: Number(parsed.cooldownMinutes) || DEFAULT_CONFIG.cooldownMinutes
     };
     return cachedConfig;
@@ -67,7 +75,11 @@ function saveTelegramAlertConfig(config) {
       enabled: config.enabled !== undefined ? Boolean(config.enabled) : current.enabled,
       botToken: config.botToken ? String(config.botToken).trim() : current.botToken,
       chatId: config.chatId ? String(config.chatId).trim() : current.chatId,
-      alertOnlyDead: config.alertOnlyDead !== undefined ? Boolean(config.alertOnlyDead) : true,
+      alertOnlyDead: config.alertOnlyDead !== undefined ? Boolean(config.alertOnlyDead) : current.alertOnlyDead,
+      notifyDead: config.notifyDead !== undefined ? Boolean(config.notifyDead) : current.notifyDead,
+      notifyRecoveredContinue: config.notifyRecoveredContinue !== undefined ? Boolean(config.notifyRecoveredContinue) : current.notifyRecoveredContinue,
+      notifyRecoveredRestart: config.notifyRecoveredRestart !== undefined ? Boolean(config.notifyRecoveredRestart) : current.notifyRecoveredRestart,
+      notifyRecoveredJump: config.notifyRecoveredJump !== undefined ? Boolean(config.notifyRecoveredJump) : current.notifyRecoveredJump,
       cooldownMinutes: Math.max(1, Number(config.cooldownMinutes) || 5)
     };
     fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify(updated, null, 2), 'utf-8');
@@ -416,9 +428,213 @@ async function sendBatchDeadHeartbeatAlert({ serverId, serverName, modules = [],
 }
 
 /**
- * Send a test notification to verify Telegram Bot integration
+ * Send Heartbeat RECOVERED alert (BERLANJUT, RESTART, or LOMPAT)
+ * Triggered when a module that was DEAD starts ticking normally again
  */
-async function sendTestTelegramMessage(senderName = 'Admin Dashboard') {
+async function sendRecoveredHeartbeatAlert(alertData) {
+  if (!alertData) return { sent: false, reason: 'NO_DATA' };
+
+  const config = getTelegramAlertConfig();
+  if (!config.enabled) {
+    return { sent: false, reason: 'TELEGRAM_ALERT_DISABLED' };
+  }
+  if (config.alertOnlyDead && !config.notifyRecoveredContinue && !config.notifyRecoveredRestart && !config.notifyRecoveredJump) {
+    return { sent: false, reason: 'ALERT_ONLY_DEAD_CONFIGURED' };
+  }
+
+  const recoveryType = alertData.recoveryType || 'BERLANJUT';
+
+  if (recoveryType === 'BERLANJUT' && config.notifyRecoveredContinue === false) {
+    return { sent: false, reason: 'NOTIFY_CONTINUE_DISABLED' };
+  }
+  if (recoveryType === 'RESTART' && config.notifyRecoveredRestart === false) {
+    return { sent: false, reason: 'NOTIFY_RESTART_DISABLED' };
+  }
+  if (recoveryType === 'LOMPAT' && config.notifyRecoveredJump === false) {
+    return { sent: false, reason: 'NOTIFY_JUMP_DISABLED' };
+  }
+
+  const serverId = alertData.serverId || 0;
+  const moduleId = alertData.moduleId !== undefined ? alertData.moduleId : 0;
+  const serverName = alertData.serverName || `Pod ${serverId}`;
+  const moduleName = alertData.moduleName || `Modul ${moduleId}`;
+  const durationSeconds = alertData.durationSeconds || alertData.downtimeSeconds || 0;
+  const beforeHb = alertData.beforeHb !== null && alertData.beforeHb !== undefined ? `#${alertData.beforeHb}` : '—';
+  const afterHb = alertData.afterHb !== null && alertData.afterHb !== undefined ? `#${alertData.afterHb}` : '—';
+  const hbDiff = alertData.hbDiff;
+  const diffStr = (hbDiff !== null && hbDiff !== undefined && hbDiff > 0) ? ` (+${hbDiff} detak)` : '';
+
+  const timeStr = new Date().toLocaleString('id-ID', {
+    timeZone: 'Asia/Makassar',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }) + ' WITA';
+
+  const modTitle = escapeHtml(moduleName).toUpperCase();
+  let messageHtml = '';
+
+  if (recoveryType === 'RESTART') {
+    messageHtml = [
+      `🔄 <b>[PULIH - RESTART] MODUL ${modTitle} REBOOT DARI AWAL</b> 🔄`,
+      '',
+      `🏢 <b>Pod:</b> <code>${escapeHtml(serverName)}</code>`,
+      `🔌 <b>Modul:</b> <code>ID ${moduleId}</code> - <b>${escapeHtml(moduleName)}</b>`,
+      '📊 <b>Pola Pemulihan:</b> 🔄 <b>RESTART / RESET DARI NOL</b>',
+      `⏳ <b>Total Downtime:</b> ${durationSeconds} detik`,
+      `📡 <b>Transisi Counter:</b> Dari <code>${beforeHb}</code> ➔ <code>${afterHb}</code> (Reset)`,
+      `🕒 <b>Waktu Pulih:</b> ${timeStr}`,
+      '',
+      '🛠️ <b>Diagnosa:</b> <i>Modul microcontroller (MCU) atau driver mengalami restart dari awal. Terindikasi drop catu daya (brownout), kabel USB terputus sesaat, atau restart proses driver oleh supervisor.</i>',
+      '💡 <b>Rekomendasi Tindakan:</b> <i>Periksa kestabilan catu daya 5V/12V dan konektor fisik USB modul terkait.</i>'
+    ].join('\n');
+  } else if (recoveryType === 'LOMPAT') {
+    messageHtml = [
+      `⚠️ <b>[PULIH - LOMPAT] MODUL ${modTitle} PULIH DENGAN JEDA DETAK</b> ⚠️`,
+      '',
+      `🏢 <b>Pod:</b> <code>${escapeHtml(serverName)}</code>`,
+      `🔌 <b>Modul:</b> <code>ID ${moduleId}</code> - <b>${escapeHtml(moduleName)}</b>`,
+      `📊 <b>Pola Pemulihan:</b> ⚠️ <b>LOMPAT (${hbDiff || '?'} Detak Terlewat)</b>`,
+      `⏳ <b>Total Downtime:</b> ${durationSeconds} detik`,
+      `📡 <b>Transisi Counter:</b> Dari <code>${beforeHb}</code> ➔ <code>${afterHb}</code>${diffStr}`,
+      `🕒 <b>Waktu Pulih:</b> ${timeStr}`,
+      '',
+      '🛠️ <b>Diagnosa:</b> <i>Hardware fisik modul tetap berdetak normal selama jeda, namun beberapa paket detak terlewat / drop di jaringan WiFi/LAN atau broker MQTT.</i>',
+      '💡 <b>Rekomendasi Tindakan:</b> <i>Periksa kualitas koneksi jaringan dan stabilitas broker MQTT.</i>'
+    ].join('\n');
+  } else {
+    // Default: BERLANJUT
+    messageHtml = [
+      `✅ <b>[PULIH - BERLANJUT] MODUL ${modTitle} KEMBALI AKTIF</b> ✅`,
+      '',
+      `🏢 <b>Pod:</b> <code>${escapeHtml(serverName)}</code>`,
+      `🔌 <b>Modul:</b> <code>ID ${moduleId}</code> - <b>${escapeHtml(moduleName)}</b>`,
+      '📊 <b>Pola Pemulihan:</b> 🟢 <b>BERLANJUT (KONTINU / TANPA REBOOT)</b>',
+      `⏳ <b>Total Downtime:</b> ${durationSeconds} detik`,
+      `📡 <b>Transisi Counter:</b> Dari <code>${beforeHb}</code> ➔ <code>${afterHb}</code>${diffStr}`,
+      `🕒 <b>Waktu Pulih:</b> ${timeStr}`,
+      '',
+      '🛠️ <b>Diagnosa:</b> <i>Hardware MCU fisik TIDAK reboot. Detak berlanjut normal setelah jeda transmisi sesaat (buffer serial / jitter thread OS).</i>'
+    ].join('\n');
+  }
+
+  const result = await sendRawTelegramMessage(messageHtml);
+  if (result.sent) {
+    console.log(`✅ [Telegram] Notifikasi RECOVERED (${recoveryType}) terkirim untuk ${serverName} - ${moduleName}`);
+  }
+  return result;
+}
+
+/**
+ * Send Consolidated / Batch Heartbeat RECOVERED alert when 2 or more modules in the same Pod recover simultaneously
+ */
+async function sendBatchRecoveredHeartbeatAlert({ serverId, serverName, modules = [] }) {
+  if (!modules || modules.length === 0) return { sent: false, reason: 'NO_MODULES' };
+
+  if (modules.length === 1) {
+    return await sendRecoveredHeartbeatAlert(modules[0]);
+  }
+
+  const config = getTelegramAlertConfig();
+  if (!config.enabled) {
+    return { sent: false, reason: 'TELEGRAM_ALERT_DISABLED' };
+  }
+  if (config.alertOnlyDead && !config.notifyRecoveredContinue && !config.notifyRecoveredRestart && !config.notifyRecoveredJump) {
+    return { sent: false, reason: 'ALERT_ONLY_DEAD_CONFIGURED' };
+  }
+
+  const sName = serverName || `Pod ${serverId}`;
+  const timeStr = new Date().toLocaleString('id-ID', {
+    timeZone: 'Asia/Makassar',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }) + ' WITA';
+
+  const modLines = modules.map((m, idx) => {
+    const mName = m.modName || m.moduleName || `Modul ${m.moduleId}`;
+    const bHb = m.beforeHb !== null && m.beforeHb !== undefined ? `#${m.beforeHb}` : '—';
+    const aHb = m.afterHb !== null && m.afterHb !== undefined ? `#${m.afterHb}` : '—';
+    const badge = m.recoveryType === 'RESTART'
+      ? '🔄 RESTART'
+      : (m.recoveryType === 'LOMPAT' ? '⚠️ LOMPAT' : '🟢 KONTINU');
+    const dt = m.durationSeconds || m.downtimeSeconds || 0;
+    return `  ${idx + 1}. <b>${escapeHtml(mName)}</b> (<code>ID ${m.moduleId}</code>): ${badge} [<code>${bHb} ➔ ${aHb}</code>] (${dt}s)`;
+  }).join('\n');
+
+  const messageHtml = [
+    `✅ <b>[PULIH - BATCH] ${modules.length} MODUL ${escapeHtml(sName).toUpperCase()} KEMBALI AKTIF</b> ✅`,
+    '',
+    `🏢 <b>Pod:</b> <code>${escapeHtml(sName)}</code>`,
+    `📊 <b>Total Modul Pulih:</b> ${modules.length} Modul Kembali Berdetak Bersamaan`,
+    `🕒 <b>Waktu Pulih:</b> ${timeStr}`,
+    '',
+    '📋 <b>Rincian Modul yang Pulih:</b>',
+    modLines,
+    '',
+    '🚀 <i>Seluruh modul terkait telah kembali mengirimkan sinyal detak secara normal ke server.</i>'
+  ].join('\n');
+
+  const result = await sendRawTelegramMessage(messageHtml);
+  if (result.sent) {
+    console.log(`✅ [Telegram] Notifikasi Batch RECOVERED terkirim untuk ${sName}: ${modules.length} modul.`);
+  }
+  return result;
+}
+
+/**
+ * Send a test notification to verify Telegram Bot integration
+ * Supports testType: 'DEAD' | 'RECOVERED_CONTINUE' | 'RECOVERED_RESTART' | 'BATCH_RECOVERED'
+ */
+async function sendTestTelegramMessage(senderName = 'Admin Dashboard', testType = 'DEAD') {
+  if (testType === 'RECOVERED_CONTINUE' || testType === 'CONTINUE') {
+    return await sendRecoveredHeartbeatAlert({
+      serverId: 99,
+      serverName: 'POD TEST (V3)',
+      moduleId: 508,
+      moduleName: 'mod_chair',
+      recoveryType: 'BERLANJUT',
+      beforeHb: 4520,
+      afterHb: 4522,
+      hbDiff: 2,
+      durationSeconds: 28
+    });
+  }
+
+  if (testType === 'RECOVERED_RESTART' || testType === 'RESTART') {
+    return await sendRecoveredHeartbeatAlert({
+      serverId: 99,
+      serverName: 'POD TEST (V3)',
+      moduleId: 508,
+      moduleName: 'mod_chair',
+      recoveryType: 'RESTART',
+      beforeHb: 4520,
+      afterHb: 1,
+      hbDiff: null,
+      durationSeconds: 42
+    });
+  }
+
+  if (testType === 'BATCH_RECOVERED') {
+    return await sendBatchRecoveredHeartbeatAlert({
+      serverId: 99,
+      serverName: 'POD TEST (V3)',
+      modules: [
+        { moduleId: 508, moduleName: 'mod_chair', recoveryType: 'RESTART', beforeHb: 4520, afterHb: 1, durationSeconds: 45 },
+        { moduleId: 504, moduleName: 'mod_sound', recoveryType: 'BERLANJUT', beforeHb: 3200, afterHb: 3202, durationSeconds: 20 },
+        { moduleId: 503, moduleName: 'mod_master_pilot', recoveryType: 'BERLANJUT', beforeHb: 1800, afterHb: 1801, durationSeconds: 20 }
+      ]
+    });
+  }
+
   const config = getTelegramAlertConfig();
   const timeStr = new Date().toLocaleString('id-ID', {
     timeZone: 'Asia/Makassar',
@@ -438,9 +654,9 @@ async function sendTestTelegramMessage(senderName = 'Admin Dashboard') {
     `🏢 <b>Grup Target:</b> Supergroup HB monitor (<code>${config.chatId}</code>)`,
     `👤 <b>Pemicu Tes:</b> ${escapeHtml(senderName)}`,
     `🕒 <b>Waktu Kirim:</b> ${timeStr}`,
-    '🎯 <b>Aturan:</b> <i>Hanya mengirim notifikasi saat status modul berstatus DEAD (≥ 30s).</i>',
+    '🎯 <b>Aturan:</b> <i>Notifikasi aktif untuk modul DEAD, serta pemulihan BERLANJUT & RESTART.</i>',
     '',
-    '🚀 <i>Sistem siap beroperasi dan memantau armada POD secara real-time.</i>'
+    '🚀 <i>Sistem siap memantau armada POD secara real-time.</i>'
   ].join('\n');
 
   return await sendRawTelegramMessage(testHtml);
@@ -451,6 +667,8 @@ module.exports = {
   saveTelegramAlertConfig,
   sendDeadHeartbeatAlert,
   sendBatchDeadHeartbeatAlert,
+  sendRecoveredHeartbeatAlert,
+  sendBatchRecoveredHeartbeatAlert,
   clearDeadAlertCooldown,
   sendTestTelegramMessage,
   sendRawTelegramMessage

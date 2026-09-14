@@ -592,9 +592,10 @@ function saveTelegramConfigHandler(req, res) {
 async function testTelegramAlertHandler(req, res) {
   try {
     const sender = req.user?.name || req.body?.sender || 'Admin Dashboard';
-    const result = await sendTestTelegramMessage(sender);
+    const testType = req.body?.testType || req.body?.type || 'DEAD';
+    const result = await sendTestTelegramMessage(sender, testType);
     if (result.sent) {
-      res.json({ success: true, message: 'Pesan tes berhasil dikirim ke grup Telegram HB monitor!', data: result.data });
+      res.json({ success: true, message: `Pesan tes (${testType}) berhasil dikirim ke grup Telegram HB monitor!`, data: result.data });
     } else {
       res.status(400).json({ success: false, error: result.error || result.reason });
     }

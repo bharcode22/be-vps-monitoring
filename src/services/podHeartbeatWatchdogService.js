@@ -16,6 +16,8 @@ const {
 const {
   sendDeadHeartbeatAlert,
   sendBatchDeadHeartbeatAlert,
+  sendRecoveredHeartbeatAlert,
+  sendBatchRecoveredHeartbeatAlert,
   clearDeadAlertCooldown
 } = require('./telegramAlertService');
 
@@ -28,6 +30,10 @@ const heartbeatRegistry = new Map();
 // Alert history log ring buffer
 const recentAlerts = [];
 const MAX_ALERTS = 100;
+
+// Batch accumulator for RECOVERED events to prevent flooding Telegram when multiple modules revive at once
+const recoveryBatchMap = new Map(); // serverId -> { timer, serverName, modules: [] }
+const RECOVERY_BATCH_WINDOW_MS = 2500;
 
 let socketIoInstance = null;
 let watchdogInterval = null;
@@ -56,6 +62,9 @@ async function initAlertsSchema() {
       ALTER TABLE pod_heartbeat_alerts ADD COLUMN IF NOT EXISTS root_cause VARCHAR(50);
       ALTER TABLE pod_heartbeat_alerts ADD COLUMN IF NOT EXISTS diagnostic_hint TEXT;
       ALTER TABLE pod_heartbeat_alerts ADD COLUMN IF NOT EXISTS ping_ms NUMERIC(6,1);
+      ALTER TABLE pod_heartbeat_alerts ADD COLUMN IF NOT EXISTS recovery_type VARCHAR(30);
+      ALTER TABLE pod_heartbeat_alerts ADD COLUMN IF NOT EXISTS before_hb BIGINT;
+      ALTER TABLE pod_heartbeat_alerts ADD COLUMN IF NOT EXISTS hb_diff INT;
     `);
   } catch (err) {
     // Ignore DB errors as JSON file is the primary storage
@@ -108,6 +117,8 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
   let frozenAlertSent = prevRecord?.frozenAlertSent || false;
   const wasDead = prevRecord?.isDead || false;
   const wasFrozen = prevRecord?.isFrozen || false;
+  const deadSinceTs = prevRecord?.deadSinceTs || prevRecord?.lastSeenAt || now;
+  const deadSinceHb = prevRecord?.deadSinceHb !== undefined ? prevRecord.deadSinceHb : prevRecord?.hb;
 
   // Anti-Flapping Protection:
   // Heartbeat is considered genuinely advancing if:
@@ -128,13 +139,13 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
   const isConfirmedRecovered = wasDead && isAdvancing && !isFrozen && consecutiveHealthyTicks >= 2;
 
   // Determine isDead state:
-  // If previously dead, remain dead unless confirmed recovered or actively advancing
+  // If previously dead, remain dead until confirmed recovered (>= 2 consecutive healthy ticks)
   let isDead = false;
   if (wasDead) {
-    if (isConfirmedRecovered || (isAdvancing && !isFrozen)) {
+    if (isConfirmedRecovered) {
       isDead = false;
     } else {
-      // Dummy #0 or frozen packet arriving while DEAD: module remains DEAD!
+      // First recovering tick or dummy packets arriving while DEAD: module remains DEAD until confirmed!
       isDead = true;
     }
   }
@@ -143,15 +154,41 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
   if (isConfirmedRecovered) {
     deadAlertSent = false;
     clearDeadAlertCooldown(serverId, moduleId);
+
+    const beforeHb = (deadSinceHb !== undefined && deadSinceHb !== null) ? Number(deadSinceHb) : prevHbNum;
+    const afterHb = currentHbNum;
+    const hbDiff = (beforeHb !== null && afterHb !== null) ? (afterHb - beforeHb) : null;
+    const downtimeSeconds = deadSinceTs ? Math.max(1, Math.floor((now - deadSinceTs) / 1000)) : 0;
+
+    let recoveryType = 'BERLANJUT';
+    if ((afterHb !== null && afterHb <= 2) || (beforeHb !== null && afterHb !== null && afterHb < beforeHb)) {
+      recoveryType = 'RESTART';
+    } else if (hbDiff !== null && hbDiff > 5) {
+      recoveryType = 'LOMPAT';
+    } else {
+      recoveryType = 'BERLANJUT';
+    }
+
+    let recoveryMsg = `Modul ID ${moduleId} (${moduleName}) pulih dan BERLANJUT normal (${beforeHb !== null ? `#${beforeHb}` : '—'} ➔ #${afterHb}) setelah downtime ${downtimeSeconds}s.`;
+    if (recoveryType === 'RESTART') {
+      recoveryMsg = `Modul ID ${moduleId} (${moduleName}) REBOOT dari awal (#${afterHb}) setelah downtime ${downtimeSeconds}s.`;
+    } else if (recoveryType === 'LOMPAT') {
+      recoveryMsg = `Modul ID ${moduleId} (${moduleName}) pulih dan MELOMPAT (+${hbDiff} detak) setelah downtime ${downtimeSeconds}s.`;
+    }
+
     logIncidentAlert({
       serverId,
       serverName: sName,
       moduleId,
       moduleName,
       alertType: 'RECOVERED',
-      message: `Modul ID ${moduleId} (${moduleName}) pulih kembali (berdetak normal).`,
+      recoveryType,
+      beforeHb,
+      afterHb,
+      hbDiff,
+      message: recoveryMsg,
       lastHb: currentHbNum,
-      durationSeconds: prevRecord?.lastSeenAt ? Math.floor((now - prevRecord.lastSeenAt) / 1000) : 0
+      durationSeconds: downtimeSeconds
     });
   }
 
@@ -214,6 +251,8 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
     lastHbChangeAt,
     isFrozen,
     isDead,
+    deadSinceTs: isDead ? deadSinceTs : null,
+    deadSinceHb: isDead ? deadSinceHb : null,
     port: effectivePort,
     totalPackets: (prevRecord?.totalPackets || 0) + 1,
     deadAlertSent,
@@ -362,14 +401,85 @@ async function logIncidentAlert(alert) {
     socketIoInstance.emit('pod-heartbeat:alert', entry);
   }
 
-  // 4. Send Telegram Notification strictly when status is DEAD (unless skipTelegram is specified)
+  // 4. Send Telegram Notification
+  // 4A. DEAD alert strictly when status is DEAD (unless skipTelegram is specified)
   if (alert.alertType === 'DEAD' && !alert.skipTelegram) {
     sendDeadHeartbeatAlert(alert).catch(err => {
-      console.warn('[Watchdog] Gagal mengirim alert Telegram:', err.message);
+      console.warn('[Watchdog] Gagal mengirim alert Telegram DEAD:', err.message);
     });
+  }
+  // 4B. RECOVERED alert (BERLANJUT, RESTART, LOMPAT) with batch buffering
+  else if (alert.alertType === 'RECOVERED' && !alert.skipTelegram) {
+    queueRecoveredTelegramAlert(alert);
   }
 
   return entry;
+}
+
+/**
+ * Queue RECOVERED alerts to consolidate batch recoveries if multiple modules revive at once
+ */
+function queueRecoveredTelegramAlert(alert) {
+  const serverId = alert.serverId;
+  if (!serverId) {
+    sendRecoveredHeartbeatAlert(alert).catch(err => {
+      console.warn('[Watchdog] Gagal mengirim alert Telegram RECOVERED:', err.message);
+    });
+    return;
+  }
+
+  if (!recoveryBatchMap.has(serverId)) {
+    recoveryBatchMap.set(serverId, {
+      timer: null,
+      serverName: alert.serverName,
+      modules: []
+    });
+  }
+
+  const batch = recoveryBatchMap.get(serverId);
+  batch.serverName = alert.serverName || batch.serverName;
+
+  // Avoid duplicate entries of the same module in the current batch window
+  const existingIdx = batch.modules.findIndex(m => m.moduleId === alert.moduleId);
+  const modItem = {
+    serverId: alert.serverId,
+    serverName: alert.serverName,
+    moduleId: alert.moduleId,
+    moduleName: alert.moduleName,
+    recoveryType: alert.recoveryType,
+    beforeHb: alert.beforeHb,
+    afterHb: alert.afterHb,
+    hbDiff: alert.hbDiff,
+    durationSeconds: alert.durationSeconds
+  };
+
+  if (existingIdx >= 0) {
+    batch.modules[existingIdx] = modItem;
+  } else {
+    batch.modules.push(modItem);
+  }
+
+  if (batch.timer) clearTimeout(batch.timer);
+
+  batch.timer = setTimeout(async () => {
+    const current = recoveryBatchMap.get(serverId);
+    recoveryBatchMap.delete(serverId);
+    if (!current || current.modules.length === 0) return;
+
+    try {
+      if (current.modules.length === 1) {
+        await sendRecoveredHeartbeatAlert(current.modules[0]);
+      } else {
+        await sendBatchRecoveredHeartbeatAlert({
+          serverId,
+          serverName: current.serverName,
+          modules: current.modules
+        });
+      }
+    } catch (err) {
+      console.warn('[Watchdog] Gagal mengirim batch/recovered alert Telegram:', err.message);
+    }
+  }, RECOVERY_BATCH_WINDOW_MS);
 }
 
 /**
@@ -400,6 +510,8 @@ function runWatchdogCheck() {
         record.isFrozen = false;
         record.frozenAlertSent = false;
         record.consecutiveHealthyTicks = 0;
+        record.deadSinceTs = record.lastSeenAt || (now - elapsedSec * 1000);
+        record.deadSinceHb = record.hb;
         newlyDeadModules.push({ moduleId, modName, record, elapsedSec });
       }
       // Check for FROZEN timeout via timer (packets may still be arriving with static hb)
