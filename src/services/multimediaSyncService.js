@@ -2,37 +2,110 @@ const path = require('path');
 const dbAsync = require('./db');
 const { executeSshCommand } = require('../utils/sshExecutor');
 const { getAuthToken } = require('./multimediaUploadService');
+const { createMasterClient } = require('./masterToPodSync/syncHelpers');
 
 const MASTER_API_BASE = process.env.MASTER_API_BASE;
 
 /**
- * 1. Fetch paginated list of multimedia from Master API
+ * Direct database fallback when Master API is unreachable
  */
-async function fetchMasterMultimediaList(search = '', page = 1, limit = 12) {
-  const token = await getAuthToken();
-  const queryParams = new URLSearchParams({
-    search: search || '',
-    page: String(page || 1),
-    limit: String(limit || 12)
-  });
-
-  const url = `${MASTER_API_BASE}/multimedia?${queryParams.toString()}`;
-  console.log(`📡 Mengambil daftar multimedia dari global admin API`);
-
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: {
-      'Authorization': token,
-      'Content-Type': 'application/json'
-    }
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data?.message || data?.error || `Gagal mengambil multimedia dari Master API (HTTP ${res.status})`);
+async function fetchMultimediaFromMasterDb(search = '', page = 1, limit = 12) {
+  const master = await dbAsync.get(
+    "SELECT * FROM databases_postgres WHERE id = 5 OR db_name = 'regenesis-admin-backup' ORDER BY id ASC LIMIT 1"
+  );
+  if (!master) {
+    throw new Error('Database Master tidak ditemukan di konfigurasi sistem.');
   }
 
-  return data;
+  const client = createMasterClient(master);
+  await client.connect();
+
+  try {
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(Math.max(1, parseInt(limit, 10) || 12), 100);
+    const offset = (pageNum - 1) * limitNum;
+
+    let countQuery = "SELECT COUNT(*) FROM multimedia WHERE deleted_at IS NULL";
+    let dataQuery = "SELECT * FROM multimedia WHERE deleted_at IS NULL";
+    const params = [];
+
+    if (search && String(search).trim()) {
+      params.push(`%${String(search).trim()}%`);
+      const filter = ` AND (tittle ILIKE $1 OR sound_scape::text ILIKE $1 OR artist ILIKE $1 OR album ILIKE $1)`;
+      countQuery += filter;
+      dataQuery += filter;
+    }
+
+    const countRes = await client.query(countQuery, params);
+    const total = parseInt(countRes.rows[0]?.count || 0, 10);
+
+    const dataParams = [...params];
+    dataParams.push(limitNum);
+    dataParams.push(offset);
+    dataQuery += ` ORDER BY sound_scape ASC LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`;
+
+    const dataRes = await client.query(dataQuery, dataParams);
+
+    return {
+      data: dataRes.rows || [],
+      pagination: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum) || 1
+      },
+      source: 'database'
+    };
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+let masterApiLastFailedAt = 0;
+
+/**
+ * 1. Fetch paginated list of multimedia from Master API (with database fallback & circuit breaker)
+ */
+async function fetchMasterMultimediaList(search = '', page = 1, limit = 12) {
+  const isMasterApiCooldown = Date.now() - masterApiLastFailedAt < 60000;
+
+  // Try remote Master API if configured and not in cooldown
+  if (MASTER_API_BASE && !isMasterApiCooldown) {
+    try {
+      const token = await getAuthToken();
+      const queryParams = new URLSearchParams({
+        search: search || '',
+        page: String(page || 1),
+        limit: String(limit || 12)
+      });
+
+      const url = `${MASTER_API_BASE}/multimedia?${queryParams.toString()}`;
+      console.log(`📡 Mengambil daftar multimedia dari global admin API`);
+
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Authorization': token,
+          'Content-Type': 'application/json'
+        },
+        signal: AbortSignal.timeout(2000)
+      });
+
+      if (res.ok) {
+        masterApiLastFailedAt = 0;
+        const data = await res.json();
+        return data;
+      } else {
+        masterApiLastFailedAt = Date.now();
+      }
+    } catch (apiErr) {
+      masterApiLastFailedAt = Date.now();
+      console.warn(`⚠️ [multimediaSyncService] Master API tidak dapat dijangkau (${apiErr.message}), beralih ke Master PostgreSQL database...`);
+    }
+  }
+
+  // Resilient fallback to Master PostgreSQL Database
+  return await fetchMultimediaFromMasterDb(search, page, limit);
 }
 
 /**

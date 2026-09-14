@@ -26,7 +26,8 @@ async function getAuthToken() {
       body: JSON.stringify({
         usernameOrEmail: MASTER_USERNAME,
         password: MASTER_PASSWORD
-      })
+      }),
+      signal: AbortSignal.timeout(2500)
     });
 
     const data = await res.json();
