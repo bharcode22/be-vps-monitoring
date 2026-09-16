@@ -127,9 +127,31 @@ async function getMultimediaDetailBySoundScape(soundScapeId) {
 async function getAllMultimediaList() {
   try {
     const pool = await getMasterPool();
-    const result = await pool.query(
-      'SELECT sound_scape, song as title, name, lamp FROM multimedia WHERE sound_scape IS NOT NULL ORDER BY sound_scape ASC LIMIT 200'
-    );
+    const result = await pool.query(`
+      SELECT 
+        id, 
+        sound_scape, 
+        tittle, 
+        tittle as title,
+        music as song, 
+        music, 
+        video, 
+        lamp, 
+        cover_album, 
+        artist, 
+        album, 
+        duration, 
+        created_date,
+        created_date as created_at,
+        update_date,
+        update_date as updated_at,
+        "musicUrl", 
+        "videoUrl", 
+        "coverAlbumUrl"
+      FROM multimedia 
+      WHERE sound_scape IS NOT NULL 
+      ORDER BY created_date DESC NULLS LAST, sound_scape DESC
+    `);
     return result.rows || [];
   } catch (err) {
     console.error('Error fetching multimedia list:', err.message);

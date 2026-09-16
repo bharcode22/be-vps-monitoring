@@ -28,6 +28,7 @@ const flowEditorStorageController = require('../controllers/flowEditorStorageCon
 const directS3Controller = require('../controllers/directS3Controller');
 const influxController = require('../controllers/influxController');
 const podInfluxController = require('../controllers/podInfluxController');
+const podSessionController = require('../controllers/podSessionController');
 const { requireAuth, requireSuperAdmin, optionalAuth } = require('../middleware/authMiddleware');
 
 // 1. Health check, Speedtest & Settings
@@ -99,6 +100,13 @@ router.get('/vps/content/multimedia/:soundScapeId', optionalAuth, contentControl
 
 // Master Multimedia API Token for Direct Browser Upload
 router.get('/vps/multimedia/master-token', optionalAuth, multimediaUploadController.getMasterApiToken);
+
+// POD Sessions Management & JSON Template Routes
+router.get('/vps/pod-sessions/pods', optionalAuth, podSessionController.getMasterPods);
+router.get('/vps/pod-sessions/experiences/:podId', optionalAuth, podSessionController.getPodExperiences);
+router.get('/vps/pod-sessions/templates', optionalAuth, podSessionController.getTemplates);
+router.post('/vps/pod-sessions/templates', optionalAuth, podSessionController.saveTemplate);
+router.delete('/vps/pod-sessions/templates/:filename', optionalAuth, podSessionController.deleteTemplate);
 
 // Direct S3 Presigned Upload & Media Forensik (SHA-256) Routes
 router.post('/vps/direct-s3/presigned-urls', optionalAuth, directS3Controller.getPresignedUrls);

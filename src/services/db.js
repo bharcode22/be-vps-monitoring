@@ -8,13 +8,29 @@ const isCloudDb = rawDbUrl.includes('rds.amazonaws.com') || rawDbUrl.includes('s
 // Strip sslmode query param from URL so pg doesn't override rejectUnauthorized: false
 const connectionString = rawDbUrl.replace(/[?&]sslmode=[^&]+/g, '').replace(/\?$/, '');
 
+const dns = require('dns');
+
+const customDnsLookup = (hostname, options, callback) => {
+  if (typeof options === 'function') {
+    callback = options;
+    options = {};
+  }
+  dns.resolve4(hostname, (err, addresses) => {
+    if (!err && addresses && addresses.length > 0) {
+      return callback(null, addresses[0], 4);
+    }
+    dns.lookup(hostname, options, callback);
+  });
+};
+
 // Initialize PostgreSQL Connection Pool
 const pool = new Pool({
   connectionString,
   ssl: isCloudDb ? { rejectUnauthorized: false } : false,
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 15000
+  connectionTimeoutMillis: 15000,
+  lookup: customDnsLookup
 });
 
 pool.on('error', (err) => {
