@@ -439,6 +439,62 @@ async function executeFluxQueryOnPod(podId, fluxQuery, dialect = null) {
 }
 
 /**
+ * Execute raw Flux query directly against a POD's InfluxDB returning a readable Stream
+ */
+async function streamFluxQueryFromPod(podId, fluxQuery, dialect = null) {
+  validateReadOnlyFluxQuery(fluxQuery);
+  const server = await getPodServer(podId);
+  const tokenData = await getOrFetchPodToken(server);
+
+  const url = `http://${server.host}:8086/api/v2/query?org=pod`;
+
+  try {
+    let requestBody;
+    const headers = {
+      Authorization: `Token ${tokenData.token}`,
+      Accept: 'application/csv'
+    };
+
+    if (dialect) {
+      headers['Content-Type'] = 'application/json';
+      requestBody = {
+        query: fluxQuery,
+        type: 'flux',
+        dialect: typeof dialect === 'object' ? dialect : {
+          annotations: ['group', 'datatype', 'default'],
+          header: true,
+          delimiter: ','
+        }
+      };
+    } else {
+      headers['Content-Type'] = 'application/vnd.flux';
+      requestBody = fluxQuery;
+    }
+
+    const response = await axios.post(url, requestBody, {
+      headers,
+      timeout: 180000, // 3 minutes timeout for streaming large data
+      responseType: 'stream'
+    });
+
+    return {
+      stream: response.data,
+      server
+    };
+  } catch (err) {
+    let errorMsg = err.message;
+    if (err.response?.data) {
+      if (typeof err.response.data === 'string') {
+        errorMsg = err.response.data;
+      } else if (err.response.data.message) {
+        errorMsg = err.response.data.message;
+      }
+    }
+    throw new Error(`[POD ${server.name} Influx Stream Error]: ${errorMsg}`);
+  }
+}
+
+/**
  * Get buckets directly from a POD
  */
 async function getPodBuckets(podId) {
@@ -935,13 +991,42 @@ function convertRecordsToAnnotatedCsv(records = [], tagKeys = []) {
 }
 
 /**
+ * Generate a clean, descriptive export filename adhering to Option A:
+ * [NAMA_POD]_[MEASUREMENT]_[YYYY-MM-DD_HHmm].[ext]
+ */
+function buildPodExportFilename(server, options = {}, format = 'csv') {
+  const rawPodName = server.name || server.code || `POD_${server.id}`;
+  // Normalize pod name: clean spaces into hyphen, remove illegal characters
+  const safePodName = rawPodName.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9_-]/g, '');
+
+  let measurementTag = 'all-measurements';
+  if (Array.isArray(options.measurements) && options.measurements.length === 1 && options.measurements[0]) {
+    measurementTag = String(options.measurements[0]).trim();
+  } else if (typeof options.measurement === 'string' && options.measurement.trim()) {
+    measurementTag = options.measurement.trim();
+  } else if (Array.isArray(options.measurements) && options.measurements.length > 1) {
+    measurementTag = `${options.measurements.length}-measurements`;
+  }
+  const safeMeasurement = measurementTag.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const timestampStr = `${year}-${month}-${day}_${hours}${minutes}`;
+
+  const ext = format === 'json' ? 'json' : 'csv';
+  return `${safePodName}_${safeMeasurement}_${timestampStr}.${ext}`;
+}
+
+/**
  * Export data from POD to InfluxDB Annotated CSV or JSON
  */
 async function exportPodData(podId, options = {}, format = 'csv') {
   const server = await getPodServer(podId);
-  const safePodName = (server.name || `POD_${podId}`).replace(/[^a-zA-Z0-9_-]/g, '_');
-  const timestampStr = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-  const fileName = `influx_pod_${safePodName}_${timestampStr}.${format === 'json' ? 'json' : 'csv'}`;
+  const fileName = buildPodExportFilename(server, options, format);
 
   let fluxQuery = '';
   if (options.rawFluxQuery && typeof options.rawFluxQuery === 'string' && options.rawFluxQuery.trim()) {
@@ -1011,6 +1096,88 @@ async function exportPodData(podId, options = {}, format = 'csv') {
     contentType: 'text/csv; charset=utf-8',
     content: fallbackCsv
   };
+}
+
+/**
+ * Stream query results directly as CSV from InfluxDB on the POD to the client response
+ */
+async function streamExportPodData(podId, options = {}, format = 'csv', res, req = null) {
+  const server = await getPodServer(podId);
+  const fileName = buildPodExportFilename(server, options, format);
+
+  let fluxQuery = '';
+  if (options.rawFluxQuery && typeof options.rawFluxQuery === 'string' && options.rawFluxQuery.trim()) {
+    fluxQuery = options.rawFluxQuery.trim();
+  } else {
+    const exportLimit = (options.limit && Number(options.limit) > 0) ? Number(options.limit) : null;
+    fluxQuery = buildPodFluxQuery({
+      ...options,
+      limit: exportLimit
+    }, options.bucket || 'pod_monitoring');
+  }
+
+  // Ensure browser fetch can read Content-Disposition and X-Export-Filename through CORS
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Export-Filename');
+
+  if (format === 'json') {
+    const result = await exportPodData(podId, options, format);
+    res.setHeader('Content-Type', result.contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${result.fileName}"`);
+    res.setHeader('X-Export-Filename', result.fileName);
+    return res.send(result.content);
+  }
+
+  // Stream CSV directly from InfluxDB on the POD to the client
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+  res.setHeader('X-Export-Filename', fileName);
+
+  const { stream } = await streamFluxQueryFromPod(podId, fluxQuery, {
+    annotations: ['group', 'datatype', 'default'],
+    header: true,
+    delimiter: ','
+  });
+
+  return new Promise((resolve, reject) => {
+    let isCleanedUp = false;
+    const cleanup = () => {
+      if (!isCleanedUp) {
+        isCleanedUp = true;
+        try {
+          if (!stream.destroyed) stream.destroy();
+        } catch (_) {}
+      }
+    };
+
+    if (req) {
+      req.on('close', () => {
+        if (!res.writableEnded) {
+          cleanup();
+        }
+      });
+    }
+
+    stream.pipe(res);
+
+    stream.on('error', (err) => {
+      console.error(`[streamExportPodData] Stream error on POD ${podId}:`, err.message);
+      cleanup();
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+      reject(err);
+    });
+
+    res.on('finish', () => {
+      cleanup();
+      resolve({ fileName });
+    });
+
+    res.on('error', (err) => {
+      cleanup();
+      reject(err);
+    });
+  });
 }
 
 /**
@@ -1444,6 +1611,8 @@ module.exports = {
   executePodCliExport,
   listPodExportFiles,
   deletePodExportFile,
-  streamPodExportFileToClient
+  streamPodExportFileToClient,
+  streamFluxQueryFromPod,
+  streamExportPodData
 };
 

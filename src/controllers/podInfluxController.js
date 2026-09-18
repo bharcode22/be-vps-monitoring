@@ -149,7 +149,7 @@ class PodInfluxController {
 
   /**
    * POST or GET /api/pod-influx/pods/:id/export
-   * Export query results to CSV or JSON directly from the POD
+   * Export query results to CSV or JSON directly from the POD (Streams CSV live)
    */
   async exportData(req, res) {
     const { id } = req.params;
@@ -157,6 +157,16 @@ class PodInfluxController {
     const format = (options.format || 'csv').toLowerCase();
 
     try {
+      if (format === 'csv') {
+        return await podInfluxService.streamExportPodData(
+          Number(id),
+          options,
+          format,
+          res,
+          req
+        );
+      }
+
       const { fileName, contentType, content } = await podInfluxService.exportPodData(
         Number(id),
         options,
@@ -165,14 +175,18 @@ class PodInfluxController {
 
       res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      res.setHeader('X-Export-Filename', fileName);
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Export-Filename');
       return res.send(content);
     } catch (err) {
       console.error(`[podInfluxController.exportData] Error for POD ${id}:`, err.message);
       const isForbidden = err.message.includes('Akses Ditolak');
-      return res.status(isForbidden ? 403 : 500).json({
-        success: false,
-        error: err.message
-      });
+      if (!res.headersSent) {
+        return res.status(isForbidden ? 403 : 500).json({
+          success: false,
+          error: err.message
+        });
+      }
     }
   }
 
