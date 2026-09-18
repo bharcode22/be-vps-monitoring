@@ -982,6 +982,7 @@ const proxyS3File = async (req, res) => {
       'Content-Type': contentType,
       'Content-Length': contentLength,
       'Access-Control-Allow-Origin': '*',
+      'Access-Control-Expose-Headers': 'Content-Length, Content-Range',
       'Cache-Control': 'public, max-age=86400'
     });
     stream.pipe(res);
