@@ -61,8 +61,9 @@ function renderHeartbeatSection(doc, reportData) {
     });
 
     const upColor = mod.uptimePct >= 80 ? PDF_COLORS.emerald : (mod.uptimePct > 0 ? PDF_COLORS.amber : PDF_COLORS.red);
+    const rowPackets = mod.totalPacketsLastHour || mod.totalPackets1h || 0;
     doc.fillColor(upColor).fontSize(7).font('Helvetica-Bold').text(
-      `${mod.uptimePct}% (${(mod.totalPackets1h || 0).toLocaleString()} pkt)`,
+      `${mod.uptimePct}% (${Number(rowPackets).toLocaleString()} pkt)`,
       stripStartX + stripWidth + 6,
       rowY + 1,
       { width: 90, align: 'right' }
@@ -109,19 +110,21 @@ function renderHeartbeatSection(doc, reportData) {
     doc.text(`[${mod.moduleId}] ${mod.moduleName}`, margin + 6, rY + 2, { width: hbColW1, ellipsis: true });
     doc.text(mod.port || '—', margin + 6 + hbColW1, rY + 2, { width: hbColW2 });
 
+    const modStatus = mod.status || mod.statusLabel || (mod.isLive ? 'HEALTHY' : 'DEAD');
     let badgeType = 'SUCCESS';
-    if (mod.status === 'DEAD' || mod.status === 'OFFLINE') badgeType = 'DANGER';
-    else if (mod.status === 'DEGRADED' || mod.status === 'DELAY' || mod.status === 'INACTIVE_1H') badgeType = 'WARNING';
-    else if (mod.status === 'NO_DATA') badgeType = 'NEUTRAL';
+    if (modStatus === 'DEAD' || modStatus === 'OFFLINE') badgeType = 'DANGER';
+    else if (modStatus === 'DEGRADED' || modStatus === 'DELAY' || modStatus === 'INACTIVE_1H') badgeType = 'WARNING';
+    else if (modStatus === 'NO_DATA') badgeType = 'NEUTRAL';
 
-    drawBadge(doc, margin + 6 + hbColW1 + hbColW2, rY + 1, mod.status, badgeType);
+    drawBadge(doc, margin + 6 + hbColW1 + hbColW2, rY + 1, modStatus, badgeType);
 
     const hbText = (mod.latestHb !== null && mod.latestHb !== undefined && !isNaN(Number(mod.latestHb)))
       ? `#${Number(mod.latestHb).toLocaleString()}`
       : '—';
     doc.text(hbText, margin + 6 + hbColW1 + hbColW2 + hbColW3, rY + 2, { width: hbColW4 });
 
-    const pktText = `${(mod.totalPackets1h || 0).toLocaleString()} pkt`;
+    const totalPkts = mod.totalPacketsLastHour || mod.totalPackets1h || 0;
+    const pktText = `${Number(totalPkts).toLocaleString()} pkt`;
     doc.text(pktText, margin + 6 + hbColW1 + hbColW2 + hbColW3 + hbColW4, rY + 2, { width: hbColW5 });
 
     const upc = mod.uptimePct >= 80 ? PDF_COLORS.emerald : (mod.uptimePct > 0 ? PDF_COLORS.amber : PDF_COLORS.red);

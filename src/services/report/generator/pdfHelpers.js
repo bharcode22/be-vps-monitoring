@@ -24,6 +24,7 @@ function drawSectionHeader(doc, title, numberStr = '1') {
  * Draw Status Badge with tailored background and text color
  */
 function drawBadge(doc, x, y, text, type = 'SUCCESS') {
+  const safeText = text !== null && text !== undefined ? String(text).trim() : 'UNKNOWN';
   let bg = '#dcfce7';
   let fg = '#15803d';
   if (type === 'DANGER' || type === 'DEAD' || type === 'MISSING' || type === 'OFFLINE') {
@@ -37,10 +38,10 @@ function drawBadge(doc, x, y, text, type = 'SUCCESS') {
     fg = '#475569';
   }
 
-  const badgeWidth = Math.max(text.length * 5.5 + 10, 42);
+  const badgeWidth = Math.max(safeText.length * 5.5 + 10, 42);
   doc.roundedRect(x, y, badgeWidth, 13, 2).fill(bg);
   doc.fontSize(7).font('Helvetica-Bold').fillColor(fg);
-  doc.text(text, x, y + 3, { width: badgeWidth, align: 'center' });
+  doc.text(safeText, x, y + 3, { width: badgeWidth, align: 'center' });
   return badgeWidth;
 }
 

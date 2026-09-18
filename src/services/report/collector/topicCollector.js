@@ -3,15 +3,20 @@ const { queryPodDb } = require('./podDbClient');
 /**
  * Helper comparator for topic lists
  */
-function compareTopicList(masterList, podList) {
+function compareTopicList(masterList = [], podList = []) {
+  const safeMaster = Array.isArray(masterList) ? masterList : [];
+  const safePod = Array.isArray(podList) ? podList : [];
+
   const masterMap = new Map();
-  masterList.forEach(item => {
+  safeMaster.forEach(item => {
+    if (!item) return;
     const key = (item.topic || item.topic_name || item.name || '').trim();
     if (key) masterMap.set(key, item);
   });
 
   const podMap = new Map();
-  podList.forEach(item => {
+  safePod.forEach(item => {
+    if (!item) return;
     const key = (item.topic || item.topic_name || item.name || '').trim();
     if (key) podMap.set(key, item);
   });

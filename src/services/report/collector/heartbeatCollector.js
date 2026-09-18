@@ -151,15 +151,18 @@ from(bucket: "${INFLUX_BUCKET}")
     const uptimePct = Math.round((healthyBuckets / BUCKET_COUNT) * 100);
     const isLive = modTicks.length > 0 ? (now - modTicks[modTicks.length - 1].ts <= thresholds.deadSec * 1000) : (uptimePct > 50);
 
+    const statusLabel = isLive ? 'HEALTHY' : 'DEAD';
     moduleSummaries.push({
       moduleId: mod.id,
       moduleName: mod.name,
       description: mod.description,
       port: mod.port,
       isLive,
-      statusLabel: isLive ? 'HEALTHY' : 'DEAD',
+      status: statusLabel,
+      statusLabel,
       uptimePct,
       totalPacketsLastHour: modTicks.length,
+      totalPackets1h: modTicks.length,
       totalPacketsToday: modTicks.length * 8,
       latestHb: modTicks.length > 0 ? modTicks[modTicks.length - 1].hb : null,
       lastSeenSecondsAgo: modTicks.length > 0 ? Math.round((now - modTicks[modTicks.length - 1].ts) / 1000) : 9999,

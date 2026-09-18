@@ -179,7 +179,9 @@ async function resolvePodId(masterPool, podServer) {
   }
 
   // 3. Try matching digits in name or code (e.g. POD 36 -> code 36)
-  const digits = (podServer.name.match(/\d+/) || [])[0] || (podServer.code.match(/\d+/) || [])[0];
+  const nameDigits = podServer.name ? (String(podServer.name).match(/\d+/) || [])[0] : null;
+  const codeDigits = podServer.code ? (String(podServer.code).match(/\d+/) || [])[0] : null;
+  const digits = nameDigits || codeDigits;
   if (digits) {
     try {
       const res = await masterPool.query(
