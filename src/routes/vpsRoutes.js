@@ -23,6 +23,7 @@ const tncSyncController = require('../controllers/tncSyncController');
 const masterCrudController = require('../controllers/masterCrudController');
 const regenesisLogController = require('../controllers/regenesisLogController');
 const podLogsSyncController = require('../controllers/podLogsSyncController');
+const podLogsExtractorController = require('../controllers/podLogsExtractorController');
 const podActivityController = require('../controllers/podActivityController');
 const flowEditorStorageController = require('../controllers/flowEditorStorageController');
 const directS3Controller = require('../controllers/directS3Controller');
@@ -276,6 +277,11 @@ router.get('/pod-logs-sync/activity-types', requireAuth, podLogsSyncController.g
 router.get('/pod-logs-sync/compare-pod', requireAuth, podLogsSyncController.comparePod);
 router.post('/pod-logs-sync/sync-single-row', requireAuth, podLogsSyncController.syncSingleRow);
 router.get('/pod-logs-sync/pod-uuid-map', requireAuth, podLogsSyncController.getPodUuidMapController);
+
+// POD Logs Extractor (Batch Extraction to pod_logs_extracted, play_sesion_detail, auth_detail)
+router.get('/pod-logs-extractor/masters', requireAuth, podLogsExtractorController.getMasters);
+router.get('/pod-logs-extractor/stats', requireAuth, podLogsExtractorController.getStats);
+router.post('/pod-logs-extractor/execute', requireAuth, podLogsExtractorController.execute);
 
 // POD Activity (Real-Time Occupancy mod_chair/pob_state & Heartbeat Modules)
 router.get('/pod-activity/status', optionalAuth, podActivityController.getStatus);
