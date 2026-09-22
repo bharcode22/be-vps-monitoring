@@ -181,6 +181,7 @@ function recordHeartbeatPacket({ serverId, serverName, moduleId, hb, port = null
   }
 
   // 2. Module recovered from FROZEN (counter resumed incrementing)
+  const isAdvancing = currentHbNum !== null && (prevHbNum === null || currentHbNum !== prevHbNum);
   if (wasFrozen && !isFrozen && frozenAlertSent && isAdvancing) {
     frozenAlertSent = false;
     logIncidentAlert({
@@ -381,7 +382,7 @@ async function logIncidentAlert(alert) {
       diagnosticHint,
       pingMs,
       alert.recoveryType || null,
-      alert.beforeHb || null,
+      (alert.beforeHb !== undefined && alert.beforeHb !== null) ? alert.beforeHb : null,
       alert.hbDiff || null
     ]);
   } catch (_) { }
@@ -458,10 +459,10 @@ function queueRecoveredTelegramAlert(alert) {
 
       try {
         if (current.modules.length === 1) {
-          console.log(`[Watchdog] 📤 Mengirim alert Telegram RECOVERED untuk Pod ${serverId} Modul ${current.modules[0].moduleId}...`);
+          console.log(`[Watchdog] 📤 Mengirim alert Telegram RECOVERED untuk ${current.serverName || `Pod ${serverId}`} Modul ${current.modules[0].moduleId}...`);
           await sendRecoveredHeartbeatAlert(current.modules[0]);
         } else {
-          console.log(`[Watchdog] 📤 Mengirim alert Telegram Batch RECOVERED untuk Pod ${serverId} (${current.modules.length} modul)...`);
+          console.log(`[Watchdog] 📤 Mengirim alert Telegram Batch RECOVERED untuk ${current.serverName || `Pod ${serverId}`} (${current.modules.length} modul)...`);
           await sendBatchRecoveredHeartbeatAlert({
             serverId,
             serverName: current.serverName,

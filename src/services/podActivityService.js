@@ -311,7 +311,6 @@ function connectPodMqtt(pod) {
       'pod/+/2.0/mod_chair/humidity',
       'pod/+/mod_chair/humidity',
       'mod_chair/humidity',
-      'mod_server/+/data',
       'mod_server/#'
     ];
 
@@ -384,7 +383,9 @@ function connectPodMqtt(pod) {
             queueHeartbeatBatchTick(pod.id, modId, hbVal, parsed?.port || null, parsed);
           }
         }
-      } catch (_) { }
+      } catch (err) {
+        console.warn(`[Watchdog Ingestion Error on ${pod.name}]:`, err.message);
+      }
     }
 
     // Only process occupancy state if the topic is specifically mod_chair/pob_state
