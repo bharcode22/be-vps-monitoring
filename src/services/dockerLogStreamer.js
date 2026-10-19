@@ -1,10 +1,7 @@
-const jwt = require('jsonwebtoken');
 const { Client } = require('ssh2');
 const { spawn } = require('child_process');
 const dbAsync = require('./db');
 const { decrypt } = require('../utils/crypto');
-
-const JWT_SECRET = process.env.JWT_SECRET;
 
 // Track active streams per socket: Map<socketId, { conn, stream, process }>
 const activeStreams = new Map();
@@ -12,27 +9,10 @@ const activeStreams = new Map();
 function registerDockerStreamHandlers(socket, io) {
   socket.on('docker:start-stream', async (data) => {
     try {
-      const { serverId, containerName, token } = data || {};
-
-      // 1. Verify JWT token
-      if (!token) {
-        return socket.emit('docker:stream-error', { error: 'Otentikasi token diperlukan.' });
-      }
-
-      let decoded;
-      try {
-        decoded = jwt.verify(token, JWT_SECRET);
-      } catch (e) {
-        return socket.emit('docker:stream-error', { error: 'Token otentikasi tidak valid.' });
-      }
+      const { serverId, containerName } = data || {};
 
       if (!serverId || !containerName) {
         return socket.emit('docker:stream-error', { error: 'Parameter serverId dan containerName harus diisi.' });
-      }
-
-      const user = await dbAsync.get('SELECT * FROM users WHERE id = ?', [decoded.id]);
-      if (!user || user.status !== 'approved') {
-        return socket.emit('docker:stream-error', { error: 'Akses ditolak. Akun belum disetujui.' });
       }
 
       // Stop any existing stream for this socket

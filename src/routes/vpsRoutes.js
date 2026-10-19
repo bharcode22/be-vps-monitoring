@@ -236,11 +236,11 @@ router.put('/vps/:id', requireAuth, vpsController.updateServer);
 router.delete('/vps/:id', requireAuth, vpsController.deleteServer);
 
 // Docker management
-router.get('/vps/:id/docker', requireAuth, dockerController.getContainers);
-router.post('/vps/:id/docker/restart', requireAuth, dockerController.restartContainer);
-router.post('/vps/:id/docker/stop', requireAuth, dockerController.stopContainer);
-router.post('/vps/:id/docker/remove', requireAuth, dockerController.removeContainer);
-router.get('/vps/:id/docker/:containerName/logs', requireAuth, dockerController.getContainerLogs);
+router.get('/vps/:id/docker', optionalAuth, dockerController.getContainers);
+router.post('/vps/:id/docker/restart', dockerController.restartContainer);
+router.post('/vps/:id/docker/stop', dockerController.stopContainer);
+router.post('/vps/:id/docker/remove', dockerController.removeContainer);
+router.get('/vps/:id/docker/:containerName/logs', optionalAuth, dockerController.getContainerLogs);
 
 // Screen Apps (Native Linux GUI) management
 router.get('/vps/:id/screen-apps', requireAuth, screenAppController.getScreenApps);
@@ -282,6 +282,12 @@ router.get('/pod-logs-sync/pod-uuid-map', requireAuth, podLogsSyncController.get
 router.get('/pod-logs-extractor/masters', requireAuth, podLogsExtractorController.getMasters);
 router.get('/pod-logs-extractor/stats', requireAuth, podLogsExtractorController.getStats);
 router.post('/pod-logs-extractor/execute', requireAuth, podLogsExtractorController.execute);
+router.get('/pod-logs-extractor/monitoring/summary', requireAuth, podLogsExtractorController.getMonitoringSummary);
+router.get('/pod-logs-extractor/monitoring/details', requireAuth, podLogsExtractorController.getMonitoringDetails);
+router.get('/pod-logs-extractor/monitoring/insights', requireAuth, podLogsExtractorController.getExperienceInsights);
+router.get('/pod-logs-extractor/cleanup/preview', requireAuth, podLogsExtractorController.getCleanupPreview);
+router.get('/pod-logs-extractor/cleanup/records', requireAuth, podLogsExtractorController.getCleanupRecords);
+router.post('/pod-logs-extractor/cleanup/execute', requireAuth, podLogsExtractorController.executeCleanup);
 
 // POD Activity (Real-Time Occupancy mod_chair/pob_state & Heartbeat Modules)
 router.get('/pod-activity/status', optionalAuth, podActivityController.getStatus);

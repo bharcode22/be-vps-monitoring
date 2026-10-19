@@ -1,7 +1,13 @@
 const {
   getMasterDatabases,
   getExtractorStats,
-  executeExtraction
+  executeExtraction,
+  getSessionMonitoringSummary,
+  getSessionMonitoringDetails,
+  getExperienceInsightsData,
+  getOrphanCleanupPreview,
+  getOrphanCleanupRecords,
+  executeOrphanCleanup
 } = require('../services/podLogsExtractorService');
 
 /**
@@ -120,8 +126,134 @@ async function execute(req, res) {
   }
 }
 
+/**
+ * 4. GET /api/pod-logs-extractor/monitoring/summary
+ * Aggregate user & session monitoring data by date and/or POD
+ */
+async function getMonitoringSummary(req, res) {
+  try {
+    const { masterId = 5, podId, dateFrom, dateTo, groupByPod } = req.query;
+    const data = await getSessionMonitoringSummary({
+      masterId: parseInt(masterId, 10) || 5,
+      podId: podId || null,
+      dateFrom: dateFrom || null,
+      dateTo: dateTo || null,
+      groupByPod: groupByPod === 'true' || groupByPod === true
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('Error fetching monitoring summary:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * 5. GET /api/pod-logs-extractor/monitoring/details
+ * Fetch individual session drilldown rows for a selected date/POD
+ */
+async function getMonitoringDetails(req, res) {
+  try {
+    const { masterId = 5, podId, date, page = 1, limit = 50, search = '' } = req.query;
+    const data = await getSessionMonitoringDetails({
+      masterId: parseInt(masterId, 10) || 5,
+      podId: podId || null,
+      date: date || null,
+      page: parseInt(page, 10) || 1,
+      limit: parseInt(limit, 10) || 50,
+      search: search || ''
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('Error fetching monitoring details:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * 6. GET /api/pod-logs-extractor/monitoring/insights
+ * Fetch comprehensive Experience Analytics (Top songs, per-pod stats, hourly peaks, completion)
+ */
+async function getExperienceInsights(req, res) {
+  try {
+    const { masterId = 5, podId, dateFrom, dateTo } = req.query;
+    const data = await getExperienceInsightsData({
+      masterId: parseInt(masterId, 10) || 5,
+      podId: podId || null,
+      dateFrom: dateFrom || null,
+      dateTo: dateTo || null
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('Error fetching experience insights:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * 7. GET /api/pod-logs-extractor/cleanup/preview
+ * Preview orphan pod records count in Master DB
+ */
+async function getCleanupPreview(req, res) {
+  try {
+    const { masterId = 5 } = req.query;
+    const data = await getOrphanCleanupPreview({
+      masterId: parseInt(masterId, 10) || 5
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('Error fetching cleanup preview:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * 8. POST /api/pod-logs-extractor/cleanup/execute
+ * Execute cleanup of orphan / unregistered pod records in Master DB
+ */
+async function executeCleanup(req, res) {
+  try {
+    const { masterId = 5, cleanExtracted = true, cleanRawLogs = false } = req.body || {};
+    const result = await executeOrphanCleanup({
+      masterId: parseInt(masterId, 10) || 5,
+      cleanExtracted: cleanExtracted === true || cleanExtracted === 'true',
+      cleanRawLogs: cleanRawLogs === true || cleanRawLogs === 'true'
+    });
+    res.json({ success: true, data: result });
+  } catch (err) {
+    console.error('Error executing orphan cleanup:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * 9. GET /api/pod-logs-extractor/cleanup/records
+ * Fetch detailed paginated orphan records for inspection prior to cleanup
+ */
+async function getCleanupRecords(req, res) {
+  try {
+    const { masterId = 5, table = 'play_sesion_detail', page = 1, limit = 20, search = '' } = req.query;
+    const data = await getOrphanCleanupRecords({
+      masterId: parseInt(masterId, 10) || 5,
+      table: String(table || 'play_sesion_detail'),
+      page: parseInt(page, 10) || 1,
+      limit: parseInt(limit, 10) || 20,
+      search: String(search || '')
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('Error fetching cleanup records:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 module.exports = {
   getMasters,
   getStats,
-  execute
+  execute,
+  getMonitoringSummary,
+  getMonitoringDetails,
+  getExperienceInsights,
+  getCleanupPreview,
+  getCleanupRecords,
+  executeCleanup
 };
